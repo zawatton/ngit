@@ -1,0 +1,60 @@
+#+TITLE: ngit read-only core (git in NeLisp)
+
+* S1 Native layer and loose objects
+
+** S1.1 libz uncompress2 loads through nl-ffi and inflates a loose commit
+cmd: sh test/compare.sh basic
+
+** S1.2 Every loose object of the fixture inflates and matches its SHA-1
+#+TIMEOUT: 300
+cmd: sh test/compare.sh all-objects
+
+** S1.3 cat-file -t/-s/-p/-e/<type> match git on loose and packed fixtures
+#+TIMEOUT: 300
+cmd: sh test/compare.sh cat
+
+* S2 Refs and revisions
+
+** S2.1 rev-parse (refs, tags, packed-refs, ~ ^N ^{} :path, short names) matches git
+#+TIMEOUT: 300
+cmd: sh test/compare.sh rev
+
+** S2.2 Linked worktree (gitfile + commondir) resolves HEAD, refs and toplevel like git
+#+TIMEOUT: 120
+cmd: sh test/compare.sh worktree
+
+** S2.3 rev-parse, cat-file -p and log on the real Notes repository match git
+#+TIMEOUT: 300
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/compare.sh real
+
+* S3 Packfiles
+
+** S3.1 The packed fixture contains delta chains and every object reads back SHA-verified
+#+TIMEOUT: 300
+cmd: sh test/compare.sh deltas
+
+** S3.2 log over a 640MB multi-pack repository finishes -n 30 within 10 seconds
+#+TIMEOUT: 60
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/perf.sh "$NGIT_REAL_REPO" 10 log -n 30
+
+** S3.3 ls-tree HEAD on the real repository finishes within 5 seconds
+#+TIMEOUT: 60
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/perf.sh "$NGIT_REAL_REPO" 5 ls-tree HEAD
+
+* S4 Commands
+
+** S4.1 ls-tree (-r, -t, --name-only, C-quoted non-ASCII paths) matches git
+#+TIMEOUT: 300
+cmd: sh test/compare.sh ls-tree
+
+** S4.2 log (medium, raw, -n, multiple revs, merges, tie order) matches git
+#+TIMEOUT: 300
+cmd: sh test/compare.sh log
+
+** S4.3 ls-tree -r HEAD over the whole real repository matches git within 300 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/perf.sh "$NGIT_REAL_REPO" 300 ls-tree -r HEAD --compare

@@ -1,0 +1,53 @@
+#+TITLE: ngit — git implemented in NeLisp
+
+A read-only git implementation that runs on the NeLisp standalone runtime
+(=target/nelisp=).  Output is byte-identical to git for the supported
+commands, verified by =test/compare.sh= against real git.
+
+* Usage
+
+#+begin_src sh
+bin/ngit [-C DIR] rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] REV...
+bin/ngit [-C DIR] symbolic-ref [--short] [HEAD]
+bin/ngit [-C DIR] cat-file (-t | -s | -p | -e | TYPE) OBJECT
+bin/ngit [-C DIR] ls-tree [-r] [-t] [--name-only] TREE-ISH
+bin/ngit [-C DIR] log [-n N | -N] [--format=raw] [REV...]
+#+end_src
+
+=NGIT_NELISP= selects the runtime binary (default =nelisp= on PATH) and
+=NGIT_NELISP_ROOT= the NeLisp checkout providing =packages/nl-ffi=
+(default: =../nelisp= next to this repository).
+
+* Design
+
+- =lisp/ngit-native.el= — file reads via =syscall-direct= into reusable
+  mmap buffers, zlib inflate via libz =uncompress2= through the nl-ffi dlsym
+  path (compression is in the approved FFI scope).  Linux x86_64 only.
+- =lisp/ngit-store.el= — repository/worktree discovery, loose objects, pack
+  index v2 lookup (lazy fanout, per-first-byte name slices), pack entries
+  with OFS_DELTA/REF_DELTA, delta application, commit/tree parsing.
+- =lisp/ngit-rev.el= — loose/packed/symbolic refs and gitrevisions subset.
+- =lisp/ngit-cli.el= — commands and git-compatible formatting (C-style path
+  quoting, default date format, automatic abbreviation length).
+
+** NeLisp performance notes
+
+The interpreter costs tens of microseconds per primitive call, and several
+primitives scale with the whole string length.  Measured on 2026-10-17:
+=string-search= with a START argument ~3–25 ms, =format= ~0.7 ms, a
+regexp match ~1–17 ms, an =aref= a few µs.  Hot paths therefore use =aref=
+loops and lookup tables instead of =string-search=, =format= and regexps.
+
+* Tests
+
+#+begin_src sh
+sh test/compare.sh SUITE   # basic rev cat all-objects deltas worktree ls-tree log
+NGIT_REAL_REPO=/path/to/repo sh test/compare.sh real
+bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Notes
+#+end_src
+
+* Not supported yet
+
+Index (=status=, =diff=), writes, network, alternates, multi-pack-index,
+reftable, SHA-256 repositories, path filters for =ls-tree=, other log
+formats and options.
