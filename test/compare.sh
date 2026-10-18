@@ -1,15 +1,21 @@
 #!/bin/sh
 # Compare ngit against git for one suite of commands; exit 0 iff all match.
 # Usage: test/compare.sh SUITE   (SUITE: basic, rev, cat, all-objects,
-#        deltas, worktree, ls-tree, log, real)
+#        deltas, worktree, ls-tree, log, index, attr-config, diff, status,
+#        status-long, real, real-diff)
 # Fixtures are rebuilt into $NGIT_FIXTURE_DIR (default: $TMPDIR/ngit-fixtures)
-# when missing.  The `real` suite runs against $NGIT_REAL_REPO.
+# when missing.  The `real` and `real-diff` suites run against
+# $NGIT_REAL_REPO.  git must not refresh the index while comparing, or
+# stat-dirty entries would look clean to ngit afterwards.
 set -u
 root=$(cd "$(dirname "$0")/.." && pwd)
 ngit="$root/bin/ngit"
 fx=${NGIT_FIXTURE_DIR:-${TMPDIR:-/tmp}/ngit-fixtures}
 [ -d "$fx/wt" ] || sh "$root/test/make-fixture.sh" "$fx" >/dev/null 2>&1 || {
   echo "fixture build failed"; exit 2; }
+[ -d "$fx/st-staged-only" ] || sh "$root/test/make-wt-fixture.sh" "$fx" >/dev/null 2>&1 || {
+  echo "work tree fixture build failed"; exit 2; }
+export GIT_OPTIONAL_LOCKS=0
 fail=0
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
@@ -108,6 +114,55 @@ case $1 in
     check "$r" log --format=raw -n 10
     check "$r" ls-tree HEAD
     check "$r" cat-file -p HEAD ;;
+  index)
+    for r in "$fx/loose" "$fx/packed" "$fx/dirty" "$fx/v4" "$fx/wt"; do
+      check "$r" ls-files
+      check "$r" ls-files -s
+    done ;;
+  attr-config)
+    r=$fx/dirty
+    for k in core.autocrlf core.filemode remote.origin.url branch.main.merge \
+             submodule.sub1.url user.name nosuch.key; do
+      check "$r" config --get "$k"
+    done
+    check "$r" check-attr text eol diff merge binary -- bin.dat crlf.txt eol.crlf \
+      a.txt sub/x.txt sub/deep/y.txt "日本語ディレクトリ/ファイル.txt" ;;
+  diff)
+    for r in "$fx/dirty" "$fx/v4"; do
+      check "$r" diff
+      check "$r" diff --cached
+      check "$r" diff HEAD
+      check "$r" diff --name-only
+      check "$r" diff --name-status HEAD
+      check "$r" diff --cached --name-status
+      check "$r" diff -U1
+      check "$r" diff -U0 HEAD
+      check "$r" diff --no-renames --cached
+    done
+    for r in "$fx/loose" "$fx/packed"; do
+      check "$r" diff HEAD~2 HEAD
+      check "$r" diff main side
+      check "$r" diff v1.0 HEAD
+      check "$r" diff HEAD~5 HEAD
+      check "$r" diff --name-status HEAD~5 HEAD
+      check "$r" diff -U5 HEAD~4..HEAD
+    done
+    check "$fx/dirty" diff HEAD~2 HEAD
+    check "$fx/dirty" diff origin/main HEAD ;;
+  status)
+    for r in "$fx/dirty" "$fx/v4" "$fx/loose" "$fx/wt" "$fx/st-empty" "$fx/st-ahead"; do
+      check "$r" status --porcelain
+      check "$r" status -s
+    done ;;
+  status-long)
+    for r in "$fx"/st-* "$fx/dirty" "$fx/v4" "$fx/loose" "$fx/wt"; do
+      check "$r" status
+    done ;;
+  real-diff)
+    r=${NGIT_REAL_REPO:?set NGIT_REAL_REPO}
+    check "$r" diff HEAD~3 HEAD
+    check "$r" diff --cached
+    check "$r" diff ;;
   *) echo "unknown suite $1"; exit 2 ;;
 esac
 exit $fail

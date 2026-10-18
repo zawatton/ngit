@@ -356,7 +356,12 @@ Each object is also verified against its SHA-1 before it is printed."
     ("symbolic-ref" . ngit-cmd-symbolic-ref)
     ("cat-file" . ngit-cmd-cat-file)
     ("ls-tree" . ngit-cmd-ls-tree)
-    ("log" . ngit-cmd-log)))
+    ("log" . ngit-cmd-log)
+    ("ls-files" . ngit-cmd-ls-files)
+    ("config" . ngit-cmd-config)
+    ("check-attr" . ngit-cmd-check-attr)
+    ("status" . ngit-cmd-status)
+    ("diff" . ngit-cmd-diff)))
 
 (defun ngit-main (args)
   "Run the git-style command line ARGS; return the exit status."

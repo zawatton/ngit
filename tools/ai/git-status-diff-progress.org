@@ -1,0 +1,46 @@
+#+TITLE: ngit status and diff (git in NeLisp, stage 2)
+
+* S1 Index, config and attributes
+
+** S1.1 ls-files and ls-files -s match git on fixtures with index v2, v3 (intent-to-add) and v4
+#+TIMEOUT: 300
+cmd: sh test/compare.sh index
+
+** S1.2 config --get and check-attr (binary macro, text, eol, -text in subdirectories) match git
+#+TIMEOUT: 300
+cmd: sh test/compare.sh attr-config
+
+** S1.3 ls-files -s over the real repository index matches git within 60 seconds
+#+TIMEOUT: 300
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/perf.sh "$NGIT_REAL_REPO" 60 ls-files -s --compare
+
+* S2 Diff
+
+** S2.1 The xdiff port produces hunks identical to git diff --no-index on 300 generated file pairs
+#+TIMEOUT: 600
+cmd: sh test/xdiff-fuzz.sh 300
+
+** S2.2 diff (worktree, --cached, REV, A B, -U, name-only/status, binary, mode, symlink, rename, CRLF, gitlink) matches git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh diff
+
+** S2.3 diff HEAD~3 HEAD, diff --cached and diff on the real repository match git
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/compare.sh real-diff
+
+* S3 Status
+
+** S3.1 status --porcelain and -s (staged, unstaged, untracked dirs, ignored, touched, CRLF, submodule) match git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh status
+
+** S3.2 Long status (up to date, ahead, behind, diverged, gone, no upstream, detached, no commits, clean) matches git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh status-long
+
+** S3.3 status and status --porcelain on the real repository match git within 120 seconds each
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/perf.sh "$NGIT_REAL_REPO" 120 status --compare && sh test/perf.sh "$NGIT_REAL_REPO" 120 status --porcelain --compare

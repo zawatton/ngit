@@ -1,6 +1,7 @@
 #+TITLE: ngit — git implemented in NeLisp
 
-A read-only git implementation that runs on the NeLisp standalone runtime
+A git implementation (read-only: object store, refs, index and work tree
+inspection) that runs on the NeLisp standalone runtime
 (=target/nelisp=).  Output is byte-identical to git for the supported
 commands, verified by =test/compare.sh= against real git.
 
@@ -12,6 +13,11 @@ bin/ngit [-C DIR] symbolic-ref [--short] [HEAD]
 bin/ngit [-C DIR] cat-file (-t | -s | -p | -e | TYPE) OBJECT
 bin/ngit [-C DIR] ls-tree [-r] [-t] [--name-only] TREE-ISH
 bin/ngit [-C DIR] log [-n N | -N] [--format=raw] [REV...]
+bin/ngit [-C DIR] ls-files [-s]
+bin/ngit [-C DIR] status [-s | --porcelain]
+bin/ngit [-C DIR] diff [--cached] [-U N] [--name-only | --name-status] [--no-renames] [REV [REV] | A..B]
+bin/ngit [-C DIR] config --get KEY
+bin/ngit [-C DIR] check-attr ATTR... -- PATH...
 #+end_src
 
 =NGIT_NELISP= selects the runtime binary (default =nelisp= on PATH) and
@@ -29,6 +35,16 @@ bin/ngit [-C DIR] log [-n N | -N] [--format=raw] [REV...]
 - =lisp/ngit-rev.el= — loose/packed/symbolic refs and gitrevisions subset.
 - =lisp/ngit-cli.el= — commands and git-compatible formatting (C-style path
   quoting, default date format, automatic abbreviation length).
+- =lisp/ngit-config.el= — system/global/repository config, last one wins.
+- =lisp/ngit-match.el= — wildmatch port, .gitignore and .gitattributes.
+- =lisp/ngit-index.el= — index v2/v3/v4 and the cache-tree extension.
+- =lisp/ngit-worktree.el= — lstat/open/readlink by syscall, end-of-line
+  conversion (core.autocrlf, text/eol attributes, safer autocrlf).
+- =lisp/ngit-changes.el= — tree/tree, tree/index (cache-tree skipping),
+  index/work tree, untracked walk, submodule dirtiness, exact renames.
+- =lisp/ngit-xdiff.el= — port of git's xdiff (Myers with git's heuristics,
+  indent heuristic, function-name hunk headers).
+- =lisp/ngit-status.el=, =lisp/ngit-diff.el= — status and diff output.
 
 ** NeLisp performance notes
 
@@ -42,12 +58,17 @@ loops and lookup tables instead of =string-search=, =format= and regexps.
 
 #+begin_src sh
 sh test/compare.sh SUITE   # basic rev cat all-objects deltas worktree ls-tree log
+                           # index attr-config diff status status-long
+sh test/xdiff-fuzz.sh 300  # xdiff port against git diff --no-index
 NGIT_REAL_REPO=/path/to/repo sh test/compare.sh real
 bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Notes
 #+end_src
 
 * Not supported yet
 
-Index (=status=, =diff=), writes, network, alternates, multi-pack-index,
-reftable, SHA-256 repositories, path filters for =ls-tree=, other log
-formats and options.
+Writes, network, alternates, multi-pack-index, reftable, SHA-256
+repositories, pathspecs, inexact (similarity) renames and copies,
+unmerged entries, =-uall=/ignored listings, include/includeIf in config,
+custom attribute macros and diff drivers, running from a subdirectory
+(paths are always printed relative to the top, not to the current
+directory), other log formats and options.

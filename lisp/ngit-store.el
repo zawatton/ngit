@@ -77,7 +77,8 @@ the whole string in NeLisp."
 
 ;;;; Repository
 
-;; A repo is a vector [GITDIR COMMONDIR TOPLEVEL PACKS PACKED-REFS].
+;; A repo is a vector [GITDIR COMMONDIR TOPLEVEL PACKS PACKED-REFS - INDEX
+;; ATTR-CACHE].
 
 (defun ngit-repo-gitdir (repo) (aref repo 0))
 (defun ngit-repo-commondir (repo) (aref repo 1))
@@ -96,7 +97,7 @@ the whole string in NeLisp."
                       (expand-file-name (ngit--trim-eol (ngit--read-file cfile))
                                         gitdir))
                    gitdir)))
-    (vector gitdir common toplevel nil nil)))
+    (vector gitdir common toplevel nil nil nil nil nil)))
 
 (defun ngit-discover (&optional dir)
   "Return the repository containing DIR (default `default-directory').
