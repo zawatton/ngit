@@ -1,7 +1,7 @@
 #+TITLE: ngit — git implemented in NeLisp
 
-A git implementation (read-only: object store, refs, index and work tree
-inspection) that runs on the NeLisp standalone runtime
+A git implementation (object store, refs, index and work tree inspection,
+plus add and commit) that runs on the NeLisp standalone runtime
 (=target/nelisp=).  Output is byte-identical to git for the supported
 commands, verified by =test/compare.sh= against real git.
 
@@ -18,7 +18,16 @@ bin/ngit [-C DIR] status [-s | --porcelain]
 bin/ngit [-C DIR] diff [--cached] [-U N] [--name-only | --name-status] [--no-renames] [REV [REV] | A..B]
 bin/ngit [-C DIR] config --get KEY
 bin/ngit [-C DIR] check-attr ATTR... -- PATH...
+bin/ngit [-C DIR] add [-v] [-n] [-f] [-N] [-A | -u] [--] [PATH...]
+bin/ngit [-C DIR] commit [-q] [-a] [--allow-empty] [--allow-empty-message]
+                         [--amend [--no-edit]] (-m MSG... | -F FILE)
+bin/ngit [-C DIR] hash-object [-w] [-t TYPE] [--no-filters] FILE...
+bin/ngit [-C DIR] write-tree
+bin/ngit [-C DIR] update-index --force-write-index
 #+end_src
+
+=bin/ngit= passes each argument with an "@" prefix because the NeLisp
+runtime drops =-q=, =-Q=, =--batch= and =--no-init-file= even after =--=.
 
 =NGIT_NELISP= selects the runtime binary (default =nelisp= on PATH) and
 =NGIT_NELISP_ROOT= the NeLisp checkout providing =packages/nl-ffi=
@@ -45,6 +54,17 @@ bin/ngit [-C DIR] check-attr ATTR... -- PATH...
 - =lisp/ngit-xdiff.el= — port of git's xdiff (Myers with git's heuristics,
   indent heuristic, function-name hunk headers).
 - =lisp/ngit-status.el=, =lisp/ngit-diff.el= — status and diff output.
+- =lisp/ngit-write.el= — loose objects (zlib =compress2= at
+  core.looseCompression, default 1 as in git), locks, the index writer
+  (byte-identical to git: version choice, v4 names, racy-clean smudge,
+  TREE extension) and the cache-tree update behind write-tree and commit.
+- =lisp/ngit-add.el= — add: tracked updates (stat-dirty entries are
+  rehashed and invalidate their cache-tree path, as in git), untracked
+  files below literal pathspecs, ignored-path errors, nested repositories
+  as gitlinks.
+- =lisp/ngit-commit.el= — commit: index refresh, -a, COMMIT_EDITMSG,
+  commit object, ref and reflog updates, the summary (shortstat, create/
+  delete/rename/mode lines), local time zone from TZif files.
 
 ** NeLisp performance notes
 
@@ -53,12 +73,17 @@ primitives scale with the whole string length.  Measured on 2026-10-17:
 =string-search= with a START argument ~3–25 ms, =format= ~0.7 ms, a
 regexp match ~1–17 ms, an =aref= a few µs.  Hot paths therefore use =aref=
 loops and lookup tables instead of =string-search=, =format= and regexps.
+=puthash= with a vector key in an =eq= table costs ~1 ms (an integer key
+~13 µs), so per-entry sets are keyed by index positions.
 
 * Tests
 
 #+begin_src sh
 sh test/compare.sh SUITE   # basic rev cat all-objects deltas worktree ls-tree log
                            # index attr-config diff status status-long
+                           # write-objects index-write write-tree add add-all
+                           # commit commit-output
+sh test/real-write.sh /path/to/repo (tree|add|commit) LIMIT  # on a clone
 sh test/xdiff-fuzz.sh 300  # xdiff port against git diff --no-index
 NGIT_REAL_REPO=/path/to/repo sh test/compare.sh real
 bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Notes
@@ -66,9 +91,13 @@ bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Note
 
 * Not supported yet
 
-Writes, network, alternates, multi-pack-index, reftable, SHA-256
-repositories, pathspecs, inexact (similarity) renames and copies,
-unmerged entries, =-uall=/ignored listings, include/includeIf in config,
+Network, alternates, multi-pack-index, reftable, split or sparse
+indexes, SHA-256 repositories, glob and magic pathspecs, inexact
+(similarity) renames and copies, unmerged entries, hooks, commit
+signing, an editor for commit messages (use -m or -F), commit with
+paths, guessed identities (user.name and user.email or the GIT_*
+variables must be set), date formats other than raw and ISO 8601 in
+GIT_*_DATE, index.version for new indexes, =-uall=/ignored listings, include/includeIf in config,
 custom attribute macros and diff drivers, running from a subdirectory
 (paths are always printed relative to the top, not to the current
 directory), other log formats and options.

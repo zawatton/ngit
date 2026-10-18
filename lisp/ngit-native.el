@@ -31,6 +31,10 @@
   [:sint32 :pointer :pointer :pointer :pointer]
   "uncompress2(dest, &destLen, source, &sourceLen).")
 
+(ffi:defun ngit-native--compress2 "compress2"
+  [:sint32 :pointer :pointer :pointer :uint64 :sint32]
+  "compress2(dest, &destLen, source, sourceLen, level).")
+
 (defconst ngit-native--sys-close 3)
 (defconst ngit-native--sys-open 2)
 (defconst ngit-native--sys-pread64 17)
@@ -180,6 +184,23 @@ Return (DATA . CONSUMED-COMPRESSED-BYTES)."
       (error "ngit: inflated %d bytes, expected %d (%s at %d)"
              (length (car result)) size path offset))
     result))
+
+(defun ngit-native-deflate-file (path len level)
+  "Return the first LEN bytes of PATH compressed as one zlib stream.
+The data goes through a file because copying a Lisp string into
+native memory costs a primitive call per four bytes."
+  (let* ((src (ngit-native--buffer 0 len))
+         (n (prog1 (ngit-native--pread path src 0 len)
+              (ngit-native-close path)))
+         (cap (+ n (ash n -12) (ash n -14) 64))
+         (da (nl-ffi-memory-address (ngit-native--buffer 1 cap)))
+         (la (nl-ffi-memory-address (ngit-native--buffer 2 16))))
+    (ptr-write-u64 la 0 cap)
+    (let ((rc (logand (ngit-native--compress2 da la (nl-ffi-memory-address src) n level)
+                      #xffffffff)))
+      (unless (= rc ngit-native--z-ok)
+        (error "ngit: deflate of %s failed (zlib %d)" path rc))
+      (ptr-read-bytes da (ptr-read-u64 la 0)))))
 
 (provide 'ngit-native)
 

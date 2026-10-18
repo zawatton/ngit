@@ -282,12 +282,16 @@ With STOP-AT-FIRST, return as soon as one is found."
       (setq i (1+ i)))
     set))
 
-(defun ngit--walk-untracked (repo top tracked dir stack emit check-only)
+(defvar ngit--no-excludes nil "Non-nil to ignore .gitignore rules (add -f).")
+
+(defun ngit--walk-untracked (repo top tracked dir stack emit check-only &optional expand)
   ;; TRACKED is `ngit--tracked-set'; directories holding tracked files
   ;; are found by binary search, which is cheaper than precomputing them.
   "Report untracked paths under DIR (\"\" or \"a/b/\").  STACK holds the
 ignore pattern lists that apply.  In CHECK-ONLY mode, throw `found' at
-the first untracked path instead of emitting."
+the first untracked path instead of emitting.  With EXPAND, report the
+files of untracked directories instead of the directories; nested
+repositories are still reported as \"dir/\"."
   ;; TOP ends in a slash; `expand-file-name' costs ~2.5 ms in NeLisp.
   (let* ((abs (concat top (decode-coding-string dir 'utf-8)))
          (own (ngit-read-ignore-file (concat (file-name-as-directory abs) ".gitignore") dir))
@@ -298,12 +302,15 @@ the first untracked path instead of emitting."
         (unless (eq (gethash path tracked) t)
           (let* ((st (ngit-wt-lstat path))
                  (isdir (and st (= (logand (aref st 0) ngit-s-ifmt) ngit-s-ifdir))))
-            (when (and st (not (ngit-excluded-p stack path blen isdir)))
+            (when (and st (or ngit--no-excludes (not (ngit-excluded-p stack path blen isdir))))
               (cond
                ((not isdir)
                 (if check-only (throw 'found t) (funcall emit path)))
                ((ngit-index-dir-p (ngit-index-entries repo) (concat path "/"))
-                (ngit--walk-untracked repo top tracked (concat path "/") stack emit check-only))
+                (ngit--walk-untracked repo top tracked (concat path "/") stack emit check-only
+                                      expand))
+               ((and expand (not (ngit-wt-lstat (concat path "/.git"))))
+                (ngit--walk-untracked repo top tracked (concat path "/") stack emit nil t))
                ((or (ngit-wt-lstat (concat path "/.git"))
                     (catch 'found
                       (ngit--walk-untracked repo top tracked (concat path "/") stack nil t)

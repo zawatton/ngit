@@ -2,7 +2,8 @@
 # Compare ngit against git for one suite of commands; exit 0 iff all match.
 # Usage: test/compare.sh SUITE   (SUITE: basic, rev, cat, all-objects,
 #        deltas, worktree, ls-tree, log, index, attr-config, diff, status,
-#        status-long, real, real-diff)
+#        status-long, real, real-diff, write-objects, index-write,
+#        write-tree, add, add-all, commit, commit-output)
 # Fixtures are rebuilt into $NGIT_FIXTURE_DIR (default: $TMPDIR/ngit-fixtures)
 # when missing.  The `real` and `real-diff` suites run against
 # $NGIT_REAL_REPO.  git must not refresh the index while comparing, or
@@ -31,6 +32,62 @@ check() { # check REPO ARGS...
     fail=1
   fi
 }
+
+# Write commands run on a copy of a fixture: git and ngit each start from
+# the same snapshot of .git (the work tree is shared and never written),
+# and the resulting index bytes, refs, reflogs, loose objects, fsck
+# report, stdout and exit status must be identical.
+export GIT_AUTHOR_NAME="Test Author" GIT_AUTHOR_EMAIL=test@example.com
+export GIT_COMMITTER_NAME="Test Author" GIT_COMMITTER_EMAIL=test@example.com
+export GIT_AUTHOR_DATE="1700600000 +0900" GIT_COMMITTER_DATE="1700600000 +0900"
+WENV=
+
+wstate() { # wstate DIR TAG
+  d=$1 t=$2
+  if [ -f "$d/.git/index" ]; then cp "$d/.git/index" "$out/$t.index"; else : >"$out/$t.index"; fi
+  {
+    git -C "$d" rev-parse -q --verify HEAD; git -C "$d" symbolic-ref -q HEAD
+    for f in "$d/.git/logs/HEAD" "$d/.git/COMMIT_EDITMSG"; do
+      [ -f "$f" ] && { echo "== $f"; cat "$f"; }
+    done
+    find "$d/.git/logs/refs" -type f 2>/dev/null | sort | while read -r f; do echo "== $f"; cat "$f"; done
+    (cd "$d/.git" && find objects -type f ! -path '*/pack/*' ! -path '*/info/*' | sort | xargs -r md5sum)
+    find "$d/.git" -maxdepth 3 -name '*.lock'
+    git -C "$d" fsck --no-progress 2>&1
+  } >"$out/$t.state"
+}
+
+wrun() { # wrun SRC SETUP ARGS...
+  src=$1 setup=$2; shift 2
+  w="$out/w"; rm -rf "$w"; cp -a "$src" "$w"
+  (cd "$w" && eval "$setup") >/dev/null 2>&1 || { echo "SETUP FAILED: $setup"; fail=1; return; }
+  rm -rf "$out/snap"; cp -a "$w/.git" "$out/snap"
+  # shellcheck disable=SC2086
+  (cd "$w" && env $WENV git -c gc.auto=0 "$@") >"$out/git.out" 2>/dev/null
+  echo "exit $?" >>"$out/git.out"
+  wstate "$w" git
+  rm -rf "$w/.git"; cp -a "$out/snap" "$w/.git"
+  # shellcheck disable=SC2086
+  (cd "$w" && env $WENV "$ngit" "$@") >"$out/ngit.out" 2>"$out/err"
+  echo "exit $?" >>"$out/ngit.out"
+  wstate "$w" ngit
+  if ! cmp -s "$out/git.out" "$out/ngit.out" || ! cmp -s "$out/git.state" "$out/ngit.state" ||
+     ! cmp -s "$out/git.index" "$out/ngit.index"; then
+    echo "MISMATCH ($(basename "$src")${setup:+; $setup}): $*"
+    diff "$out/git.out" "$out/ngit.out" | head -10
+    diff "$out/git.state" "$out/ngit.state" | head -10
+    if ! cmp -s "$out/git.index" "$out/ngit.index"; then
+      echo "index differs:"
+      cp "$out/git.index" "$w/.git/index"; git -C "$w" ls-files -s --debug >"$out/git.lsd" 2>&1
+      cp "$out/ngit.index" "$w/.git/index"; git -C "$w" ls-files -s --debug >"$out/ngit.lsd" 2>&1
+      diff "$out/git.lsd" "$out/ngit.lsd" | head -16
+    fi
+    head -3 "$out/err"; fail=1
+  fi
+}
+
+R='git update-index -q --refresh'
+NOREPO='rm -rf nested'
 
 objects() { # all object names in REPO
   git -C "$1" cat-file --batch-all-objects --batch-check='%(objectname)'
@@ -163,6 +220,108 @@ case $1 in
     check "$r" diff HEAD~3 HEAD
     check "$r" diff --cached
     check "$r" diff ;;
+  write-objects)
+    wrun "$fx/dirty" "" hash-object a.txt code.c bin.dat crlf.txt "space name.txt" link
+    wrun "$fx/dirty" "echo fresh object > f.txt" hash-object -w f.txt
+    wrun "$fx/dirty" "head -c 300000 /dev/urandom > big.bin; seq 1 50000 > big.txt" hash-object -w big.bin big.txt
+    wrun "$fx/dirty" "git config core.autocrlf input" hash-object -w crlf.txt eol.crlf
+    wrun "$fx/dirty" "git config core.looseCompression 9; seq 1 2000 > s.txt" hash-object -w s.txt
+    wrun "$fx/dirty" "git config core.autocrlf input" hash-object -w --no-filters crlf.txt ;;
+  index-write)
+    for r in "$fx/dirty" "$fx/v4" "$fx/loose" "$fx/st-empty" "$fx/st-staged-only"; do
+      wrun "$r" "" update-index --force-write-index
+      wrun "$r" "$R" update-index --force-write-index
+    done
+    # Racily clean: same size and second as the index, different content.
+    wrun "$fx/st-uptodate" "printf 'aaaa\n' > a.txt && git add a.txt && printf 'bbbb\n' > a.txt" \
+      update-index --force-write-index
+    # Racy entries whose mode changed are stat-dirty, not smudged.
+    wrun "$fx/st-uptodate" "printf 'aaaa\\n' > a.txt && git add a.txt && chmod +x a.txt" \
+      update-index --force-write-index ;;
+  write-tree)
+    for r in "$fx/dirty" "$fx/v4" "$fx/loose" "$fx/st-empty" "$fx/st-staged-only" "$fx/st-uptodate"; do
+      wrun "$r" "" write-tree
+    done
+    wrun "$fx/st-uptodate" "mkdir -p n/m && echo x > n/m/x && git add n && git rm -q --cached b.txt" write-tree
+    wrun "$fx/st-uptodate" "echo y > y && git add -N y && git rm -q -r --cached docs" write-tree
+    wrun "$fx/dirty" "git rm -q -r --cached sub1 docs" write-tree ;;
+  add)
+    for s in "$NOREPO" "$NOREPO; $R"; do
+      wrun "$fx/dirty" "$s" add a.txt
+      wrun "$fx/dirty" "$s" add -v new-then-mod.txt b.txt
+      wrun "$fx/dirty" "$s" add -v docs
+      wrun "$fx/dirty" "$s" add -v link src/run.sh src
+      wrun "$fx/dirty" "$s" add -v crlf.txt eol.crlf bin.dat code.c
+      wrun "$fx/dirty" "$s" add -v ita.txt
+      wrun "$fx/dirty" "$s" add -v sub1 sub2
+      wrun "$fx/dirty" "$s" add -n -v .
+      wrun "$fx/dirty" "$s" add -v "日本語ディレクトリ" "space name.txt" newdir
+      wrun "$fx/dirty" "$s" add -N untracked.txt "untracked space.txt"
+      wrun "$fx/dirty" "$s" add -v docs/x keep.log
+    done
+    wrun "$fx/dirty" "$NOREPO; git config core.autocrlf input" add -v crlf.txt
+    wrun "$fx/dirty" "$NOREPO; git config core.filemode false" add -v docs
+    wrun "$fx/v4" "$R" add -v a.txt extra.txt docs
+    wrun "$fx/st-uptodate" "printf 'aaaa\n' > a.txt && git add a.txt && printf 'bbbb\n' > a.txt" add -v b.txt
+    wrun "$fx/st-uptodate" "printf 'aaaa\n' > a.txt && git add a.txt && printf 'bbbb\n' > a.txt" add -v a.txt
+    wrun "$fx/st-uptodate" "rm -r src && echo f > src" add -v src ;;
+  add-all)
+    for s in "$NOREPO" "$NOREPO; $R"; do
+      wrun "$fx/dirty" "$s" add -A
+      wrun "$fx/dirty" "$s" add -v -A
+      wrun "$fx/dirty" "$s" add -u
+      wrun "$fx/dirty" "$s" add -v -u
+      wrun "$fx/dirty" "$s" add -v .
+      wrun "$fx/dirty" "$s" add -v -u docs src
+    done
+    wrun "$fx/dirty" "git -C nested add x.txt && git -C nested commit -q -m n" add -v -A
+    wrun "$fx/dirty" "" add -A
+    wrun "$fx/dirty" "$NOREPO" add -v foo.log
+    wrun "$fx/dirty" "$NOREPO" add -v build/out.txt
+    wrun "$fx/dirty" "$NOREPO" add -v build
+    wrun "$fx/dirty" "$NOREPO" add -v foo.log a.txt
+    wrun "$fx/dirty" "$NOREPO" add -f -v foo.log build
+    wrun "$fx/dirty" "$NOREPO" add nope a.txt
+    wrun "$fx/dirty" "$NOREPO" add
+    wrun "$fx/v4" "" add -A
+    wrun "$fx/st-empty" "" add -A
+    wrun "$fx/st-empty-clean" "echo x > x && mkdir d && echo y > d/y" add -v . ;;
+  commit)
+    wrun "$fx/st-staged-only" "" commit -m "staged only"
+    wrun "$fx/st-staged-only" "" commit -q -m quiet
+    wrun "$fx/st-empty" "" commit -m "first commit"
+    wrun "$fx/st-empty-clean" "" commit --allow-empty -m "empty root"
+    wrun "$fx/st-uptodate" "" commit --allow-empty -m "nothing changed"
+    wrun "$fx/st-detached-at" "echo d > d.txt && git add d.txt" commit -m "on detached head"
+    wrun "$fx/st-uptodate" "git checkout -q --orphan fresh" commit -m "orphan branch"
+    wrun "$fx/st-staged-only" "" commit -m "  subject line  " -m "" -m "$(printf 'body\n\n\n\nmore  \n\n')"
+    wrun "$fx/st-staged-only" "" commit -m "日本語の件名" -m "本文"
+    wrun "$fx/st-staged-only" "printf '\n\nfrom file\n\n  x\n' > ../msg.txt" commit -F ../msg.txt
+    wrun "$fx/st-staged-only" "" commit -m "$(printf 'two\nline subject\n\nbody')"
+    wrun "$fx/dirty" "$NOREPO" commit -m "dirty index"
+    wrun "$fx/v4" "" commit -m "v4 index"
+    wrun "$fx/st-staged-only" "$R" commit -m refreshed
+    wrun "$fx/st-staged-only" "touch -d 2002-02-02 b.txt" commit -m "stat refresh" ;;
+  commit-output)
+    wrun "$fx/dirty" "$NOREPO" commit -a -m "all changes"
+    wrun "$fx/dirty" "$NOREPO; $R" commit -a -m "all changes"
+    wrun "$fx/st-uptodate" "git mv src/run.sh src/bin-run.sh && mkdir docs/x && git mv docs/long.txt docs/x/long.txt && chmod +x b.txt && git add b.txt" commit -m renames
+    wrun "$fx/st-uptodate" "git rm -q a.txt && git mv b.txt c.txt" commit -m "delete and rename"
+    wrun "$fx/st-uptodate" "" commit -m nothing
+    wrun "$fx/st-ahead" "" commit -m "untracked only"
+    wrun "$fx/st-ahead" "" commit -a -m "untracked only"
+    wrun "$fx/dirty" "git checkout -q -- a.txt" commit -a -m x
+    wrun "$fx/st-staged-only" "" commit -m ""
+    wrun "$fx/st-ahead" "" commit --amend --no-edit
+    wrun "$fx/st-ahead" "" commit --amend -m "amended"
+    wrun "$fx/st-staged-only" "" commit --amend -m "amend with staged"
+    WENV="GIT_AUTHOR_NAME=Someone GIT_AUTHOR_EMAIL=someone@example.com"
+    wrun "$fx/st-staged-only" "" commit -m "other author"
+    wrun "$fx/st-ahead" "" commit --amend --no-edit
+    WENV="GIT_COMMITTER_NAME="
+    wrun "$fx/st-staged-only" "" commit -a -m "no identity"
+    WENV=
+    wrun "$fx/st-uptodate" "seq 1 100 > a.txt && seq 1 2 100 > b.txt && git add a.txt b.txt" commit -m stats ;;
   *) echo "unknown suite $1"; exit 2 ;;
 esac
 exit $fail

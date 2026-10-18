@@ -75,13 +75,14 @@ root) to (ENTRY-COUNT . BIN-OR-NIL)."
 
 (defun ngit-read-index (repo)
   "Return REPO's index as [ENTRIES RAW VERSION CACHE-TREE MTIME-S MTIME-NS
-NATIVE-ADDRESS],
-or an empty index when the file does not exist.  Cached in the repo."
+NATIVE-ADDRESS TREE-RANGE], or an empty index when the file does not
+exist.  Cached in the repo.  TREE-RANGE is (POS . LEN) of the TREE
+extension data in RAW, or nil."
   (or (aref repo 6)
       (aset repo 6
             (let ((file (ngit-index-file repo)))
               (if (not (file-exists-p file))
-                  (vector [] "" 2 nil 0 0 nil)
+                  (vector [] "" 2 nil 0 0 nil nil)
                 (let* ((size (file-attribute-size (file-attributes file)))
                        ;; The index stays in native memory too: its NUL-padded
                        ;; names serve directly as C paths for fstatat(2).
@@ -131,7 +132,7 @@ or an empty index when the file does not exist.  Cached in the repo."
                           (setq tree (cons (+ pos 8) len)))
                         (setq pos (+ pos 8 len))))
                     (vector entries raw version tree (car mtime) (cdr mtime)
-                            (nl-ffi-memory-address native)))))))))
+                            (nl-ffi-memory-address native) tree))))))))
 
 (defun ngit-index-entries (repo) (aref (ngit-read-index repo) 0))
 

@@ -361,7 +361,12 @@ Each object is also verified against its SHA-1 before it is printed."
     ("config" . ngit-cmd-config)
     ("check-attr" . ngit-cmd-check-attr)
     ("status" . ngit-cmd-status)
-    ("diff" . ngit-cmd-diff)))
+    ("diff" . ngit-cmd-diff)
+    ("hash-object" . ngit-cmd-hash-object)
+    ("write-tree" . ngit-cmd-write-tree)
+    ("update-index" . ngit-cmd-update-index)
+    ("add" . ngit-cmd-add)
+    ("commit" . ngit-cmd-commit)))
 
 (defun ngit-main (args)
   "Run the git-style command line ARGS; return the exit status."

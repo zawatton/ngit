@@ -1,0 +1,50 @@
+#+TITLE: ngit add and commit (git in NeLisp, stage 3)
+
+* S1 Object, index and tree writing
+
+** S1.1 hash-object [-w] gives git's names and writes loose objects byte-identical to git's
+#+TIMEOUT: 300
+cmd: sh test/compare.sh write-objects
+
+** S1.2 Rewriting the index (v2, v3 with intent-to-add, v4, TREE extension, racy entries) is byte-identical to git update-index
+#+TIMEOUT: 300
+cmd: sh test/compare.sh index-write
+
+** S1.3 write-tree matches git (valid, invalidated and missing cache-tree, intent-to-add) and leaves the same index
+#+TIMEOUT: 300
+cmd: sh test/compare.sh write-tree
+
+** S1.4 On a clone of the real repository, index rewrite and write-tree match git within 120 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" tree 120
+
+* S2 Add
+
+** S2.1 add FILE/DIR/. (new, modified, deleted, symlink, exec bit, CRLF, intent-to-add, gitlink, -v, -n) leaves an index byte-identical to git's
+#+TIMEOUT: 600
+cmd: sh test/compare.sh add
+
+** S2.2 add -A, -u and the error paths (ignored path, unmatched pathspec, nested repository) match git's index, stdout and exit status
+#+TIMEOUT: 600
+cmd: sh test/compare.sh add-all
+
+** S2.3 add -A on a modified clone of the real repository matches git's index within 150 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" add 150
+
+* S3 Commit
+
+** S3.1 commit -m/-F (root, normal, detached, unborn branch, cleanup, --allow-empty, -q) gives git's commit, ref, reflog and COMMIT_EDITMSG
+#+TIMEOUT: 600
+cmd: sh test/compare.sh commit
+
+** S3.2 commit summary output (create, delete, rename, mode change, stat counts, Author/Date lines, --amend) and nothing-to-commit status match git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh commit-output
+
+** S3.3 commit -a on a modified clone of the real repository gives git's commit and output within 150 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" commit 150
