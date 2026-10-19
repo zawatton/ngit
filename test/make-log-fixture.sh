@@ -9,6 +9,7 @@
 #   DIR/ren        - renames: inexact, same basename, competing candidates,
 #                    mode changes, binary files, CRLF
 #   DIR/ren-limit  - clone of ren with diff.renameLimit 2
+#   DIR/tags       - copy of hist with loose/packed tags on all object types
 # Usage: test/make-log-fixture.sh DIR
 set -eu
 dir=$1
@@ -194,3 +195,77 @@ seq 1 199 > d1.txt; seq 201 399 > d2.txt; seq 401 599 > d3.txt
 commit "renames over the limit"
 cd "$dir" && rm -rf ren-limit && git clone -q ren ren-limit
 git -C ren-limit config diff.renameLimit 2
+
+# Keep non-commit tags out of the history-walking fixtures.
+rm -rf "$dir/tags"
+cp -a "$dir/hist" "$dir/tags"
+cd "$dir/tags"
+export GIT_COMMITTER_DATE="1710800000 +0530"
+git tag v1.2 main~2
+git tag v1.9 main~1
+git tag v1.10 main
+git tag V1.3 main~3
+for version in v1.0-rc1 v1.0+build v1.0.0 v1.01 v1.001 v1.00 v1.000 v1.09 v1.090; do
+  git tag "$version" main
+done
+git tag -a -m "$(printf 'annotation first\nsecond line\n\nbody line\nlast line')" annotated main~2
+git tag -a -m "a much longer tag name" a-tag-name-longer-than-fifteen main~4
+git tag -a -m "日本語の注釈" 日本語 main~3
+git tag -a -m "" empty-message main
+git tag -a -m "$(printf 'signed-looking message\n\n-----BEGIN PGP SIGNATURE-----\nopaque\n-----END PGP SIGNATURE-----')" signed-message main
+git tag tree main^{tree}
+git tag blob main:README.md
+git tag -a -m "annotated tree" annotated-tree main^{tree}
+git tag -a -m "annotated blob" annotated-blob main:README.md
+git -c advice.nestedTag=false tag -a -m "nested annotation" nested annotated
+git tag tag-object annotated
+git pack-refs --all
+git tag loose-tag main~5
+
+# Keep conflict resolutions separate from the history-walking fixtures.
+rm -rf "$dir/show"
+cp -a "$dir/hist" "$dir/show"
+cd "$dir/show"
+git checkout -q -b cc-base main
+seq 1 45 > conflict.txt
+printf 'alpha\nold\nomega\n' > 'space name'
+printf 'old' > no-newline
+printf 'delete base\n' > delete.txt
+printf 'header\nbase\ntail\n' > coalesce.txt
+printf '\000base\n' > combined.bin
+commit "combined base"
+git checkout -q -b cc-left
+sed -i 's/^6$/left six/; s/^25$/left twenty five/' conflict.txt
+printf 'alpha\nleft\nomega\n' > 'space name'
+printf 'left' > no-newline
+printf 'delete left\n' > delete.txt
+printf 'header\nshared\nleft\nshared again\ntail\n' > coalesce.txt
+printf 'left\n' > both-new
+printf '\000left\n' > combined.bin
+commit "combined left"
+git checkout -q -b cc-right cc-base
+sed -i 's/^6$/right six/; s/^25$/right twenty five/' conflict.txt
+printf 'alpha\nright\nomega\n' > 'space name'
+printf 'right' > no-newline
+printf 'delete right\n' > delete.txt
+printf 'header\nright\nshared\nshared again\ntail\n' > coalesce.txt
+printf 'right\n' > both-new
+printf '\000right\n' > combined.bin
+commit "combined right"
+git merge -q --no-ff --no-commit cc-left >/dev/null 2>&1 || :
+test -f .git/MERGE_HEAD
+seq 1 45 | sed 's/^6$/resolved six/; s/^25$/right twenty five/' > conflict.txt
+printf 'alpha\nresolved\nomega\n' > 'space name'
+printf 'resolved' > no-newline
+printf 'header\nresolved\ntail\n' > coalesce.txt
+printf 'resolved\n' > both-new
+chmod +x both-new
+git rm -q -f delete.txt
+printf '\000resolved\n' > combined.bin
+commit "combined resolution"
+git branch cc-merge
+stamp +0900
+tree=$(git rev-parse cc-merge^{tree})
+left=$(git rev-parse cc-left) right=$(git rev-parse cc-right) base=$(git rev-parse cc-base)
+octopus=$(printf 'combined three parents\n' | git commit-tree "$tree" -p "$left" -p "$right" -p "$base")
+git branch cc-octopus "$octopus"

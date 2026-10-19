@@ -5,7 +5,9 @@
 #        status-long, real, real-diff, write-objects, index-write,
 #        write-tree, add, add-all, commit, commit-output, log-format,
 #        log-walk, log-diff, log-path, log-graph, branch-list, branch-filter,
-#        branch-create, branch-modify, branch-upstream)
+#        branch-create, branch-modify, branch-upstream, reset-index, tag-list,
+#        tag-write, reset-hard, checkout, switch, worktree-overlay, show, modes,
+#        rm, mv, restore, stash-push, stash-apply)
 # Fixtures are rebuilt into $NGIT_FIXTURE_DIR (default: $TMPDIR/ngit-fixtures)
 # when missing.  The `real` and `real-diff` suites run against
 # $NGIT_REAL_REPO.  git must not refresh the index while comparing, or
@@ -14,12 +16,20 @@ set -u
 root=$(cd "$(dirname "$0")/.." && pwd)
 ngit="$root/bin/ngit"
 fx=${NGIT_FIXTURE_DIR:-${TMPDIR:-/tmp}/ngit-fixtures}
-[ -d "$fx/wt" ] || sh "$root/test/make-fixture.sh" "$fx" >/dev/null 2>&1 || {
-  echo "fixture build failed"; exit 2; }
-[ -d "$fx/st-staged-only" ] || sh "$root/test/make-wt-fixture.sh" "$fx" >/dev/null 2>&1 || {
-  echo "work tree fixture build failed"; exit 2; }
-[ -d "$fx/work" ] || sh "$root/test/make-log-fixture.sh" "$fx" >/dev/null 2>&1 || {
-  echo "log fixture build failed"; exit 2; }
+# Rebuild every fixture when a builder script changes; each builder only
+# removes the repositories it creates.
+stamp=$(cat "$root"/test/make-fixture.sh "$root"/test/make-wt-fixture.sh \
+  "$root"/test/make-log-fixture.sh | cksum)
+if [ "$(cat "$fx/.ngit-stamp" 2>/dev/null)" != "$stamp" ]; then
+  mkdir -p "$fx"
+  sh "$root/test/make-fixture.sh" "$fx" >/dev/null 2>&1 || {
+    echo "fixture build failed"; exit 2; }
+  sh "$root/test/make-wt-fixture.sh" "$fx" >/dev/null 2>&1 || {
+    echo "work tree fixture build failed"; exit 2; }
+  sh "$root/test/make-log-fixture.sh" "$fx" >/dev/null 2>&1 || {
+    echo "log fixture build failed"; exit 2; }
+  echo "$stamp" >"$fx/.ngit-stamp"
+fi
 export GIT_OPTIONAL_LOCKS=0
 fail=0
 out=$(mktemp -d)
@@ -44,11 +54,47 @@ check() { # check REPO ARGS...
 export GIT_AUTHOR_NAME="Test Author" GIT_AUTHOR_EMAIL=test@example.com
 export GIT_COMMITTER_NAME="Test Author" GIT_COMMITTER_EMAIL=test@example.com
 export GIT_AUTHOR_DATE="1700600000 +0900" GIT_COMMITTER_DATE="1700600000 +0900"
-WENV= WREFS= WSTDERR=
+WENV= WREFS= WSTDERR= WTREE= WMODES= WAFTER_REFRESH=
 
 wstate() { # wstate DIR TAG
   d=$1 t=$2
   if [ -f "$d/.git/index" ]; then cp "$d/.git/index" "$out/$t.index"; else : >"$out/$t.index"; fi
+  if [ -n "$WTREE" ]; then
+    # Ignore stat data, index encoding and extensions; retain every entry's
+    # object, mode, stage, assume-valid and extended flags.
+    python3 - "$out/$t.index" <<'PY'
+import pathlib, struct, sys
+p = pathlib.Path(sys.argv[1])
+b = p.read_bytes()
+records = []
+if b:
+    version, count = struct.unpack_from('>II', b, 4)
+    off, prev = 12, b''
+    for _ in range(count):
+        start = off
+        flags = struct.unpack_from('>H', b, off + 60)[0]
+        off += 62
+        ext = b[off:off + 2] if flags & 0x4000 else b'\0\0'
+        off += 2 if flags & 0x4000 else 0
+        if version == 4:
+            drop = b[off] & 127
+            while b[off] & 128:
+                off += 1
+                drop = ((drop + 1) << 7) + (b[off] & 127)
+            off += 1
+            end = b.index(0, off)
+            name = prev[:len(prev) - drop] + b[off:end]
+            off = end + 1
+        else:
+            end = b.index(0, off)
+            name = b[off:end]
+            off = start + ((end + 1 - start + 7) & ~7)
+        records.append(b[start + 24:start + 28] + b[start + 40:start + 60]
+                       + struct.pack('>H', flags & 0xb000) + ext + name + b'\0')
+        prev = name
+p.write_bytes(b''.join(records))
+PY
+  fi
   {
     git -C "$d" rev-parse -q --verify HEAD; git -C "$d" symbolic-ref -q HEAD
     for f in "$d/.git/logs/HEAD" "$d/.git/COMMIT_EDITMSG"; do
@@ -57,9 +103,41 @@ wstate() { # wstate DIR TAG
     find "$d/.git/logs/refs" -type f 2>/dev/null | sort | while read -r f; do echo "== $f"; cat "$f"; done
     (cd "$d/.git" && find objects -type f ! -path '*/pack/*' ! -path '*/info/*' | sort | xargs -r md5sum)
     find "$d/.git" -maxdepth 3 -name '*.lock'
+    if [ -n "$WMODES" ]; then
+      echo '== modes'
+      (cd "$d" && find . -path './.git/objects/pack' -prune -o -print0 |
+        LC_ALL=C sort -z | xargs -0 -r stat -c '%a %n')
+    fi
     git -C "$d" fsck --no-progress 2>&1
+    if [ -n "$WTREE" ]; then
+      python3 - "$d" <<'PY'
+import hashlib, json, os, stat, sys
+root = sys.argv[1]
+def walk(base):
+    for name in sorted(os.listdir(os.path.join(root, base))):
+        if not base and name == '.git':
+            continue
+        rel = os.path.join(base, name)
+        path = os.path.join(root, rel)
+        mode = os.lstat(path).st_mode
+        kind = 'link' if stat.S_ISLNK(mode) else 'dir' if stat.S_ISDIR(mode) else 'file'
+        target = os.readlink(path) if kind == 'link' else None
+        digest = hashlib.md5(open(path, 'rb').read()).hexdigest() if kind == 'file' else None
+        print(json.dumps([rel, kind, stat.S_IMODE(mode), target, digest], ensure_ascii=True))
+        if kind == 'dir':
+            walk(rel)
+walk('')
+PY
+      echo '== index entries'
+      git -C "$d" ls-files -s
+      echo '== diff-files (without refresh)'
+      git -C "$d" diff-files --name-status
+      echo '== status'
+      git -C "$d" status --porcelain=v1
+    fi
     if [ -n "$WREFS" ]; then
-      for f in "$d/.git/config" "$d/.git/packed-refs"; do
+      for f in "$d/.git/config" "$d/.git/packed-refs" "$d/.git/ORIG_HEAD" \
+               "$d/.git/MERGE_HEAD" "$d/.git/MERGE_MSG" "$d/.git/CHERRY_PICK_HEAD"; do
         [ -f "$f" ] && { echo "== $f"; cat "$f"; }
       done
       (cd "$d/.git" && find refs -type f | sort)
@@ -72,41 +150,110 @@ wrun() { # wrun SRC SETUP ARGS...
   src=$1 setup=$2; shift 2
   w="$out/w"; rm -rf "$w"; cp -a "$src" "$w"
   (cd "$w" && eval "$setup") >/dev/null 2>&1 || { echo "SETUP FAILED: $setup"; fail=1; return; }
-  rm -rf "$out/snap"; cp -a "$w/.git" "$out/snap"
+  rm -rf "$out/snap"
+  if [ -n "$WTREE" ]; then
+    cp -a "$w" "$out/snap"
+    # Both commands must see copied inodes, including when SETUP committed
+    # and refreshed the original work tree's index stat data.
+    rm -rf "$w"; cp -a "$out/snap" "$w"
+  else
+    cp -a "$w/.git" "$out/snap"
+  fi
+  # Restore clean entries' stat data after copying; otherwise inode reuse
+  # can make one run clean and the other dirty.  Dirty entries and flags
+  # remain intact.  The post-command state checks never refresh the index.
+  if [ -n "$WTREE" ]; then
+    git -C "$w" update-index -q --refresh >/dev/null 2>&1 || :
+    [ -z "$WAFTER_REFRESH" ] || (cd "$w" && eval "$WAFTER_REFRESH")
+  fi
   # shellcheck disable=SC2086
   if [ -n "$WSTDERR" ]; then
     # shellcheck disable=SC2086
-    (cd "$w" && env $WENV git -c gc.auto=0 "$@") >"$out/git.out" 2>&1
+    (cd "$w" && env $WENV git -c gc.auto=0 "$@") >"$out/git.stdout" 2>"$out/git.stderr"
+    gs=$?
+    {
+      echo '== stdout'; cat "$out/git.stdout"
+      echo '== stderr'; cat "$out/git.stderr"
+      echo "exit $gs"
+    } >"$out/git.out"
   else
     # shellcheck disable=SC2086
     (cd "$w" && env $WENV git -c gc.auto=0 "$@") >"$out/git.out" 2>/dev/null
+    echo "exit $?" >>"$out/git.out"
   fi
-  echo "exit $?" >>"$out/git.out"
   wstate "$w" git
-  rm -rf "$w/.git"; cp -a "$out/snap" "$w/.git"
+  if [ -n "$WTREE" ]; then
+    rm -rf "$w"; cp -a "$out/snap" "$w"
+  else
+    rm -rf "$w/.git"; cp -a "$out/snap" "$w/.git"
+  fi
+  if [ -n "$WTREE" ]; then
+    git -C "$w" update-index -q --refresh >/dev/null 2>&1 || :
+    [ -z "$WAFTER_REFRESH" ] || (cd "$w" && eval "$WAFTER_REFRESH")
+  fi
   # shellcheck disable=SC2086
   if [ -n "$WSTDERR" ]; then
     # shellcheck disable=SC2086
-    (cd "$w" && env $WENV "$ngit" "$@") >"$out/ngit.out" 2>&1
+    (cd "$w" && env $WENV "$ngit" "$@") >"$out/ngit.stdout" 2>"$out/ngit.stderr"
+    ns=$?
+    {
+      echo '== stdout'; cat "$out/ngit.stdout"
+      echo '== stderr'; cat "$out/ngit.stderr"
+      echo "exit $ns"
+    } >"$out/ngit.out"
   else
     # shellcheck disable=SC2086
     (cd "$w" && env $WENV "$ngit" "$@") >"$out/ngit.out" 2>"$out/err"
+    echo "exit $?" >>"$out/ngit.out"
   fi
-  echo "exit $?" >>"$out/ngit.out"
   wstate "$w" ngit
   if ! cmp -s "$out/git.out" "$out/ngit.out" || ! cmp -s "$out/git.state" "$out/ngit.state" ||
      ! cmp -s "$out/git.index" "$out/ngit.index"; then
     echo "MISMATCH ($(basename "$src")${setup:+; $setup}): $*"
     diff "$out/git.out" "$out/ngit.out" | head -10
     diff "$out/git.state" "$out/ngit.state" | head -10
-    if ! cmp -s "$out/git.index" "$out/ngit.index"; then
+    if [ -z "$WTREE" ] && ! cmp -s "$out/git.index" "$out/ngit.index"; then
       echo "index differs:"
       cp "$out/git.index" "$w/.git/index"; git -C "$w" ls-files -s --debug >"$out/git.lsd" 2>&1
       cp "$out/ngit.index" "$w/.git/index"; git -C "$w" ls-files -s --debug >"$out/ngit.lsd" 2>&1
       diff "$out/git.lsd" "$out/ngit.lsd" | head -16
     fi
-    head -3 "$out/err"; fail=1
+    [ ! -f "$out/err" ] || head -3 "$out/err"; fail=1
   fi
+}
+
+checkout_fixture() {
+  wt="$out/${1:-write-wt}"
+  mkdir -p "$wt/dir" "$wt/back"
+  (
+    cd "$wt" || exit 1
+    git init -q -b main
+    git config gc.auto 0
+    printf 'base\n' > a.txt
+    printf 'one\n' > dir/one.txt
+    printf 'two\n' > dir/two.txt
+    printf '#!/bin/sh\necho base\n' > exec.sh; chmod +x exec.sh
+    ln -s a.txt link
+    printf 'auto\nlines\n' > auto.txt
+    printf 'attr\nlines\n' > attr.txt
+    printf 'attr.txt text eol=crlf\n' > .gitattributes
+    printf 'file\n' > swap
+    printf 'leaf\n' > back/leaf
+    printf 'removed\n' > removed.txt
+    git add -A; git commit -qm base
+    git update-index --add --cacheinfo "160000,$(git rev-parse HEAD),module"
+    git commit -qm 'add gitlink'; git tag v1.0
+    printf 'third\n' > a.txt; printf 'third\n' > dir/one.txt
+    rm dir/two.txt removed.txt swap back/leaf
+    mkdir swap; printf 'new leaf\n' > swap/leaf
+    rmdir back; printf 'file again\n' > back
+    chmod -x exec.sh; rm link; ln -s dir/one.txt link
+    printf 'head only\n' > new-head.txt
+    git rm -q --cached module
+    git add -A; git commit -qm third
+    printf 'tip\n' > a.txt; printf 'tip\n' > dir/one.txt
+    git add -A; git commit -qm tip
+  ) >/dev/null 2>&1 || { echo 'checkout fixture build failed'; exit 2; }
 }
 
 R='git update-index -q --refresh'
@@ -129,6 +276,30 @@ batch_cat() { # cat every object of REPO with -t and -p in one ngit process
 }
 
 case $1 in
+  modes)
+    for mask in 002 022; do
+      (
+        umask "$mask"
+        fail=0
+        WTREE=1 WREFS=1 WSTDERR=1 WMODES=1
+        checkout_fixture "modes-$mask"
+        wrun "$wt" "git checkout -q --orphan modes/root; rm .git/COMMIT_EDITMSG; rm -rf .git/logs" commit -m modes
+        wrun "$wt" "chmod 600 .git/logs/HEAD .git/logs/refs/heads/main .git/COMMIT_EDITMSG" commit --allow-empty -m modes
+        wrun "$wt" "" branch modes/deep/new HEAD~1
+        wrun "$wt" "" branch -m main renamed/deep/main
+        wrun "$wt" "chmod 600 .git/config .git/logs/refs/heads/main" branch -m main renamed/private
+        wrun "$wt" "chmod 600 .git/config .git/logs/refs/heads/main" branch -c main copied/private
+        wrun "$wt" "chmod 644 .git/config .git/logs/refs/heads/main" branch -m main renamed/old-mask
+        wrun "$wt" "git config branch.main.description private; chmod 400 .git/config" branch -m main renamed/readonly
+        wrun "$wt" "" tag -a modes/deep/tag -m modes
+        wrun "$wt" "" reset --hard v1.0
+        wrun "$wt" "git branch modes/other v1.0; chmod 600 .git/HEAD .git/index" switch modes/other
+        wrun "$wt" "rm a.txt exec.sh; rm -rf dir" checkout -- a.txt exec.sh dir
+        wrun "$wt" "mkdir -p fresh/deep; printf 'new file\n' > fresh/deep/file; rm .git/index" add fresh
+        [ "$fail" -ne 0 ] || echo "modes: umask $mask PASS"
+        exit "$fail"
+      ) || fail=1
+    done ;;
   basic)
     check "$fx/loose" cat-file -p HEAD
     check "$fx/loose" rev-parse HEAD ;;
@@ -325,6 +496,452 @@ case $1 in
     wrun "$fx/v4" "" commit -m "v4 index"
     wrun "$fx/st-staged-only" "$R" commit -m refreshed
     wrun "$fx/st-staged-only" "touch -d 2002-02-02 b.txt" commit -m "stat refresh" ;;
+  reset-index)
+    WREFS=1 WSTDERR=1
+    for mode in --soft --mixed; do
+      for rev in HEAD~1 HEAD~2 old v1.0; do
+        wrun "$fx/hist" "" reset "$mode" "$rev"
+      done
+      wrun "$fx/st-detached-at" "" reset "$mode" HEAD~1
+      wrun "$fx/hist" "git reset -q --soft HEAD~1" reset "$mode" HEAD~1
+    done
+    wrun "$fx/st-staged-only" "" reset
+    wrun "$fx/st-staged-only" "" reset --soft
+    wrun "$fx/dirty" "$NOREPO" reset --mixed HEAD~1
+    wrun "$fx/v4" "" reset --mixed HEAD~1
+    wrun "$fx/st-staged-only" "touch -d 2002-02-02 b.txt" reset
+    wrun "$fx/hist" "" reset -q HEAD~2
+    wrun "$fx/hist" "" reset --soft -q HEAD~2
+    wrun "$fx/hist" "echo changed >> src/main.c; git add src/main.c; echo unstaged >> doc/one.txt; rm w.txt" reset
+    wrun "$fx/hist" "echo changed >> src/main.c; git add src/main.c; echo unstaged >> doc/one.txt; rm w.txt" reset -q
+    wrun "$fx/hist" "echo changed >> src/main.c; git add src/main.c" reset src/main.c
+    wrun "$fx/hist" "echo changed >> src/main.c; git add src/main.c" reset -- src/main.c
+    wrun "$fx/hist" "echo changed >> src/main.c; git add src/main.c; git update-index --skip-worktree src/main.c" reset -- src/main.c
+    wrun "$fx/hist" "" reset v1.0 -- src
+    wrun "$fx/hist" "" reset v1.0 src doc
+    wrun "$fx/hist" "" reset HEAD~2 -- w.txt
+    wrun "$fx/hist" "git rm -q src/main.c" reset -- src/main.c
+    wrun "$fx/hist" "echo new > new.txt; git add new.txt" reset -- new.txt
+    wrun "$fx/hist" "echo new > new.txt; git add -N new.txt" reset -- new.txt
+    wrun "$fx/hist" "echo new > new.txt; git add -N new.txt" reset -- src
+    wrun "$fx/hist" "echo new > new.txt; git add new.txt" reset -- '*.txt'
+    wrun "$fx/hist" "ln -s missing broken" reset broken
+    wrun "$fx/hist" "git rm -q -r doc; echo blocker > doc; git add doc; git commit -q -m replace" reset HEAD~1 -- doc/one.txt
+    wrun "$fx/hist" "mv doc elsewhere; ln -s elsewhere doc" reset -- src
+    wrun "$fx/hist" "" reset --mixed HEAD~1 -- w.txt
+    wrun "$fx/hist" "" reset -q v1.0 -- src
+    wrun "$fx/hist" "" reset -- nonexistent
+    wrun "$fx/st-empty" "" reset
+    wrun "$fx/st-empty-clean" "" reset --soft
+    wrun "$fx/hist" "git symbolic-ref HEAD refs/heads/unborn; git rev-parse main > .git/ORIG_HEAD" reset --soft main
+    wrun "$fx/hist" "git rev-parse HEAD > .git/MERGE_HEAD; echo merge > .git/MERGE_MSG" reset
+    wrun "$fx/hist" "git rev-parse HEAD > .git/MERGE_HEAD; echo merge > .git/MERGE_MSG" reset --soft
+    wrun "$fx/hist" "git rev-parse HEAD > .git/CHERRY_PICK_HEAD" reset --soft HEAD~1
+    wrun "$fx/hist" "" reset no-such-revision
+    wrun "$fx/hist" "" reset no-such-revision --
+    wrun "$fx/hist" "" reset no-such-revision -- src/main.c
+    wrun "$fx/hist" "" reset --soft -- src/main.c
+    wrun "$fx/hist" "" reset --soft HEAD~1 -- src
+    wrun "$fx/st-staged-only" "" reset -- ''
+    wrun "$fx/hist" "git config core.bare true" reset --mixed HEAD~1
+    wrun "$fx/hist" "git config core.bare true" reset --soft HEAD~1
+    WENV="GIT_REFLOG_ACTION=custom"
+    wrun "$fx/hist" "" reset --soft HEAD~1
+    WENV=
+    # Unsupported modes deliberately differ from git; verify rejection
+    # and that no index, ref, reflog or ORIG_HEAD changes occurred.
+    for option in --merge --keep -p; do
+      w="$out/w"; rm -rf "$w"; cp -a "$fx/hist" "$w"
+      wstate "$w" git
+      "$ngit" -C "$w" reset "$option" >"$out/reject.out" 2>&1; ns=$?
+      printf 'fatal: reset %s is not supported\n' "$option" >"$out/reject.want"
+      wstate "$w" ngit
+      if [ "$ns" -ne 128 ] || ! cmp -s "$out/reject.out" "$out/reject.want" ||
+         ! cmp -s "$out/git.state" "$out/ngit.state" || ! cmp -s "$out/git.index" "$out/ngit.index"; then
+        echo "MISMATCH: reset $option rejection"; fail=1
+      fi
+    done
+    WREFS= WSTDERR= ;;
+  stash-push)
+    WTREE=1 WREFS=1 WSTDERR=1
+    checkout_fixture
+    dirty="printf 'staged\n' > a.txt; git add a.txt; printf 'unstaged\n' >> a.txt; rm dir/one.txt; printf 'added\n' > added.txt; git add added.txt; printf 'keep\n' > untracked.txt; chmod +x exec.sh; rm link; ln -s missing link"
+    wrun "$wt" "" stash
+    wrun "$wt" "" stash push -q
+    wrun "$wt" "$dirty" stash
+    wrun "$wt" "$dirty" stash push -m 'save this work'
+    wrun "$wt" "$dirty" stash push --keep-index
+    wrun "$wt" "$dirty" stash push --include-untracked
+    wrun "$wt" "$dirty; mkdir -p extra/deep; printf 'new\n' > extra/deep/file; printf '*.ignored\n' > .git/info/exclude; printf 'ignored\n' > x.ignored" stash push -u -k -q
+    wrun "$wt" "$dirty" stash push -- a.txt
+    wrun "$wt" "$dirty" stash push -k -- dir a.txt
+    wrun "$wt" "$dirty" stash push -u -- untracked.txt a.txt
+    wrun "$wt" "$dirty" stash push -- '*.txt'
+    wrun "$wt" "$dirty" stash push -- .
+    wrun "$wt" "printf 'staged\n' > a.txt; git add a.txt; git show HEAD:a.txt > a.txt" stash push
+    wrun "$wt" "$dirty; git update-index --index-version 4" stash push -u
+    wrun "$wt" "printf 'outside\n' >> auto.txt" stash push -- a.txt
+    wrun "$wt" "git config core.logAllRefUpdates false; $dirty" stash push
+    wrun "$wt" "git switch -q --detach; $dirty" stash push
+    wrun "$wt" "printf 'only untracked\n' > untracked.txt" stash push -u
+    wrun "$wt" "printf 'first\n' >> a.txt; git stash push -qm first; $dirty" stash push -m second
+    wrun "$wt" "$dirty" stash push -- missing
+    WTREE= WREFS= WSTDERR= ;;
+  stash-apply)
+    WTREE=1 WREFS=1 WSTDERR=1
+    checkout_fixture
+    stash_setup="printf 'staged\n' > a.txt; git add a.txt; printf 'unstaged\n' >> a.txt; rm dir/one.txt; printf 'added\n' > added.txt; git add added.txt; chmod +x exec.sh; rm link; ln -s missing link; printf 'loose\n' > untracked.txt; git stash push -qu -m saved"
+    multi="$stash_setup; printf 'second\n' >> dir/one.txt; git stash push -qm second; printf 'third\n' >> auto.txt; git stash push -qm third"
+    wrun "$wt" "$multi" stash list
+    wrun "$wt" "$stash_setup" stash show
+    wrun "$wt" "$stash_setup" stash show -p
+    wrun "$wt" "$multi" stash show --stat 'stash@{1}'
+    wrun "$wt" "$stash_setup" stash apply
+    wrun "$wt" "$stash_setup" stash apply --index
+    wrun "$wt" "$stash_setup" stash apply -q
+    wrun "$wt" "$stash_setup; printf 'upstream\n' >> auto.txt; git add auto.txt; git commit -qm upstream" stash apply
+    wrun "$wt" "$stash_setup; printf 'local\n' >> auto.txt; git add auto.txt" stash apply
+    wrun "$wt" "$stash_setup; printf 'local\n' >> a.txt" stash apply
+    wrun "$wt" "$stash_setup; printf 'blocker\n' > added.txt" stash apply
+    wrun "$wt" "$stash_setup; printf 'blocker\n' > untracked.txt" stash apply
+    wrun "$wt" "$stash_setup; printf 'local\n' >> a.txt" stash pop
+    wrun "$wt" "$stash_setup; printf 'local\n' >> a.txt" stash apply --index
+    wrun "$wt" "$stash_setup; printf 'upstream\n' >> auto.txt; git add auto.txt; git commit -qm upstream" stash apply --index
+    wrun "$wt" "$stash_setup; git update-index --index-version 4" stash apply --index
+    wrun "$wt" "printf 'staged\n' > a.txt; git add a.txt; git show HEAD:a.txt > a.txt; git stash push -q" stash apply --index
+    [ "$(git -C "$w" write-tree)" = "$(git -C "$w" rev-parse 'stash^2^{tree}')" ] || {
+      echo 'MISMATCH: stash apply --index cache tree'; fail=1; }
+    wrun "$wt" "mkdir -p added-dir; printf 'staged\n' > added-dir/new; git add added-dir; git stash push -q; mkdir -p added-dir; printf 'keep\n' > added-dir/keep" stash apply
+    wrun "$wt" "rm a.txt; mkdir a.txt; printf 'child\n' > a.txt/child; git add -A; git stash push -q" stash apply
+    wrun "$wt" "rm -rf dir; printf 'file\n' > dir; git add -A; git stash push -q" stash apply
+    wrun "$wt" "printf 'stashed\n' >> a.txt; git stash push -q; chmod +x a.txt; git add a.txt; git commit -qm executable" stash apply
+    wrun "$wt" "chmod +x a.txt; git stash push -q; printf 'upstream\n' >> a.txt; git add a.txt; git commit -qm content" stash apply
+    wrun "$wt" "$stash_setup" stash pop
+    wrun "$wt" "$multi" stash pop -q 'stash@{1}'
+    wrun "$wt" "$multi" stash drop
+    wrun "$wt" "$multi" stash drop 'stash@{1}'
+    wrun "$wt" "$multi" stash drop -q 2
+    wrun "$wt" "$stash_setup" stash drop
+    wrun "$wt" "$multi" stash clear
+    wrun "$wt" "" stash clear
+    wrun "$wt" "$stash_setup" stash branch stash-branch
+    wrun "$wt" "$multi" stash branch stash-branch 'stash@{1}'
+    wrun "$wt" "$stash_setup; printf 'blocker\n' > untracked.txt" stash branch stash-branch
+    WSTDERR=
+    wrun "$wt" "$multi; touch .git/refs/stash.lock" stash drop
+    wrun "$wt" "$stash_setup; touch .git/refs/stash.lock" stash drop
+    wrun "$wt" "$multi; touch .git/refs/stash.lock" stash clear
+    WSTDERR=1
+    wrun "$wt" "" stash list
+    wrun "$wt" "" stash apply
+    WTREE= WREFS= WSTDERR= ;;
+  reset-hard)
+    WTREE=1 WREFS=1 WSTDERR=1
+    checkout_fixture
+    dirty="printf 'staged\n' > a.txt; git add a.txt; printf 'unstaged\n' >> a.txt; rm dir/one.txt; printf 'added\n' > added.txt; git add added.txt; printf 'keep\n' > untracked.txt; chmod +x exec.sh; rm link; ln -s missing link"
+    for rev in HEAD~1 HEAD~2 v1.0; do
+      wrun "$wt" "$dirty" reset --hard "$rev"
+    done
+    wrun "$wt" "$dirty" reset --hard
+    wrun "$wt" "$dirty" reset --hard -q HEAD~2
+    wrun "$wt" "git reset -q --hard v1.0" reset --hard main
+    wrun "$wt" "git config core.autocrlf true; rm auto.txt attr.txt" reset --hard
+    wrun "$wt" "rm attr.txt" reset --hard
+    wrun "$wt" "git config core.eol crlf; printf 'auto.txt text\n' >> .gitattributes; git add .gitattributes; git commit -qm eol; rm auto.txt" reset --hard
+    wrun "$wt" "git update-index --skip-worktree a.txt; printf 'dirty\n' > a.txt" reset --hard
+    wrun "$wt" "git update-index --skip-worktree a.txt; printf 'dirty\n' > a.txt" reset --hard HEAD~2
+    wrun "$wt" "git update-index --assume-unchanged a.txt; printf 'dirty\n' > a.txt" reset --hard
+    wrun "$wt" "git update-index --skip-worktree exec.sh; chmod +x exec.sh" reset --hard HEAD~2
+    wrun "$wt" "git update-index --skip-worktree dir/one.txt; rm -rf dir; printf 'blocker\n' > dir" reset --hard HEAD~2
+    WSTDERR=
+    wrun "$wt" "$dirty; touch .git/index.lock" reset --hard HEAD~2
+    WSTDERR=1
+    wrun "$wt" "mkdir -p gone/deep; printf 'tracked\n' > gone/deep/file; git add gone; printf 'keep\n' > gone/untracked" reset --hard
+    wrun "$wt" "git config core.filemode false; chmod +x exec.sh; rm link; git config core.symlinks false" reset --hard
+    wrun "$wt" "git update-index --index-version 4; $dirty" reset --hard HEAD~2
+    wrun "$wt" "" reset --hard -- a.txt
+    WTREE= WREFS= WSTDERR= ;;
+  rm)
+    WTREE=1 WREFS=1 WSTDERR=1
+    checkout_fixture
+    wrun "$wt" "" rm a.txt
+    wrun "$wt" "" rm --cached a.txt
+    wrun "$wt" "" rm -r dir
+    wrun "$wt" "mkdir dir-extra; printf 'sibling\n' > dir-extra/file; git add dir-extra; git commit -qm sibling" rm -r dir
+    wrun "$wt" "" rm -rn dir
+    wrun "$wt" "" rm -rq dir
+    wrun "$wt" "" rm .
+    wrun "$wt" "" rm dir
+    wrun "$wt" "" rm nonexistent
+    wrun "$wt" "" rm --ignore-unmatch nonexistent
+    wrun "$wt" "" rm --ignore-unmatch a.txt nonexistent
+    wrun "$wt" "printf 'local\n' > a.txt" rm a.txt
+    wrun "$wt" "printf 'local\n' > a.txt" rm --cached a.txt
+    wrun "$wt" "printf 'local\n' > a.txt" rm -f a.txt
+    wrun "$wt" "printf 'staged\n' > a.txt; git add a.txt" rm a.txt
+    wrun "$wt" "printf 'staged\n' > a.txt; git add a.txt" rm --cached a.txt
+    wrun "$wt" "printf 'staged\n' > a.txt; git add a.txt; rm a.txt" rm a.txt
+    wrun "$wt" "printf 'staged\n' > a.txt; git add a.txt; rm a.txt; mkdir a.txt" rm a.txt
+    wrun "$wt" "printf 'staged\n' > a.txt; git add a.txt; printf 'local\n' > a.txt" rm a.txt
+    wrun "$wt" "printf 'staged\n' > a.txt; git add a.txt; printf 'local\n' > a.txt" rm --cached a.txt
+    wrun "$wt" "printf 'staged\n' > a.txt; git add a.txt; printf 'local\n' > a.txt" rm -f a.txt
+    wrun "$wt" "git rm -q --cached a.txt; git add -N a.txt; printf 'local\n' > a.txt" rm --cached a.txt
+    wrun "$wt" "rm a.txt" rm a.txt
+    wrun "$wt" "rm a.txt; mkdir a.txt; printf 'keep\n' > a.txt/untracked" rm a.txt
+    wrun "$wt" "rm a.txt; mkdir a.txt" rm a.txt exec.sh
+    wrun "$wt" "rm a.txt; mkdir a.txt; printf 'keep\n' > a.txt/untracked" rm a.txt exec.sh
+    wrun "$wt" "git config core.filemode false; chmod +x a.txt" rm a.txt
+    wrun "$wt" "git config core.autocrlf true" rm a.txt
+    wrun "$wt" "printf 'odd\tname\n' > 'odd	name'; git add 'odd	name'; git commit -qm odd" rm 'odd	name'
+    wrun "$wt" "git rm -q --cached a.txt; b=\$(git rev-parse HEAD~2:a.txt); o=\$(git rev-parse HEAD~1:a.txt); t=\$(git rev-parse HEAD:a.txt); printf '100644 %s 1\ta.txt\n100644 %s 2\ta.txt\n100644 %s 3\ta.txt\n' \"\$b\" \"\$o\" \"\$t\" | git update-index --index-info" rm -f a.txt
+    wrun "$wt" "" rm -r -- 'dir/*.txt' a.txt
+    wrun "$wt" "" rm -r a.txt dir/one.txt
+    WTREE= WREFS= WSTDERR= ;;
+  mv)
+    WTREE=1 WREFS=1 WSTDERR=1
+    checkout_fixture
+    wrun "$wt" "" mv a.txt renamed.txt
+    wrun "$wt" "printf 'dirty\n' > a.txt" mv a.txt much-longer-name.txt
+    wrun "$wt" "git update-index --assume-unchanged a.txt" mv a.txt assumed-name.txt
+    wrun "$wt" "mkdir target" mv a.txt exec.sh target
+    wrun "$wt" "mkdir target" mv -v a.txt exec.sh target
+    wrun "$wt" "mkdir target" mv -n a.txt exec.sh target
+    wrun "$wt" "mkdir target" mv -n dir a.txt target
+    wrun "$wt" "mkdir target" mv -v dir a.txt target
+    wrun "$wt" "" mv dir renamed-dir
+    wrun "$wt" "printf 'untracked\n' > dir/keep" mv dir renamed-dir
+    wrun "$wt" "" mv -v dir renamed-dir
+    wrun "$wt" "" mv -n dir renamed-dir
+    wrun "$wt" "" mv dir renamed-dir/
+    wrun "$wt" "git config core.ignorecase true" mv a.txt A.txt
+    wrun "$wt" "printf 'untracked\n' > untracked" mv untracked moved
+    wrun "$wt" "" mv missing moved
+    wrun "$wt" "mkdir empty" mv empty moved
+    wrun "$wt" "printf 'existing\n' > existing" mv a.txt existing
+    wrun "$wt" "printf 'existing\n' > existing" mv -f a.txt existing
+    wrun "$wt" "printf 'existing\n' > existing" mv -fv a.txt existing
+    wrun "$wt" "mkdir existing" mv -f a.txt existing
+    wrun "$wt" "" mv a.txt missing/child
+    wrun "$wt" "" mv -k a.txt missing/child
+    wrun "$wt" "mkdir target; printf 'untracked\n' > untracked" mv -k missing a.txt untracked target
+    wrun "$wt" "" mv a.txt exec.sh missing-destination
+    wrun "$wt" "" mv a.txt missing-dir/
+    wrun "$wt" "git rm -q --cached a.txt; b=\$(git rev-parse HEAD~2:a.txt); o=\$(git rev-parse HEAD~1:a.txt); t=\$(git rev-parse HEAD:a.txt); printf '100644 %s 1\ta.txt\n100644 %s 2\ta.txt\n100644 %s 3\ta.txt\n' \"\$b\" \"\$o\" \"\$t\" | git update-index --index-info" mv a.txt moved
+    WTREE= WREFS= WSTDERR= ;;
+  checkout)
+    WTREE=1 WREFS=1 WSTDERR=1
+    checkout_fixture
+    wk="$fx/work"
+    # Branch-mode checkout shares the switch machinery but keeps checkout's
+    # detached-HEAD advice and its branch/path disambiguation rules.
+    wrun "$wk" "" checkout notrack
+    wrun "$wk" "" checkout main
+    WAFTER_REFRESH="git ls-files -z | xargs -0 rm -f; rm .git/index"
+    wrun "$wt" "" checkout main
+    WAFTER_REFRESH=
+    wrun "$wk" "printf 'dirty\n' >> c1.txt" checkout HEAD
+    wrun "$wk" "printf 'dirty\n' >> c1.txt" checkout -f HEAD
+    wrun "$wk" "" checkout --detach
+    wrun "$wk" "" checkout -q notrack
+    wrun "$wk" "" checkout -b checkout-new
+    wrun "$fx/st-empty-clean" "" checkout -b checkout-new
+    wrun "$fx/st-empty-clean" "printf 'staged\n' > local-add; git add local-add" checkout -b checkout-new
+    wrun "$wk" "" checkout -b checkout-from main~3
+    wrun "$wk" "git branch replace main~3" checkout -B replace main~1
+    wrun "$wk" "" checkout -B main main~1
+    wrun "$wk" "" checkout --detach main~2
+    wrun "$wk" "" checkout HEAD~2
+    wrun "$wk" "git checkout -q notrack" checkout -
+    wrun "$wk" "printf 'dirty\n' >> c1.txt" checkout notrack
+    wrun "$wk" "printf 'staged\n' >> c1.txt; git add c1.txt" checkout notrack
+    wrun "$wk" "printf 'added\n' > local-add; git add local-add" checkout notrack
+    wrun "$wk" "git rm -q c1.txt" checkout notrack
+    wrun "$wk" "rm c1.txt" checkout notrack
+    wrun "$wk" "printf 'dirty\n' >> doc/one.txt" checkout old
+    wrun "$wk" "printf 'staged\n' >> doc/one.txt; git add doc/one.txt" checkout old
+    wrun "$wk" "printf 'untracked\n' > nt.txt" checkout notrack
+    wrun "$wk" "printf 'dirty\n' >> doc/one.txt; printf 'untracked\n' > README" checkout -f old
+    wrun "$wk" "" checkout --orphan checkout-orphan
+    wrun "$wk" "" checkout --orphan main
+    wrun "$wk" "" checkout --orphan notrack
+    wrun "$wk" "" checkout -t origin/topic
+    wrun "$wk" "" checkout --track origin/docs
+    wrun "$wk" "" checkout topic
+    wrun "$wk" "git checkout -q -b track-ahead --track origin/main; git commit -qm ahead --allow-empty; git checkout -q main" checkout track-ahead
+    wrun "$wk" "" checkout behind
+    wrun "$wk" "" checkout ahead
+    wrun "$wk" "" checkout gone
+    wrun "$wk" "" checkout --no-guess topic
+    wrun "$wk" "git remote add other ../origin.git; git config remote.other.fetch '+refs/heads/*:refs/remotes/other/*'; git update-ref refs/remotes/other/topic refs/remotes/origin/topic" checkout topic
+    wrun "$wk" "git remote add other ../origin.git; git config remote.other.fetch '+refs/heads/*:refs/remotes/other/*'; git update-ref refs/remotes/other/topic refs/remotes/origin/topic; git config checkout.defaultRemote origin" checkout topic
+    wrun "$wk" "git checkout -q --detach main; git commit -q --allow-empty -m orphaned" checkout notrack
+    wrun "$wk" "git checkout -q --detach main; for n in 1 2 3 4 5 6; do git commit -q --allow-empty -m orphan-\$n; done" checkout notrack
+    wrun "$wk" "git checkout -q --detach main; git commit -q --allow-empty -m retained; git branch retained" checkout notrack
+    WAFTER_REFRESH="touch -d '10 seconds ago' c1.txt"
+    wrun "$wk" "" checkout notrack
+    WAFTER_REFRESH=
+    wrun "$wk" "printf 'collision\n' > notrack; git add notrack; git commit -qm collision" checkout notrack
+    wrun "$wk" "printf 'collision\n' > notrack; git add notrack; git commit -qm collision; printf 'changed\n' > notrack" checkout -- notrack
+    wrun "$wk" "printf 'collision\n' > topic; git add topic; git commit -qm collision" checkout topic
+    wrun "$wt" "git branch oldtree v1.0" checkout oldtree
+    wrun "$wt" "git branch oldtree v1.0; printf 'keep\n' > swap/keep" checkout oldtree
+    wrun "$wt" "git branch oldtree v1.0; printf 'keep\n' > swap/keep" checkout -f oldtree
+    WSTDERR=
+    wrun "$wt" "git branch oldtree v1.0; printf 'keep\n' > swap/keep; touch .git/index.lock" checkout -f oldtree
+    WSTDERR=1
+    wrun "$wt" "git branch oldtree v1.0; git checkout -q oldtree; printf 'keep\n' > back/keep" checkout main
+    prefix_setup="git checkout -q -b prefix-target; mkdir blocker; printf 'target\\n' > blocker/sub; git add blocker; git commit -qm prefix; git checkout -q main"
+    wrun "$wt" "$prefix_setup; printf 'precious\n' > blocker" checkout prefix-target
+    wrun "$wt" "$prefix_setup; printf 'staged\n' > blocker; git add blocker; printf 'precious\n' > blocker" checkout prefix-target
+    wrun "$wt" "$prefix_setup; printf 'precious\n' > blocker" checkout -f prefix-target
+    wrun "$wt" "$prefix_setup; mkdir outside; printf 'precious\n' > outside/keep; ln -s outside blocker" checkout prefix-target
+    wrun "$wt" "$prefix_setup; mkdir outside; printf 'precious\n' > outside/keep; ln -s outside blocker" checkout -f prefix-target
+    wrun "$wt" "$prefix_setup; mkdir -p outside/sub; printf 'precious\n' > outside/sub/keep; ln -s outside blocker" checkout -f prefix-target
+    wrun "$wt" "$prefix_setup; mkdir -p blocker/sub outside; printf 'safe\n' > outside/safe; ln -s ../../outside blocker/sub/link" checkout -f prefix-target
+    wrun "$wt" "$prefix_setup; printf 'blocker/\n' >> .git/info/exclude; mkdir -p blocker/sub outside; printf 'safe\n' > outside/safe; ln -s ../../outside blocker/sub/link" checkout prefix-target
+    wrun "$wt" "$prefix_setup; git checkout -q prefix-target; git update-index --skip-worktree blocker/sub; rm blocker/sub; mkdir blocker/sub; printf 'precious\n' > blocker/sub/keep" checkout -f prefix-target
+    wrun "$wt" "printf 'dirty\n' > a.txt" checkout -- a.txt
+    wrun "$wt" "printf 'dirty\n' > a.txt" checkout -f -- a.txt
+    wrun "$wt" "printf 'dirty\n' > a.txt" checkout -f a.txt
+    wrun "$wt" "rm a.txt" checkout a.txt
+    wrun "$wt" "printf 'staged\n' > a.txt; git add a.txt; printf 'dirty\n' >> a.txt" checkout -- a.txt
+    wrun "$wt" "rm dir/one.txt; printf 'untracked\n' > dir/keep" checkout -- dir
+    wrun "$wt" "" checkout HEAD~1 -- a.txt
+    wrun "$wt" "" checkout v1.0 -- dir
+    wrun "$wt" "" checkout v1.0 dir
+    wrun "$wt" "" checkout v1.0 -- swap back
+    wrun "$wt" "rm a.txt; rm dir/one.txt" checkout -- '*.txt'
+    wrun "$wt" "" checkout -- nonexistent
+    wrun "$wt" "printf 'dirty\n' > a.txt" checkout -- a.txt nonexistent
+    wrun "$wt" "" checkout v1.0 -- nonexistent
+    wrun "$wt" "git config core.autocrlf true; rm auto.txt attr.txt" checkout -- auto.txt attr.txt
+    wrun "$wt" "rm attr.txt" checkout -- attr.txt
+    wrun "$wt" "rm .gitattributes attr.txt" checkout -- attr.txt
+    wrun "$wt" "printf 'attr.txt -text\n' > .gitattributes; rm attr.txt" checkout -- attr.txt
+    WSTDERR=
+    wrun "$wt" "printf 'dirty\n' > a.txt; touch .git/index.lock" checkout -- a.txt
+    WSTDERR=1
+    wrun "$wt" "chmod +x exec.sh" checkout -- exec.sh
+    wrun "$wt" "" checkout v1.0 -- exec.sh
+    wrun "$wt" "rm link; ln -s missing link" checkout -- link
+    wrun "$wt" "rm link; git config core.symlinks false" checkout -- link
+    wrun "$wt" "git update-index --assume-unchanged a.txt; printf 'dirty\n' > a.txt" checkout -- a.txt
+    wrun "$wt" "git update-index --skip-worktree a.txt; printf 'dirty\n' > a.txt" checkout HEAD -- a.txt
+    wrun "$wt" "git update-index --skip-worktree a.txt; printf 'dirty\n' > a.txt" checkout v1.0 -- a.txt
+    wrun "$wt" "" checkout -- a.txt
+    WTREE= WREFS= WSTDERR= ;;
+  restore)
+    WTREE=1 WREFS=1 WSTDERR=1
+    checkout_fixture restore
+    rt="$out/restore"
+    dirty="printf 'staged\n' > a.txt; git add a.txt; printf 'unstaged\n' >> a.txt"
+    wrun "$rt" "printf 'dirty\n' > a.txt" restore -- a.txt
+    wrun "$rt" "rm a.txt; mkdir a.txt; printf 'untracked\n' > a.txt/keep" restore -- a.txt
+    wrun "$rt" "mkdir outside; printf 'safe\n' > outside/keep; rm a.txt; ln -s outside a.txt" restore -- a.txt
+    wrun "$rt" "mkdir -p outside/one.txt; printf 'safe\n' > outside/one.txt/keep; rm -rf dir; ln -s outside dir" restore -- dir/one.txt
+    wrun "$rt" "$dirty" restore --staged -- a.txt
+    wrun "$rt" "$dirty" restore --staged --worktree -- a.txt
+    wrun "$rt" "$dirty" restore -SW -- a.txt
+    wrun "$rt" "$dirty" restore -WS -q -- a.txt
+    wrun "$rt" "$dirty" restore -s HEAD~2 -- a.txt
+    wrun "$rt" "printf 'dirty\n' > dir/one.txt" restore --source=HEAD~2 -- dir
+    wrun "$rt" "$dirty" restore -s HEAD~2 -S -- a.txt
+    wrun "$rt" "$dirty" restore -s HEAD~2 -SW -- a.txt
+    wrun "$rt" "printf 'local\n' > new-head.txt" restore -s HEAD~2 -W -- new-head.txt
+    wrun "$rt" "printf 'local\n' > new-head.txt" restore -s HEAD~2 -S -- new-head.txt
+    wrun "$rt" "printf 'local\n' > new-head.txt" restore -s HEAD~2 -SW -- new-head.txt
+    wrun "$rt" "printf 'keep\n' > swap/keep; printf 'keep\n' > back" restore -s HEAD~2 -SW -- swap back
+    wrun "$rt" "rm a.txt dir/one.txt" restore -- '*.txt'
+    wrun "$rt" "git config core.autocrlf true; rm auto.txt attr.txt" restore -- auto.txt attr.txt
+    wrun "$rt" "chmod +x exec.sh; rm link; ln -s missing link" restore -- exec.sh link
+    wrun "$rt" "git update-index --assume-unchanged a.txt exec.sh; printf 'dirty\n' > a.txt; chmod +x exec.sh" restore -s HEAD~2 -S -- a.txt exec.sh
+    wrun "$rt" "git update-index --skip-worktree a.txt" restore -- a.txt
+    wrun "$rt" "printf 'dirty\n' > a.txt" restore -- a.txt no-one no-two
+    wrun "$rt" "" restore -s HEAD~2 -- no-one no-two
+    wrun "$rt" "printf 'dirty\n' > a.txt" restore --worktree -- a.txt
+    WSTDERR=
+    wrun "$rt" "printf 'dirty\n' > a.txt; touch .git/index.lock" restore -- a.txt
+    WSTDERR=1
+    wrun "$rt" "" restore
+    wrun "$rt" "" restore -s no-such -- a.txt
+    WTREE= WREFS= WSTDERR= ;;
+  worktree-overlay)
+    WTREE=1 WREFS=1 WSTDERR=1
+    checkout_fixture
+    wrun "$wt" "" checkout v1.0 -- 'dir/*.txt' a.txt
+    wrun "$wt" "" checkout v1.0 -- dir dir/one.txt
+    wrun "$wt" "printf 'keep\n' > swap-extra; printf 'keep\n' > swap.txt; git add swap-extra swap.txt" checkout v1.0 -- swap
+    wrun "$wt" "git checkout -q v1.0" checkout main -- swap
+    wrun "$wt" "git branch carried HEAD; git update-index --assume-unchanged dir/two.txt; printf 'dirty\n' >> dir/two.txt" switch carried
+    wrun "$wt" "git branch carried HEAD; git clone -q . module; git -C module checkout -q \$(git rev-parse HEAD:module); printf 'dirty\n' >> module/a.txt" switch carried
+    WTREE= WREFS= WSTDERR= ;;
+  switch)
+    WTREE=1 WREFS=1 WSTDERR=1
+    checkout_fixture
+    wk="$fx/work"
+    wrun "$wk" "" switch notrack
+    wrun "$wk" "" switch main
+    WAFTER_REFRESH="git ls-files -z | xargs -0 rm -f; rm .git/index"
+    wrun "$wt" "" switch main
+    WAFTER_REFRESH=
+    wrun "$wk" "" switch -q notrack
+    wrun "$wk" "" switch -c switch-new
+    wrun "$fx/st-empty-clean" "" switch -c switch-new
+    wrun "$fx/st-empty-clean" "printf 'staged\n' > local-add; git add local-add" switch -c switch-new
+    wrun "$wk" "" switch -c switch-from main~3
+    wrun "$wk" "git branch replace main~3" switch -C replace main~1
+    wrun "$wk" "" switch -C main main~1
+    wrun "$wk" "" switch --detach main~2
+    wrun "$wk" "" switch --detach
+    wrun "$wk" "git switch -q notrack" switch -
+    wrun "$wk" "printf 'dirty\n' >> c1.txt" switch notrack
+    wrun "$wk" "printf 'staged\n' >> c1.txt; git add c1.txt" switch notrack
+    wrun "$wk" "printf 'added\n' > local-add; git add local-add" switch notrack
+    wrun "$wk" "git rm -q c1.txt" switch notrack
+    wrun "$wk" "rm c1.txt" switch notrack
+    wrun "$wk" "printf 'dirty\n' >> doc/one.txt" switch old
+    wrun "$wk" "printf 'staged\n' >> doc/one.txt; git add doc/one.txt" switch old
+    wrun "$wk" "printf 'untracked\n' > nt.txt" switch notrack
+    wrun "$wk" "printf 'dirty\n' >> doc/one.txt; printf 'untracked\n' > README" switch -f old
+    wrun "$wk" "printf 'dirty\n' >> doc/one.txt; printf 'untracked\n' > README" switch --discard-changes old
+    wrun "$wk" "" switch --orphan switch-orphan
+    wrun "$wk" "" switch --orphan main
+    wrun "$wk" "" switch --orphan notrack
+    wrun "$wk" "" switch -t origin/topic
+    wrun "$wk" "" switch --track origin/docs
+    wrun "$wk" "" switch topic
+    wrun "$wk" "git switch -q -c track-ahead --track origin/main; git commit -qm ahead --allow-empty; git switch -q main" switch track-ahead
+    wrun "$wk" "" switch behind
+    wrun "$wk" "" switch ahead
+    wrun "$wk" "" switch gone
+    wrun "$wk" "" switch --no-guess topic
+    wrun "$wk" "git remote add other ../origin.git; git config remote.other.fetch '+refs/heads/*:refs/remotes/other/*'; git update-ref refs/remotes/other/topic refs/remotes/origin/topic" switch topic
+    wrun "$wk" "git remote add other ../origin.git; git config remote.other.fetch '+refs/heads/*:refs/remotes/other/*'; git update-ref refs/remotes/other/topic refs/remotes/origin/topic; git config checkout.defaultRemote origin" switch topic
+    wrun "$wk" "git switch -q --detach main; git commit -q --allow-empty -m orphaned" switch notrack
+    wrun "$wk" "git checkout -q --detach main; for n in 1 2 3 4 5 6; do git commit -q --allow-empty -m orphan-\$n; done" switch notrack
+    wrun "$wk" "git checkout -q --detach main; git commit -q --allow-empty -m retained; git branch retained" switch notrack
+    WAFTER_REFRESH="touch -d '10 seconds ago' c1.txt"
+    wrun "$wk" "" switch notrack
+    WAFTER_REFRESH=
+    wrun "$wt" "git branch oldtree v1.0" switch oldtree
+    wrun "$wt" "git branch oldtree v1.0; touch .git/index.lock" switch oldtree
+    wrun "$wt" "git branch oldtree v1.0; printf 'keep\n' > swap/keep" switch oldtree
+    wrun "$wt" "git branch oldtree v1.0; printf 'keep\n' > swap/keep" switch -f oldtree
+    WSTDERR=
+    wrun "$wt" "git branch oldtree v1.0; printf 'keep\n' > swap/keep; touch .git/index.lock" switch -f oldtree
+    WSTDERR=1
+    wrun "$wt" "git branch oldtree v1.0; git switch -q oldtree; printf 'keep\n' > back/keep" switch main
+    prefix_setup="git checkout -q -b prefix-target; mkdir blocker; printf 'target\\n' > blocker/sub; git add blocker; git commit -qm prefix; git checkout -q main"
+    wrun "$wt" "$prefix_setup; printf 'precious\n' > blocker" switch prefix-target
+    wrun "$wt" "$prefix_setup; printf 'staged\n' > blocker; git add blocker; printf 'precious\n' > blocker" switch prefix-target
+    wrun "$wt" "$prefix_setup; printf 'precious\n' > blocker" switch -f prefix-target
+    wrun "$wt" "$prefix_setup; mkdir outside; printf 'precious\n' > outside/keep; ln -s outside blocker" switch prefix-target
+    wrun "$wt" "$prefix_setup; mkdir outside; printf 'precious\n' > outside/keep; ln -s outside blocker" switch -f prefix-target
+    wrun "$wt" "$prefix_setup; mkdir -p outside/sub; printf 'precious\n' > outside/sub/keep; ln -s outside blocker" switch -f prefix-target
+    wrun "$wt" "$prefix_setup; mkdir -p blocker/sub outside; printf 'safe\n' > outside/safe; ln -s ../../outside blocker/sub/link" switch -f prefix-target
+    wrun "$wt" "$prefix_setup; printf 'blocker/\n' >> .git/info/exclude; mkdir -p blocker/sub outside; printf 'safe\n' > outside/safe; ln -s ../../outside blocker/sub/link" switch prefix-target
+    wrun "$wt" "$prefix_setup; git switch -q prefix-target; git update-index --skip-worktree blocker/sub; rm blocker/sub; mkdir blocker/sub; printf 'precious\n' > blocker/sub/keep" switch -f prefix-target
+    WTREE= WREFS= WSTDERR= ;;
   commit-output)
     wrun "$fx/dirty" "$NOREPO" commit -a -m "all changes"
     wrun "$fx/dirty" "$NOREPO; $R" commit -a -m "all changes"
@@ -439,6 +1056,60 @@ case $1 in
     check "$fx/st-empty" log
     check "$fx/loose" log --oneline --all
     check "$fx/packed" log --oneline --all --topo-order ;;
+  show)
+    h="$fx/hist" t="$fx/tags" r="$fx/ren" c="$fx/show"
+    check "$h" show
+    check "$h" show HEAD~2
+    for f in -s --no-patch -q --quiet --stat --oneline --name-only --name-status --abbrev-commit; do
+      check "$h" show "$f"
+    done
+    check "$h" show --format=%h:%s
+    check "$h" show --pretty=fuller --date=iso-strict
+    check "$h" show --stat -p HEAD
+    check "$h" show --no-patch --stat HEAD
+    check "$h" show --stat -q HEAD
+    check "$h" show -p --quiet HEAD
+    check "$h" show -p --name-status HEAD
+    for m in main~5 main~6 main~7; do
+      for f in '' -s --stat --first-parent --name-status --oneline; do
+        if [ -n "$f" ]; then check "$h" show "$f" "$m"; else check "$h" show "$m"; fi
+      done
+    done
+    for f in '' -s --stat --name-status --name-only --first-parent --oneline -U0 -U1; do
+      if [ -n "$f" ]; then check "$c" show "$f" cc-merge; else check "$c" show cc-merge; fi
+    done
+    check "$c" show --stat -p cc-merge
+    check "$c" show cc-merge -- conflict.txt
+    for f in '' -s --stat --name-status; do
+      if [ -n "$f" ]; then check "$c" show "$f" cc-octopus; else check "$c" show cc-octopus; fi
+    done
+    check "$h" show v1.0
+    for tag in annotated nested annotated-tree annotated-blob tree blob empty-message signed-message; do
+      check "$t" show "$tag"
+    done
+    check "$t" show --oneline v1.0
+    check "$t" show --pretty=fuller -s nested
+    check "$t" show --format=%s -s annotated
+    check "$t" show -s v1.0 v1.0^{}
+    check "$h" show HEAD^{tree}
+    check "$h" show HEAD:doc
+    check "$h" show HEAD:README.md
+    check "$h" show "$(git -C "$h" rev-parse HEAD:README.md)"
+    check "$h" show HEAD:data.bin
+    check "$h" show HEAD~2 HEAD
+    check "$h" show -s HEAD HEAD~2 HEAD
+    check "$h" show --oneline HEAD~2 HEAD
+    check "$h" show --format=format:%s -s HEAD HEAD~2
+    check "$t" show annotated-tree annotated-blob HEAD v1.0
+    check "$h" show HEAD~3..HEAD
+    check "$h" show -s HEAD~6..HEAD
+    check "$h" show "$(git -C "$h" rev-list --max-parents=0 HEAD)"
+    check "$h" show topic~1
+    check "$r" show HEAD~2
+    check "$h" show nonexistent-revision
+    check "$h" show 0000000000000000000000000000000000000001
+    check "$h" show HEAD nonexistent-revision
+    check "$h" show HEAD:missing-path ;;
   log-diff)
     h="$fx/hist" r="$fx/ren"
     for f in -p --stat --shortstat --numstat --name-only --name-status --summary; do
@@ -512,6 +1183,90 @@ case $1 in
     check "$h" log --graph --reverse
     check "$fx/ren" log --graph --stat
     check "$fx/packed" log --graph --oneline --all ;;
+  tag-list)
+    t="$fx/tags"
+    check "$fx/st-empty" tag
+    for a in "" -l --list -n -n0 -n1 -n2 -n5 -n20 \
+             "-l v1.*" "-l v1.* *blob" "-l *nothing*" "-i -l V*" \
+             --sort=refname --sort=-refname --sort=version:refname \
+             --sort=-version:refname --sort=v:refname \
+             --sort=creatordate --sort=-creatordate --sort=taggerdate \
+             "--sort=taggerdate --sort=-creatordate -n2" "-i --sort=refname" \
+             --contains --no-contains --merged --no-merged \
+             "--contains v1.0" "--no-contains main~3" "--merged c1" \
+             "--no-merged c2" "--contains c1 --contains c2" \
+             "--no-contains c1 --no-contains c2" \
+             "--merged main --contains v1.0 -n2" \
+             "--points-at main" "--points-at annotated" \
+             "--points-at main~2" "--points-at main^{tree}" \
+             "--points-at main:README.md" "--points-at annotated-blob" \
+             "--points-at tree --points-at blob" \
+             --contains=nope --contains=blob --merged=tree --points-at=nope --sort=nope; do
+      # shellcheck disable=SC2086
+      check "$t" tag $a
+    done
+    check "$t" tag -n10 'v*' '*tree' '日本*'
+    check "$t" tag --list --contains=main~3 --no-merged=main~1
+    check "$t" tag --list --points-at=nested
+    check "$t" tag --list --no-contains=main --sort=-refname ;;
+  tag-write)
+    tagrepo="$fx/tags" WREFS=1 WSTDERR=1
+    WENV="GIT_COMMITTER_NAME=Tagger GIT_COMMITTER_EMAIL=tagger@example.com GIT_COMMITTER_DATE=2023-11-22T12:00:00+0900"
+    wrun "$tagrepo" "" tag new-tag
+    wrun "$tagrepo" "" tag deep/name main~2
+    wrun "$tagrepo" "" tag new-tree 'main^{tree}'
+    wrun "$tagrepo" "" tag new-blob main:README.md
+    wrun "$tagrepo" "" tag new-tag-object annotated
+    wrun "$tagrepo" "" tag -a annotated-new -m "release message"
+    wrun "$tagrepo" "" tag -am "combined short options" combined
+    wrun "$tagrepo" "" tag implied -m "$(printf '  subject  \n\n\nbody  \n\n')" -m "next paragraph"
+    wrun "$tagrepo" "" tag -m "" -m "" -m paragraph -m "" empty-paragraphs
+    wrun "$tagrepo" "" tag -m "" empty-annotation
+    wrun "$tagrepo" "" tag -m "日本語の件名" -m "本文" 日本語タグ
+    wrun "$tagrepo" "printf '\n# comment\nfrom file  \n\n\n  body\n# end\n' > tag-message" tag -F tag-message from-file main~3
+    wrun "$tagrepo" "git config core.commentChar ';'; printf '; comment\n# kept\nmessage\n' > tag-message" tag -F tag-message comments
+    wrun "$tagrepo" "" tag -a -m "tree tag" ann-tree 'main^{tree}'
+    wrun "$tagrepo" "" tag -a -m "blob tag" ann-blob main:README.md
+    wrun "$tagrepo" "" tag -a -m "tag of a tag" ann-tag annotated
+    wrun "$tagrepo" "git config advice.nestedTag false" tag -m "nested silently" ann-tag annotated
+    wrun "$tagrepo" "" tag -f v1.2 main
+    wrun "$tagrepo" "" tag -f v1.2 v1.2
+    wrun "$tagrepo" "" tag -f loose-tag main
+    wrun "$tagrepo" "" tag -f annotated main
+    wrun "$tagrepo" "" tag -f -a -m replacement annotated main~1
+    wrun "$tagrepo" "" tag -fa -m replacement annotated main~1
+    wrun "$tagrepo" "" tag v1.2
+    wrun "$tagrepo" "" tag 日本語
+    wrun "$tagrepo" "" tag -f 日本語 main
+    wrun "$tagrepo" "" tag -a -m exists annotated
+    wrun "$tagrepo" "" tag new-tag no-such-revision
+    wrun "$tagrepo" "" tag missing-object 0000000000000000000000000000000000000001
+    wrun "$tagrepo" "" tag -m message missing-object 0000000000000000000000000000000000000001
+    wrun "$tagrepo" "" tag 'bad..name'
+    wrun "$tagrepo" "" tag 'bad name'
+    wrun "$tagrepo" "" tag 'bad.lock'
+    wrun "$tagrepo" "" tag 'bad//name'
+    wrun "$tagrepo" "" tag ''
+    wrun "$tagrepo" "" tag -- -dash
+    wrun "$tagrepo" "" tag HEAD
+    wrun "$tagrepo" "" tag @
+    wrun "$tagrepo" "" tag -m one -F missing both
+    wrun "$tagrepo" "" tag -F no-such-file from-file
+    wrun "$tagrepo" "" tag tree/child
+    wrun "$tagrepo" "" tag -m message tree/child
+    wrun "$tagrepo" "git tag parent/child; git pack-refs --all" tag parent
+    wrun "$tagrepo" "" tag too many arguments
+    wrun "$fx/st-empty" "" tag no-head
+    wrun "$tagrepo" "" tag -d loose-tag
+    wrun "$tagrepo" "" tag -d annotated nested tag-object tree blob
+    wrun "$tagrepo" "" tag -d no-such-tag
+    wrun "$tagrepo" "" tag -d loose-tag no-such-tag annotated
+    wrun "$tagrepo" "" tag -d no-such-tag blob other-missing
+    wrun "$tagrepo" "" tag -d annotated annotated
+    wrun "$tagrepo" "" tag -d 日本語
+    wrun "$tagrepo" "" tag -d ../../heads/main
+    wrun "$tagrepo" "" tag -d
+    WENV= WREFS= WSTDERR= ;;
   branch-list)
     wk="$fx/work" h="$fx/hist"
     for a in "" -a -r -v -vv "-a -v" "-a -vv" "-r -vv" "-a --no-abbrev -v" "-v --abbrev=10" \

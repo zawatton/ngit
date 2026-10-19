@@ -1,0 +1,137 @@
+#+TITLE: ngit completion: nearly all major git commands (stages 7-11)
+
+Completion target chosen on 2026-10-19: nearly all major git commands.
+Stages 1-6 are measured by their own ledgers in this directory; this
+ledger covers what remains.  Scope decisions made with the user:
+- Transports are file:// (and local paths) and ssh (spawning ssh, as git
+  does).  https is out of scope (TLS is outside the compression-only FFI rule).
+- Hooks are in scope.
+- The submodule command is out of scope (gitlinks are already read and
+  written).
+- Anything needing an editor or a TTY (rebase -i, add -p, commit without
+  -m/-F) and signing stay out of scope.
+Commands that write packs (gc, repack, push, fetch, clone) cannot be
+byte-identical to git because delta selection differs; their criteria
+compare refs, reflogs, the reachable object set (rev-list --all --objects)
+and a clean git fsck instead of pack bytes.
+Each criterion's suite or mode is added with the work; until then
+compare.sh and the real-* scripts exit 2 for the unknown name.
+
+* S7 Unmerged entries and merging
+
+** S7.1 Unmerged index entries (stages 1-3) are read, written and shown by ls-files -s/-u, status (long and short), diff and diff --cached exactly as git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh unmerged
+
+** S7.2 Three-way content merge (port of xdiff/xmerge.c: merge, diff3 and zdiff3 conflict styles, marker size, ours/theirs/union favor) matches git merge-file output and exit status
+#+TIMEOUT: 600
+cmd: sh test/compare.sh merge-file
+
+** S7.3 merge (fast-forward, --ff-only, --no-ff, --squash, -m, recursive/ort-equivalent result for non-renaming histories, conflicts, --abort, --continue, MERGE_HEAD/MERGE_MSG) matches git output and resulting state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh merge
+
+** S7.4 cherry-pick and revert (single commits and ranges, -n, -x, -m PARENT, conflicts, --continue/--abort/--skip, sequencer state) match git output and resulting state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh cherry-pick
+
+** S7.5 Non-interactive rebase (upstream, --onto, conflicts, --continue/--abort/--skip, ORIG_HEAD, reflog messages) matches git output and resulting state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh rebase
+
+** S7.6 stash apply/pop with a content merge (conflicts leave the stash, as in git) matches git output and resulting state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh stash-merge
+
+** S7.7 On a clone of the real repository, merge of two branches, cherry-pick, revert and rebase --onto match git state within 300 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" merge 300
+
+* S8 Pack writing and maintenance
+
+** S8.1 pack-objects (with delta search) produces packs that git index-pack and git verify-pack accept with the same object set; index-pack of a git pack produces the same .idx bytes as git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh pack-write
+
+** S8.2 repack -a -d, gc, prune, pack-refs --all, count-objects -v and reflog expire leave the same refs, reflogs and reachable object set as git, and git fsck reports no errors
+#+TIMEOUT: 600
+cmd: sh test/compare.sh gc
+
+** S8.3 fsck (connectivity, dangling, missing and corrupt objects) matches git fsck output and exit status
+#+TIMEOUT: 600
+cmd: sh test/compare.sh fsck
+
+** S8.4 On a clone of the real repository, gc leaves the same refs and object set as git, git fsck is clean, and ngit finishes within 480 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" gc 480
+
+* S9 Transport (file:// and ssh)
+
+** S9.1 init (including --bare, -b, --template-free defaults) and clone of local paths and file:// URLs (--bare, -b, --no-checkout, --origin) match git's repository layout, config, refs, reflogs and work tree
+#+TIMEOUT: 600
+cmd: sh test/compare.sh clone
+
+** S9.2 fetch and pull (default and explicit refspecs, tags, --prune, FETCH_HEAD, fast-forward, merge and --rebase pulls, rejected non-fast-forwards) match git output and resulting state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh fetch
+
+** S9.3 push (default, refspecs, --delete, --force, --tags, -u, rejections and their advice) matches git output and the resulting remote and local state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh push
+
+** S9.4 remote (add, remove, rename, -v, set-url, get-url) and ls-remote match git output and config
+#+TIMEOUT: 600
+cmd: sh test/compare.sh remote
+
+** S9.5 ssh transport (through GIT_SSH/GIT_SSH_COMMAND, upload-pack and receive-pack over the spawned process) for clone, fetch and push matches git state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh ssh
+
+** S9.6 Clone of the real repository by file:// URL, then fetch and push of a new commit between two clones, match git state within 480 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" transport 480
+
+* S10 Hooks
+
+** S10.1 commit hooks (pre-commit, prepare-commit-msg, commit-msg, post-commit), merge/rebase/checkout hooks (pre-merge-commit, post-merge, pre-rebase, post-checkout, post-rewrite) and push hooks (pre-push, pre-receive, update, post-receive, post-update for local remotes) run with git's arguments, environment and stdin, and their failures stop the command as in git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh hooks
+
+** S10.2 On a clone of the real repository with recording hooks installed, commit, switch, merge and push run the same hooks with the same arguments as git within 200 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" hooks 200
+
+* S11 Inspection and other commands
+
+** S11.1 blame (-L, -s, -e, --porcelain, -w, -M default off, file renames across history) matches git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh blame
+
+** S11.2 grep (-n, -i, -w, -v, -l, -c, -e/--and/--or, -E/-F/-P not required, --cached, TREE-ISH, pathspecs) matches git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh grep
+
+** S11.3 describe (--tags, --always, --long, --dirty, --abbrev), name-rev, shortlog (-s, -n, -e) and rev-list (--count, --objects, --all, ranges, --max-count) match git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh describe
+
+** S11.4 format-patch (ranges, -o, --stdout, -N, cover-less numbering), apply (--check, --index, --cached, -R, --stat) and am (mbox from format-patch, --abort/--continue/--skip) match git output and resulting state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh patch
+
+** S11.5 clean (-n, -f, -d, -x, -X, pathspecs), worktree (add, list, remove, prune), config (set, --unset, --add, --global into $HOME, --list) match git output and resulting state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh misc
+
+** S11.6 bisect (start, good, bad, skip, reset, log, run) matches git output, refs and resulting state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh bisect
+
+** S11.7 On the real repository, blame of three files, grep of three patterns, describe --always, shortlog -sn and rev-list --count --all match git within 300 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-log.sh "$NGIT_REAL_REPO" inspect 300

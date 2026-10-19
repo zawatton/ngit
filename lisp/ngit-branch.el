@@ -158,8 +158,11 @@ section event and the full key for an entry."
 (defun ngit--config-file (repo) (expand-file-name "config" (ngit-repo-commondir repo)))
 
 (defun ngit--config-write (repo text)
-  (let* ((file (ngit--config-file repo)) (lock (ngit-lock file)))
-    (ngit-commit-lock lock (encode-coding-string text 'utf-8))
+  (let* ((file (ngit--config-file repo))
+         (mode (or (and (file-exists-p file) (file-modes file))
+                   (ngit-native-creation-mode #o666)))
+         (lock (ngit-lock file 'defer)))
+    (ngit-commit-lock lock (encode-coding-string text 'utf-8) mode)
     (setq ngit--config-cache nil)))
 
 (defun ngit-config-set (repo key value &optional add)
@@ -417,7 +420,7 @@ copy it with COPY; return the number of sections matched."
 (defun ngit--write-ref (repo ref new old msg)
   "Point REF at NEW (hex), logging MSG with OLD as the previous value."
   (let* ((file (ngit--ref-file repo ref)))
-    (make-directory (file-name-directory file) t)
+    (ngit-make-directory (file-name-directory file) t)
     (let ((lock (ngit-lock file)))
       (ngit-commit-lock lock (concat new "\n")))
     (when msg
@@ -854,15 +857,16 @@ copy it with COPY; return the number of sections matched."
           (let* ((hex (ngit-resolve-ref repo oldref))
                  (oldlog (expand-file-name (concat "logs/" oldref) common))
                  (newlog (expand-file-name (concat "logs/" newref) common))
-                 (log-data (and (file-exists-p oldlog) (ngit--read-file oldlog))))
+                 (log-data (and (file-exists-p oldlog) (ngit--read-file oldlog)))
+                 (log-mode (and log-data (not copy) (file-modes oldlog))))
             (unless copy (ngit--delete-ref repo oldref))
             ;; A rename deletes an existing target; a copy writes over it
             ;; (leaving any packed entry, as git does).
             (when (and (not copy) (not (string= old new)) (ngit-read-ref repo newref))
               (ngit--delete-ref repo newref))
             (when log-data
-              (make-directory (file-name-directory newlog) t)
-              (ngit-write-file newlog log-data))
+              (ngit-make-directory (file-name-directory newlog) t)
+              (ngit-write-file newlog log-data nil nil log-mode))
             (ngit--write-ref repo newref hex hex msg)))
         (when (and (not copy) is-head)
           ;; replace_each_worktree_head_symref
@@ -881,15 +885,15 @@ copy it with COPY; return the number of sections matched."
                   (let ((log (expand-file-name "logs/HEAD" gitdir))
                         (ident (ngit--branch-ident repo))
                         (zero (make-string 40 ?0)))
-                    (make-directory (file-name-directory log) t)
-                    (let ((coding-system-for-write 'no-conversion))
-                      (write-region (concat hex " " zero " " ident "\t" msg "\n"
-                                            ;; Rewriting the ref HEAD names logs
-                                            ;; HEAD as well; a new target logs
-                                            ;; HEAD's switch from nothing.
-                                            (concat (if (string= oldref newref) hex zero)
-                                                    " " hex " " ident "\t" msg "\n"))
-                                    nil log t 'silent))))))))
+                    (ngit-make-directory (file-name-directory log) t)
+                    (ngit-write-file
+                     log (concat hex " " zero " " ident "\t" msg "\n"
+                                 ;; Rewriting the ref HEAD names logs
+                                 ;; HEAD as well; a new target logs
+                                 ;; HEAD's switch from nothing.
+                                 (concat (if (string= oldref newref) hex zero)
+                                         " " hex " " ident "\t" msg "\n"))
+                     nil t)))))))
         (if copy
             (unless (string= old new)
               (ngit-config-rename-section repo (concat "branch." old) (concat "branch." new) t))

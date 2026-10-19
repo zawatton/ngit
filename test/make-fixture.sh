@@ -6,7 +6,8 @@
 # Usage: test/make-fixture.sh DIR
 set -eu
 dir=$1
-rm -rf "$dir"
+# Only remove this builder's repositories: DIR may be a sandbox mount.
+rm -rf "$dir/loose" "$dir/packed" "$dir/wt"
 mkdir -p "$dir/loose"
 cd "$dir/loose"
 

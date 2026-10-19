@@ -1,0 +1,42 @@
+#+TITLE: ngit rm, mv, restore and stash (git in NeLisp, stage 6)
+
+* S1 rm and mv
+
+** S1.1 rm [--cached] [-r] [-f] [-n] [-q] [--ignore-unmatch] PATH... (up-to-date checks, staged-content refusals, directory removal, pathspec errors) matches git output, index and work tree
+#+TIMEOUT: 600
+cmd: sh test/compare.sh rm
+
+** S1.2 mv [-f] [-k] [-n] [-v] SRC... DST (files, directories, into a directory, case-only renames, overwrite refusals, untracked/unmerged errors) matches git output, index and work tree
+#+TIMEOUT: 600
+cmd: sh test/compare.sh mv
+
+** S1.3 On a clone of the real repository, rm --cached, rm, mv of a file and of a directory match git state within 150 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" rm-mv 150
+
+* S2 Restore
+
+** S2.1 restore [-s REV] [-S] [-W] [--staged] [--worktree] [--ours/--theirs not required] [-q] PATH... (index, work tree, both, from a revision, pathspec errors, CRLF and modes) matches git output and resulting state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh restore
+
+** S2.2 On a clone of the real repository, restore --staged, restore and restore -s HEAD~2 of files and a directory match git state within 120 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" restore 120
+
+* S3 Stash
+
+** S3.1 stash push [-m MSG] [-k] [-u] [-q] [-- PATH...] and stash (no args) create the same stash commits (i/w/u parents, messages, refs/stash reflog) and leave the same index and work tree as git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh stash-push
+
+** S3.2 stash list, show [-p] [--stat], apply [--index], pop, drop, clear, branch match git output and state, including conflicts refused when the work tree is dirty
+#+TIMEOUT: 600
+cmd: sh test/compare.sh stash-apply
+
+** S3.3 On a clone of the real repository, stash push of modified and untracked files, stash list/show, and stash pop match git state within 180 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" stash 180

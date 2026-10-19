@@ -183,15 +183,16 @@ second keeps the first three)."
           (when (memq 'modified dirty) (push 'modified flags)))
         (cons (or head-bin index-bin) flags)))))
 
-(defun ngit-wt-changes (repo &optional want-data size-shortcut)
+(defun ngit-wt-changes (repo &optional want-data size-shortcut selected)
   "Return the changes from REPO's index to its work tree.
 With WANT-DATA, changed regular files and symlinks carry their content.
 With SIZE-SHORTCUT (git's refresh logic, read-cache.c ie_modified), a
 size that differs from a nonzero cached size counts as modified without
 reading the file, even when end-of-line conversion would make the
-contents equal; diff compares contents instead."
+contents equal; diff compares contents instead.  SELECTED, when non-nil,
+is a vector of entries still requiring comparison after a refresh."
   (let* ((index (ngit-read-index repo))
-         (entries (aref index 0))
+         (entries (or selected (aref index 0)))
          (filemode (ngit-config-bool repo "core.filemode" t))
          (raw (aref index 1))
          ;; Version 2/3 names are NUL-terminated in place (see ngit-index).

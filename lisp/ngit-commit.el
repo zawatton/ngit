@@ -264,18 +264,18 @@ ISO 8601 (\"YYYY-MM-DD[T ]HH:MM[:SS][ ][TZ]\")."
               (and auto (or (string= ref "HEAD") (string-prefix-p "refs/heads/" ref)
                             (string-prefix-p "refs/remotes/" ref)
                             (string-prefix-p "refs/notes/" ref))))
-      (make-directory (file-name-directory file) t)
-      (let ((coding-system-for-write 'no-conversion))
-        (write-region (concat (or old (make-string 40 ?0)) " " new " " ident "\t"
-                              (ngit--reflog-message msg) "\n")
-                      nil file t 'silent)))))
+      (ngit-make-directory (file-name-directory file) t)
+      (ngit-write-file
+       file (concat (or old (make-string 40 ?0)) " " new " " ident "\t"
+                    (ngit--reflog-message msg) "\n")
+       nil t))))
 
 (defun ngit-update-head (repo new old ident msg)
   "Point HEAD (or the branch it names) at NEW, logging MSG."
   (let* ((head (ngit-read-ref repo "HEAD"))
          (ref (if (and head (string-prefix-p "ref: " head)) (substring head 5) "HEAD"))
          (file (ngit--ref-file repo ref))
-         (lock (progn (make-directory (file-name-directory file) t) (ngit-lock file))))
+         (lock (progn (ngit-make-directory (file-name-directory file) t) (ngit-lock file))))
     (ngit-commit-lock lock (concat new "\n"))
     (ngit--append-reflog repo ref old new ident msg)
     (unless (string= ref "HEAD")

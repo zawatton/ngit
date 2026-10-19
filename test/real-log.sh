@@ -4,6 +4,7 @@
 #   diff   - log -n 50 --stat, log --oneline -- FILE and -- DIR
 #   graph  - log --graph --oneline -n 500
 #   branch - branch -a -vv and branch --merged
+#   show   - tip patch, five earlier commit headers/stats, and a raw blob
 # Every ngit run's stdout and exit status must equal git's, and ngit's runs
 # must take at most LIMIT seconds in total.
 # Usage: test/real-log.sh REPO MODE LIMIT
@@ -45,6 +46,19 @@ case $mode in
   branch)
     run branch -a -vv
     run branch --merged "$head" ;;
+  show)
+    run show "$head"
+    for i in 1 2 3 4 5; do
+      run show -s "$head~$i"
+      run show --stat "$head~$i"
+    done
+    # Choose a small top-level blob from the pinned tree, not the work tree.
+    file=$(git -C "$repo" ls-tree -l "$head" | awk '
+      $2 == "blob" && $4 <= 8192 {
+        sub(/^[^\t]*\t/, ""); print; exit
+      }')
+    [ -n "$file" ] || { echo "no small top-level blob"; exit 2; }
+    run show "$head:$file" ;;
   *) echo "unknown mode $mode"; exit 2 ;;
 esac
 echo "ngit total: ${spent}s (limit ${limit}s)"

@@ -1,7 +1,8 @@
 #+TITLE: ngit — git implemented in NeLisp
 
 A git implementation (object store, refs, index and work tree inspection,
-plus add, commit, log and branch) that runs on the NeLisp standalone runtime
+plus add, commit, log, show, branch, tag, reset, switch, checkout, rm, mv,
+restore and stash) that runs on the NeLisp standalone runtime
 (=target/nelisp=).  Output is byte-identical to git for the supported
 commands, verified by =test/compare.sh= against real git.
 
@@ -30,6 +31,23 @@ bin/ngit [-C DIR] branch [-f] [-t | --no-track] [-q] NAME [START]
 bin/ngit [-C DIR] branch (-d | -D) [-r] NAME...
 bin/ngit [-C DIR] branch (-m | -M | -c | -C) [OLD] NEW
 bin/ngit [-C DIR] branch (-u UPSTREAM | --unset-upstream) [NAME]
+bin/ngit [-C DIR] show [-s | --stat | --name-only | --name-status] [--format=FMT] [OBJECT...]
+bin/ngit [-C DIR] tag [-l [PATTERN...]] [-n[N]] [--contains C] [--no-contains C]
+                      [--merged C] [--no-merged C] [--points-at OBJ] [--sort=KEY]
+bin/ngit [-C DIR] tag [-f] [-a] [-m MSG... | -F FILE] NAME [OBJECT]
+bin/ngit [-C DIR] tag -d NAME...
+bin/ngit [-C DIR] reset [-q] [--soft | --mixed | --hard] [REV]
+bin/ngit [-C DIR] reset [-q] [REV] [--] PATH...
+bin/ngit [-C DIR] switch [-q] [-f] [-c | -C NEW | --orphan NEW | --detach] [--no-guess]
+                         [-t | --track] [BRANCH | START | -]
+bin/ngit [-C DIR] checkout [-q] [-f] [-b | -B NEW] [--detach] [BRANCH | REV | -]
+bin/ngit [-C DIR] checkout [REV] [--] PATH...
+bin/ngit [-C DIR] rm [--cached] [-r] [-f] [-n] [-q] [--ignore-unmatch] [--] PATH...
+bin/ngit [-C DIR] mv [-f] [-k] [-n] [-v] SRC... DST
+bin/ngit [-C DIR] restore [-s REV] [-S | --staged] [-W | --worktree] [-q] [--] PATH...
+bin/ngit [-C DIR] stash [push [-m MSG] [-k] [-u] [-q] [-- PATH...]]
+bin/ngit [-C DIR] stash (list | show [-p | --stat] | apply [--index] | pop | drop | clear) [STASH]
+bin/ngit [-C DIR] stash branch NAME [STASH]
 bin/ngit [-C DIR] ls-files [-s]
 bin/ngit [-C DIR] status [-s | --porcelain]
 bin/ngit [-C DIR] diff [--cached] [-U N] [--name-only | --name-status] [--no-renames] [REV [REV] | A..B]
@@ -91,6 +109,29 @@ runtime drops =-q=, =-Q=, =--batch= and =--no-init-file= even after =--=.
   format, tracking (ahead/behind, gone), creation with upstream setup,
   deletion, rename/copy with reflogs and HEAD, and config edits that follow
   config.c (set by parse-event offsets, rename/copy/remove sections).
+- =lisp/ngit-show.el= — show: commits like log with --cc dense combined
+  diffs for merges, annotated tags, trees and blobs.
+- =lisp/ngit-tag.el= — tag: listing with filters and sorting, lightweight
+  and annotated creation, -f and -d.
+- =lisp/ngit-checkout.el= — work-tree writes (entry.c write_entry with
+  autocrlf/eol smudge, executable bit, symlinks, gitlinks), index stat
+  refresh, and checkout [REV] -- PATH.
+- =lisp/ngit-reset.el= — reset --soft/--mixed/--hard and path resets; the
+  new index patches only entries whose paths changed between the trees.
+- =lisp/ngit-switch.el= — switch and checkout of branches: twoway merge
+  carrying local changes, overwrite/untracked refusals, tracking DWIM,
+  detached HEAD advice and orphaned-commit warnings.
+- =lisp/ngit-rm.el= — rm (up-to-date and staged-content checks, directory
+  removal) and mv (files, directories, into a directory, case-only renames).
+- =lisp/ngit-restore.el= — restore of the index and/or work tree from the
+  index or a revision.
+- =lisp/ngit-stash.el= — stash: index/work-tree/untracked commits, the
+  refs/stash reflog, list/show/apply/pop/drop/clear/branch.  Applying a stash
+  that needs a content merge is refused.
+- =lisp/ngit-profile.el= — with =NGIT_PROFILE=1=, prints per-phase times
+  to stderr.
+- =ngit-main.el= loads the larger command modules only when an argument
+  names their command (=ngit-main--lazy-modules=).
 - =lisp/ngit-commit.el= — commit: index refresh, -a, COMMIT_EDITMSG,
   commit object, ref and reflog updates, the summary (shortstat, create/
   delete/rename/mode lines), local time zone from TZif files.
@@ -124,9 +165,11 @@ sh test/compare.sh SUITE   # basic rev cat all-objects deltas worktree ls-tree l
                            # commit commit-output log-format log-walk
                            # log-diff log-path log-graph branch-list
                            # branch-filter branch-create branch-modify
-                           # branch-upstream
-sh test/real-write.sh /path/to/repo (tree|add|commit|branch) LIMIT  # on a clone
-sh test/real-log.sh /path/to/repo (walk|diff|graph|branch) LIMIT     # read-only
+                           # branch-upstream reset-index reset-hard tag-list
+                           # tag-write show switch checkout worktree-overlay
+                           # modes rm mv restore stash-push stash-apply
+sh test/real-write.sh /path/to/repo (tree|add|commit|branch|reset|tag|switch|rm-mv|restore|stash) LIMIT  # on a clone
+sh test/real-log.sh /path/to/repo (walk|diff|graph|branch|show) LIMIT     # read-only
 sh test/xdiff-fuzz.sh 300  # xdiff port against git diff --no-index
 sh test/hunk-utf8-check.sh # hunk headers with multibyte/invalid UTF-8 (needs python3)
 nelisp --load test/hash-chars-check.el -- x  # span hash vs reference copy
@@ -146,8 +189,12 @@ variables must be set), date formats other than raw and ISO 8601 in
 GIT_*_DATE, index.version for new indexes, =-uall=/ignored listings, include/includeIf in config,
 custom attribute macros and diff drivers, running from a subdirectory
 (paths are always printed relative to the top, not to the current
-directory), log's --follow, -L, -m/--cc, --simplify-merges,
+directory), log's --follow, -L, -m/--cc (show has the default --cc), --simplify-merges,
 --ancestry-path, --boundary, --left-right, notes, mailmap, %(trailers),
 %w(), padding and color placeholders, --date=relative/human and
 approximate dates (--since takes timestamps and ISO dates with a time),
-branch --format, --column, --edit-description, -t inherit and colors.
+branch --format, --column, --edit-description, -t inherit and colors,
+tag signing/--format/--column/--edit, reset --merge/--keep/-p,
+checkout/switch --merge/--conflict/-p/--overlay options and sparse
+checkouts, restore -p/--ours/--theirs, rm/mv --sparse, stash content
+merges, stash -p/--all/--staged.

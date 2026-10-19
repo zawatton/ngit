@@ -1,0 +1,57 @@
+#+TITLE: ngit reset, tag, show and switch (git in NeLisp, stage 5)
+
+* S1 Reset
+
+** S1.1 reset --soft/--mixed (default) with REV, HEAD~N, -q and pathspecs (reset REV -- PATH) matches git output, refs, reflogs and index
+#+TIMEOUT: 600
+cmd: sh test/compare.sh reset-index
+
+** S1.2 reset --hard (work tree update incl. executable bit, symlinks, CRLF smudge, deleted and new files, untracked files kept) matches git output and resulting state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh reset-hard
+
+** S1.3 On a clone of the real repository, reset --soft/--mixed/--hard to HEAD~1 and back match git state within 150 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" reset 150
+
+* S2 Tag
+
+** S2.1 tag listing (-l PATTERN, -n[N], --contains/--no-contains, --merged/--no-merged, --points-at, --sort) matches git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh tag-list
+
+** S2.2 tag create and delete (lightweight, -a/-m/-F annotated, -f, -d, existing-tag and bad-name errors) match git output, refs and tag objects
+#+TIMEOUT: 600
+cmd: sh test/compare.sh tag-write
+
+** S2.3 On a clone of the real repository, tag create/list/delete sequence matches git within 120 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" tag 120
+
+* S3 Show
+
+** S3.1 show for commits (patch, --stat, -s, --format, --name-status, merges with --cc default output), annotated tags, trees and blobs (REV:PATH) matches git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh show
+
+** S3.2 On the real repository, show of HEAD, HEAD~1..HEAD~5 (-s and --stat) and HEAD:README-like blobs match git within 120 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-log.sh "$NGIT_REAL_REPO" show 120
+
+* S4 Switch and checkout
+
+** S4.1 switch BRANCH, switch -c/-C NEW [START], switch --detach REV, switch - , carrying compatible local changes and refusing conflicting ones, match git output, HEAD, reflogs, index and work tree
+#+TIMEOUT: 600
+cmd: sh test/compare.sh switch
+
+** S4.2 checkout BRANCH / -b NEW / --detach and checkout [REV] -- PATH... match git output and resulting state
+#+TIMEOUT: 600
+cmd: sh test/compare.sh checkout
+
+** S4.3 On a clone of the real repository, switch to a branch a few commits back, back again and checkout HEAD~1 -- PATH match git state within 150 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" switch 150

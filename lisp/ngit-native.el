@@ -58,7 +58,19 @@ back to FALLBACK, the `ffi:defun' wrapper, when that lookup is missing."
 (defconst ngit-native--sys-close 3)
 (defconst ngit-native--sys-open 2)
 (defconst ngit-native--sys-pread64 17)
+(defconst ngit-native--sys-umask 95)
 (defconst ngit-native--o-rdonly-cloexec #o2000000)
+
+(defvar ngit-native--umask nil
+  "Process umask, read and restored once on first use.")
+
+(defun ngit-native-creation-mode (mode)
+  "Return creation MODE masked by the cached process umask."
+  (unless ngit-native--umask
+    (let ((mask (syscall-direct ngit-native--sys-umask 0 0 0 0 0 0)))
+      (syscall-direct ngit-native--sys-umask mask 0 0 0 0 0)
+      (setq ngit-native--umask mask)))
+  (logand mode (lognot ngit-native--umask)))
 
 (defconst ngit-native--z-ok 0)
 (defconst ngit-native--z-data-error -3)

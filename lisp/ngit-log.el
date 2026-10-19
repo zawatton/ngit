@@ -1728,6 +1728,8 @@ the new PENDING, or the symbol `not-a-rev'."
 (defvar ngit--ld-renames t)
 (defvar ngit--ld-full-diff nil)
 (defvar ngit--ld-show-root t)
+(defvar ngit--log-show-state nil
+  "Show's shared [SHOWN-ONE NO-WALK] state, or nil for log.")
 
 (defun ngit--log-changes (repo c)
   "The changes log shows for commit C, or nil when it shows no diff."
@@ -1968,6 +1970,7 @@ cases: combining marks are zero and East Asian wide characters two."
 
 (defun ngit-cmd-log (repo args)
   (let ((pending nil) (flags 0) (paths nil) (seen-rev nil)
+        (no-output (or (member "-q" args) (member "--quiet" args)))
         (fmt (let ((cfg (ngit-config-get repo "format.pretty"))) (if cfg (list 'spec cfg) nil)))
         (abbrev-commit (ngit-config-bool repo "log.abbrevCommit" nil))
         (abbrev-given nil)
@@ -1983,6 +1986,7 @@ cases: combining marks are zero and East Asian wide characters two."
         (grep nil) (grep-mode 'basic)
         (print-parents nil) (graph nil))
     (setq ngit--rv-repo repo
+          ngit--rv-no-walk (and ngit--log-show-state (aref ngit--log-show-state 1))
           ngit--rv-commits nil ngit--rv-limited nil ngit--rv-first-parent nil
           ngit--rv-paths nil ngit--rv-dense t ngit--rv-simplify-history t
           ngit--rv-rewrite-parents nil ngit--rv-topo nil ngit--rv-max-age nil
@@ -2084,8 +2088,9 @@ cases: combining marks are zero and East Asian wide characters two."
          ((string= a "--parents") (setq ngit--rv-rewrite-parents t print-parents t))
          ((string= a "--graph") (setq graph t))
          ((string= a "--no-graph") (setq graph nil))
-         ((member a '("-p" "-u" "--patch")) (push 'patch ngit--ld-formats))
-         ((member a '("-s" "--no-patch")) (setq ngit--ld-formats nil))
+         ((member a '("-p" "-u" "--patch")) (push 'patch ngit--ld-formats) (setq no-output nil))
+         ((member a '("-s" "--no-patch")) (setq ngit--ld-formats nil no-output t))
+         ((member a '("-q" "--quiet")))
          ((string= a "--stat") (push 'stat ngit--ld-formats))
          ((string= a "--shortstat") (push 'shortstat ngit--ld-formats))
          ((string= a "--numstat") (push 'numstat ngit--ld-formats))
@@ -2094,7 +2099,7 @@ cases: combining marks are zero and East Asian wide characters two."
          ((string= a "--summary") (push 'summary ngit--ld-formats))
          ((string-match "\\`\\(?:-U\\|--unified=\\)\\([0-9]+\\)\\'" a)
           (setq ngit--ld-context (string-to-number (match-string 1 a)))
-          (push 'patch ngit--ld-formats))
+          (push 'patch ngit--ld-formats) (setq no-output nil))
          ((string= a "--no-renames") (setq ngit--ld-renames nil))
          ((member a '("-M" "--find-renames")) (setq ngit--ld-renames t))
          ((string= a "--full-diff") (setq ngit--ld-full-diff t))
@@ -2110,6 +2115,10 @@ cases: combining marks are zero and East Asian wide characters two."
                      (when (string= rest "--") (ngit--die "fatal: bad revision '%s'" rest)))
                    (setq paths (append paths (delete "--" args)) args nil))
                   (t (ngit--bad-revision a))))))))
+    (when (or (memq 'name-only ngit--ld-formats) (memq 'name-status ngit--ld-formats))
+      (when (or no-output (and (memq 'name-only ngit--ld-formats) (memq 'name-status ngit--ld-formats)))
+        (ngit--die "fatal: options '--name-only', '--name-status', '--check', and '-s' cannot be used together"))
+      (setq ngit--ld-formats (list (if (memq 'name-only ngit--ld-formats) 'name-only 'name-status))))
     (setq ngit--graph nil)
     (when graph
       (when ngit--rv-reverse
@@ -2170,7 +2179,9 @@ cases: combining marks are zero and East Asian wide characters two."
       (setq ngit--pp-abbrev-format ngit--pp-abbrev)
       (let ((commit-abbrev (and abbrev-commit (or ngit--pp-abbrev (ngit-default-abbrev repo)))))
         (ngit-walk-prepare repo (nreverse pending))
-        (let ((commits nil) (c nil) (shown-one nil) (missing-newline nil))
+        (let ((commits nil) (c nil)
+              (shown-one (and ngit--log-show-state (aref ngit--log-show-state 0)))
+              (missing-newline nil))
           (if ngit--rv-reverse
               (progn
                 (while (setq c (ngit-walk-next)) (push c commits))
@@ -2179,12 +2190,15 @@ cases: combining marks are zero and East Asian wide characters two."
           (while c
             (when ngit--graph (ngit-graph-update c))
             (let* ((hex (ngit--c-hex c))
+                   (combined (and ngit--log-show-state ngit--ld-formats
+                                  (cdr (ngit--c-parents c)) (not ngit--rv-first-parent)))
                    (changes (and ngit--ld-formats (ngit--log-changes repo c))))
               ;; show_log
               (when (and shown-one (not terminator))
                 (unless missing-newline (ngit-graph-show-padding))
                 (ngit--emit "\n"))
               (setq shown-one t)
+              (when ngit--log-show-state (aset ngit--log-show-state 0 t))
               (ngit-graph-show-commit)
               (unless user
                 (ngit--emit
@@ -2209,16 +2223,18 @@ cases: combining marks are zero and East Asian wide characters two."
                 (when (and terminator (not (and user (string= user ""))))
                   (unless missing-newline (ngit-graph-show-padding))
                   (ngit--emit "\n")))
-              (when changes
+              (when (or changes combined)
                 ;; log_tree_diff_flush: a separator after a verbose header,
                 ;; then the diff, each line behind the graph padding.
                 (let ((text (let ((ngit--out nil))
-                              (unless (or (eq pretty 'oneline) (and user (string= user "")))
-                                (ngit--emit (if (and (memq 'stat ngit--ld-formats)
+                              (unless (or (and (not combined) (eq pretty 'oneline))
+                                          (and user (string= user "")))
+                                (ngit--emit (if (and (not combined) (memq 'stat ngit--ld-formats)
                                                      (memq 'patch ngit--ld-formats))
                                                 "---" "")
                                             "\n"))
-                              (ngit--emit-log-diff repo changes)
+                              (if combined (ngit--show-merge-diff repo c)
+                                (ngit--emit-log-diff repo changes))
                               (apply #'concat (nreverse ngit--out)))))
                   (if ngit--graph (ngit--graph-prefix-lines text) (ngit--emit text)))))
             (setq c (if ngit--rv-reverse (pop commits) (ngit-walk-next)))))))

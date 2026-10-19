@@ -25,25 +25,47 @@
 
 ;;;; Files and locks
 
-(defun ngit-write-file (path data &optional excl)
-  "Write unibyte DATA to PATH; with EXCL, fail when PATH exists."
-  (let ((coding-system-for-write 'no-conversion))
-    (write-region data nil path nil 'silent nil (and excl 'excl))))
+(defun ngit-write-file (path data &optional excl append mode)
+  "Write unibyte DATA to PATH; with EXCL, fail when PATH exists.
+With APPEND, append to PATH.  Preserve existing file permissions.
+MODE overrides new file permissions; `defer' leaves them for the caller."
+  (let ((new (and (not (eq mode 'defer)) (or excl (not (file-exists-p path)))))
+        (coding-system-for-write 'no-conversion))
+    (write-region data nil path append 'silent nil (and excl 'excl))
+    (when new
+      (let ((mode (or mode (ngit-native-creation-mode #o666))))
+        ;; Standalone write-region creates files as 0644, ignoring umask.
+        (unless (= (file-modes path) mode) (set-file-modes path mode))))))
 
-(defun ngit-lock (path)
-  "Create PATH.lock exclusively and return its name, or die as git does."
+(defun ngit-make-directory (path &optional parents)
+  "Create PATH, optionally with PARENTS, using the process umask."
+  ;; Unlike write-region, make-directory already honors the process umask.
+  (make-directory path parents))
+
+(defun ngit-lock (path &optional mode)
+  "Create PATH.lock exclusively and return its name, or die as git does.
+MODE controls permissions as in `ngit-write-file'."
   (let ((lock (concat path ".lock")))
     (condition-case nil
-        (ngit-write-file lock "" t)
-      (error (ngit--die "fatal: Unable to create '%s': File exists." lock)))
+        (ngit-write-file lock "" t nil mode)
+      (file-already-exists
+       (ngit--die (concat "fatal: Unable to create '%s': File exists.\n\n"
+                          "Another git process seems to be running in this repository, e.g.\n"
+                          "an editor opened by 'git commit'. Please make sure all processes\n"
+                          "are terminated then try again. If it still fails, a git process\n"
+                          "may have crashed in this repository earlier:\n"
+                          "remove the file manually to continue.")
+                  (expand-file-name lock))))
     lock))
 
 (defun ngit-unlock (lock)
   (when (file-exists-p lock) (delete-file lock)))
 
-(defun ngit-commit-lock (lock data)
-  "Write DATA to LOCK and rename it over the file it guards."
+(defun ngit-commit-lock (lock data &optional mode)
+  "Write DATA to LOCK and rename it over the file it guards.
+With MODE, set final permissions after writing, before the rename."
   (ngit-write-file lock data)
+  (when (and mode (/= (file-modes lock) mode)) (set-file-modes lock mode))
   (rename-file lock (substring lock 0 -5) t))
 
 ;;;; Objects
@@ -66,8 +88,8 @@ With DRY-RUN, only compute the name."
              (dir (file-name-directory path))
              (tmp (concat dir "tmp_obj_" (number-to-string (emacs-pid))
                           "_" (number-to-string (random 1000000000)))))
-        (make-directory dir t)
-        (ngit-write-file tmp obj t)
+        (ngit-make-directory dir t)
+        (ngit-write-file tmp obj t nil 'defer)
         (ngit-write-file tmp (ngit-native-deflate-file tmp (length obj)
                                                        (ngit--loose-level repo)))
         (set-file-modes tmp #o444)
@@ -97,6 +119,56 @@ With DRY-RUN, only compute the name."
 (defun ngit--entry-less (a b)
   (let ((na (aref a 0)) (nb (aref b 0)))
     (or (string< na nb) (and (string= na nb) (< (aref a 3) (aref b 3))))))
+
+(defun ngit-index-overlay (old targets dropped &optional removed)
+  "Patch OLD with TARGETS and exact names in DROPPED, without sorting OLD.
+Remove conflicting ancestors and descendants of TARGETS too.  Call REMOVED
+for topology conflicts, but not for same-name replacements.  Sorted runs of
+unchanged entries are copied as vectors rather than visited individually."
+  (let ((patches nil) (parts nil) (cursor 0)
+        (topology (and removed (make-hash-table :test 'equal))))
+    (let ((drop (lambda (name topology-p)
+                  (let ((lo (ngit-index-find old name)) (hi nil))
+                    (setq hi lo)
+                    (while (and (< hi (length old))
+                                (string= (aref (aref old hi) 0) name))
+                      (when (and topology-p topology)
+                        (puthash name (aref old hi) topology))
+                      (setq hi (1+ hi)))
+                    (when (> hi lo) (push (vector lo hi nil) patches))))))
+      (when dropped (maphash (lambda (name _) (funcall drop name nil)) dropped))
+      (dolist (entry targets)
+        (let* ((name (aref entry 0)) (lo (ngit-index-find old name))
+               (start (ngit-index-find old (concat name "/")))
+               (end (ngit-index-find old (concat name "0")))
+               (pos 0) (slash nil))
+          (funcall drop name nil)
+          (push (vector lo lo entry) patches)
+          (when (> end start)
+            (push (vector start end nil) patches)
+            (when topology
+              (while (< start end)
+                (puthash (aref (aref old start) 0) (aref old start) topology)
+                (setq start (1+ start)))))
+          (while (setq slash (ngit--byte-pos name ?/ pos))
+            (funcall drop (substring name 0 slash) t)
+            (setq pos (1+ slash))))))
+    (setq patches
+          (sort patches
+                (lambda (a b)
+                  (if (= (aref a 0) (aref b 0))
+                      (and (aref b 2)
+                           (or (not (aref a 2))
+                               (string< (aref (aref a 2) 0) (aref (aref b 2) 0))))
+                    (< (aref a 0) (aref b 0))))))
+    (dolist (patch patches)
+      (when (> (aref patch 0) cursor)
+        (push (substring old cursor (aref patch 0)) parts))
+      (setq cursor (max cursor (aref patch 1)))
+      (when (aref patch 2) (push (vector (aref patch 2)) parts)))
+    (when (< cursor (length old)) (push (substring old cursor) parts))
+    (when topology (maphash (lambda (_ entry) (funcall removed entry)) topology))
+    (if patches (apply #'vconcat (nreverse parts)) old)))
 
 (defun ngit-entry-lstat (index e)
   "lstat the work tree path of E.  Version 2/3 entries read from disk
@@ -287,14 +359,17 @@ entries it covers."
          (nlen (length name))
          (pos (aref e 4))
          (eflags (aref e 5))
+         (extended-flags (or (memq 'ita eflags) (memq 'skip-worktree eflags)))
          (stat (if pos (substring raw pos (+ pos 40)) (aref e 6)))
-         (flags (logior (if (and pos (/= 0 (logand (aref raw (+ pos 60)) #x80))) #x8000 0)
-                        (if eflags #x4000 0)
+         (flags (logior (if (or (memq 'assume-unchanged eflags)
+                                 (and pos (/= 0 (logand (aref raw (+ pos 60)) #x80))))
+                             #x8000 0)
+                        (if extended-flags #x4000 0)
                         (ash (aref e 3) 12) (min nlen #xfff)))
          (head (concat (if smudge (concat (substring stat 0 36) "\0\0\0\0") stat)
                        (aref e 1)
                        (unibyte-string (ash flags -8) (logand flags 255))
-                       (if eflags
+                       (if extended-flags
                            (let ((x (logior (if (memq 'ita eflags) #x2000 0)
                                             (if (memq 'skip-worktree eflags) #x4000 0))))
                              (unibyte-string (ash x -8) (logand x 255)))
@@ -315,7 +390,10 @@ hash table CHECKED get git's racy-clean smudge test.  (Positions, not
 the entry vectors: `puthash' of a vector key costs ~1 ms in NeLisp.)"
   (let* ((raw (aref index 1))
          (n (length entries))
-         (extended (seq-some (lambda (e) (aref e 5)) entries))
+         (extended (seq-some (lambda (e)
+                               (let ((flags (aref e 5)))
+                                 (or (memq 'ita flags) (memq 'skip-worktree flags))))
+                             entries))
          (version (cond ((= (aref index 2) 4) 4) (extended 3) (t 2)))
          (reuse (/= version 4))
          (ts (aref index 4))
