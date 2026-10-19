@@ -1,7 +1,7 @@
 #+TITLE: ngit — git implemented in NeLisp
 
 A git implementation (object store, refs, index and work tree inspection,
-plus add and commit) that runs on the NeLisp standalone runtime
+plus add, commit, log and branch) that runs on the NeLisp standalone runtime
 (=target/nelisp=).  Output is byte-identical to git for the supported
 commands, verified by =test/compare.sh= against real git.
 
@@ -12,7 +12,24 @@ bin/ngit [-C DIR] rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-topl
 bin/ngit [-C DIR] symbolic-ref [--short] [HEAD]
 bin/ngit [-C DIR] cat-file (-t | -s | -p | -e | TYPE) OBJECT
 bin/ngit [-C DIR] ls-tree [-r] [-t] [--name-only] TREE-ISH
-bin/ngit [-C DIR] log [-n N | -N] [--format=raw] [REV...]
+bin/ngit [-C DIR] log [-n N] [--skip=N] [--reverse] [--graph] [--oneline]
+                      [--pretty=FMT | --format=FMT] [--abbrev-commit] [--date=MODE]
+                      [--decorate[=short|full]] [--parents] [--all] [--branches[=P]]
+                      [--tags[=P]] [--remotes[=P]] [--not] [--first-parent]
+                      [--merges | --no-merges] [--since=D] [--until=D]
+                      [--author=RE] [--committer=RE] [--grep=RE] [-i] [-E | -F]
+                      [--all-match] [--invert-grep] [--topo-order | --date-order]
+                      [--full-history] [-p] [-U N] [--stat] [--shortstat]
+                      [--numstat] [--name-only] [--name-status] [--summary]
+                      [--no-renames] [--full-diff] [REV | A..B | A...B | ^REV...]
+                      [--] [PATH...]
+bin/ngit [-C DIR] branch [-a | -r] [-v | -vv] [--list PATTERN...] [--show-current]
+                         [--contains C] [--no-contains C] [--merged C]
+                         [--no-merged C] [--points-at OBJ] [--sort=KEY]
+bin/ngit [-C DIR] branch [-f] [-t | --no-track] [-q] NAME [START]
+bin/ngit [-C DIR] branch (-d | -D) [-r] NAME...
+bin/ngit [-C DIR] branch (-m | -M | -c | -C) [OLD] NEW
+bin/ngit [-C DIR] branch (-u UPSTREAM | --unset-upstream) [NAME]
 bin/ngit [-C DIR] ls-files [-s]
 bin/ngit [-C DIR] status [-s | --porcelain]
 bin/ngit [-C DIR] diff [--cached] [-U N] [--name-only | --name-status] [--no-renames] [REV [REV] | A..B]
@@ -52,7 +69,8 @@ runtime drops =-q=, =-Q=, =--batch= and =--no-init-file= even after =--=.
 - =lisp/ngit-changes.el= — tree/tree, tree/index (cache-tree skipping),
   index/work tree, untracked walk, submodule dirtiness, exact renames.
 - =lisp/ngit-xdiff.el= — port of git's xdiff (Myers with git's heuristics,
-  indent heuristic, function-name hunk headers).
+  indent heuristic, function-name hunk headers cut at invalid UTF-8
+  like diff.c sane_truncate_line).
 - =lisp/ngit-status.el=, =lisp/ngit-diff.el= — status and diff output.
 - =lisp/ngit-write.el= — loose objects (zlib =compress2= at
   core.looseCompression, default 1 as in git), locks, the index writer
@@ -62,6 +80,17 @@ runtime drops =-q=, =-Q=, =--batch= and =--no-init-file= even after =--=.
   rehashed and invalidate their cache-tree path, as in git), untracked
   files below literal pathspecs, ignored-path errors, nested repositories
   as gitlinks.
+- =lisp/ngit-log.el= — revision walking ported from revision.c (date
+  queue, limit_list, TREESAME simplification, parent rewriting, topological
+  sort), merge bases (commit-reach.c), pretty formats and user formats
+  (pretty.c), dates, decorations, diff output for log and the history graph
+  (graph.c).
+- =lisp/ngit-rename.el= — diffcore-rename: exact, same-basename and
+  inexact renames with diffcore-delta's span hashes and diff.renameLimit.
+- =lisp/ngit-branch.el= — branch: listing with ref-filter's built-in
+  format, tracking (ahead/behind, gone), creation with upstream setup,
+  deletion, rename/copy with reflogs and HEAD, and config edits that follow
+  config.c (set by parse-event offsets, rename/copy/remove sections).
 - =lisp/ngit-commit.el= — commit: index refresh, -a, COMMIT_EDITMSG,
   commit object, ref and reflog updates, the summary (shortstat, create/
   delete/rename/mode lines), local time zone from TZif files.
@@ -74,7 +103,17 @@ primitives scale with the whole string length.  Measured on 2026-10-17:
 regexp match ~1–17 ms, an =aref= a few µs.  Hot paths therefore use =aref=
 loops and lookup tables instead of =string-search=, =format= and regexps.
 =puthash= with a vector key in an =eq= table costs ~1 ms (an integer key
-~13 µs), so per-entry sets are keyed by index positions.
+~13 µs), so per-entry sets are keyed by index positions.  =maphash= costs
+tens of milliseconds even on a small table, so tables keep side lists.
+
+The faster NeLisp build (=~/.local/bin/nelisp= from the anvil build) makes
+=string-search= native (proportional to the string length per call), which
+ngit uses for tree lookups; the older =target/nelisp= runs ngit about four
+times slower.  Objects are found through the loose listing of their
+=objects/XX= directory first and then the packs in most-recently-hit
+order, abbreviations follow find_unique_abbrev with one binary search per
+pack, and zlib's =uncompress2= is called through =ptr-call= with an address
+resolved once.
 
 * Tests
 
@@ -82,9 +121,15 @@ loops and lookup tables instead of =string-search=, =format= and regexps.
 sh test/compare.sh SUITE   # basic rev cat all-objects deltas worktree ls-tree log
                            # index attr-config diff status status-long
                            # write-objects index-write write-tree add add-all
-                           # commit commit-output
-sh test/real-write.sh /path/to/repo (tree|add|commit) LIMIT  # on a clone
+                           # commit commit-output log-format log-walk
+                           # log-diff log-path log-graph branch-list
+                           # branch-filter branch-create branch-modify
+                           # branch-upstream
+sh test/real-write.sh /path/to/repo (tree|add|commit|branch) LIMIT  # on a clone
+sh test/real-log.sh /path/to/repo (walk|diff|graph|branch) LIMIT     # read-only
 sh test/xdiff-fuzz.sh 300  # xdiff port against git diff --no-index
+sh test/hunk-utf8-check.sh # hunk headers with multibyte/invalid UTF-8 (needs python3)
+nelisp --load test/hash-chars-check.el -- x  # span hash vs reference copy
 NGIT_REAL_REPO=/path/to/repo sh test/compare.sh real
 bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Notes
 #+end_src
@@ -92,12 +137,17 @@ bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Note
 * Not supported yet
 
 Network, alternates, multi-pack-index, reftable, split or sparse
-indexes, SHA-256 repositories, glob and magic pathspecs, inexact
-(similarity) renames and copies, unmerged entries, hooks, commit
+indexes, SHA-256 repositories, magic pathspecs (log takes literal and glob pathspecs), copy detection
+and inexact renames outside log (status, diff and commit summaries
+detect exact renames only), unmerged entries, hooks, commit
 signing, an editor for commit messages (use -m or -F), commit with
 paths, guessed identities (user.name and user.email or the GIT_*
 variables must be set), date formats other than raw and ISO 8601 in
 GIT_*_DATE, index.version for new indexes, =-uall=/ignored listings, include/includeIf in config,
 custom attribute macros and diff drivers, running from a subdirectory
 (paths are always printed relative to the top, not to the current
-directory), other log formats and options.
+directory), log's --follow, -L, -m/--cc, --simplify-merges,
+--ancestry-path, --boundary, --left-right, notes, mailmap, %(trailers),
+%w(), padding and color placeholders, --date=relative/human and
+approximate dates (--since takes timestamps and ISO dates with a time),
+branch --format, --column, --edit-description, -t inherit and colors.

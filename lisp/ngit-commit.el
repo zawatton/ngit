@@ -304,8 +304,68 @@ ISO 8601 (\"YYYY-MM-DD[T ]HH:MM[:SS][ ][TZ]\")."
                       (substring b pfx (+ pfx bm)) "}" (substring a (- la sfx)))
             (concat (substring a pfx (+ pfx am)) " => " (substring b pfx (+ pfx bm)))))))))
 
+(defun ngit--count-lines (s)
+  "Number of lines in S, a final unterminated line included."
+  (if (< (length s) 4096)
+      (let ((n 0) (i 0) (len (length s)))
+        (while (< i len)
+          (when (= (aref s i) ?\n) (setq n (1+ n)))
+          (setq i (1+ i)))
+        (if (and (> len 0) (/= (aref s (1- len)) ?\n)) (1+ n) n))
+    ;; `count-lines' scans natively; an aref loop costs microseconds a byte.
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert s)
+      (count-lines (point-min) (point-max)))))
+
+(defun ngit--common-prefix-bytes (a b)
+  "Length of the common prefix of A and B, found with native `string='."
+  (let* ((n (min (length a) (length b))) (i 0) (blk 4096))
+    (while (and (<= (+ i blk) n) (string= (substring a i (+ i blk)) (substring b i (+ i blk))))
+      (setq i (+ i blk)))
+    (let ((lo i) (hi (min n (+ i blk))))
+      (while (< lo hi)
+        (let ((mid (/ (+ lo hi 1) 2)))
+          (if (string= (substring a i mid) (substring b i mid))
+              (setq lo mid)
+            (setq hi (1- mid)))))
+      lo)))
+
+(defun ngit--common-suffix-bytes (a b limit)
+  "Length (at most LIMIT) of the common suffix of A and B."
+  (let ((la (length a)) (lb (length b)) (i 0) (blk 4096))
+    (while (and (<= (+ i blk) limit)
+                (string= (substring a (- la i blk) (- la i)) (substring b (- lb i blk) (- lb i))))
+      (setq i (+ i blk)))
+    (let ((lo i) (hi (min limit (+ i blk))))
+      (while (< lo hi)
+        (let ((mid (/ (+ lo hi 1) 2)))
+          (if (string= (substring a (- la mid) (- la i)) (substring b (- lb mid) (- lb i)))
+              (setq lo mid)
+            (setq hi (1- mid)))))
+      lo)))
+
 (defun ngit--count-changed-lines (old new)
-  "Return (ADDED . DELETED) lines between OLD and NEW."
+  "Return (ADDED . DELETED) lines between OLD and NEW.
+Identical leading and trailing lines are cut off first (xdiff trims them
+too), so only the changed middle is split into lines, which costs
+microseconds per byte in NeLisp."
+  (let* ((p (ngit--common-prefix-bytes old new)))
+    (while (and (> p 0) (/= (aref old (1- p)) ?\n)) (setq p (1- p)))
+    (let* ((la (length old)) (lb (length new))
+           (sfx (ngit--common-suffix-bytes old new (- (min la lb) p))))
+      (while (and (> sfx 0)
+                  (not (and (or (= (- la sfx) p) (= (aref old (- la sfx 1)) ?\n))
+                            (or (= (- lb sfx) p) (= (aref new (- lb sfx 1)) ?\n)))))
+        (setq sfx (1- sfx)))
+      (let ((mo (substring old p (- la sfx))) (mn (substring new p (- lb sfx))))
+        (cond ((and (string= mo "") (string= mn "")) (cons 0 0))
+              ((string= mo "") (cons (ngit--count-lines mn) 0))
+              ((string= mn "") (cons 0 (ngit--count-lines mo)))
+              (t (ngit--count-changed-lines-xdiff mo mn)))))))
+
+(defun ngit--count-changed-lines-xdiff (old new)
+  "Return (ADDED . DELETED) lines between OLD and NEW, from xdiff."
   (let ((hunks (ngit-xdiff-unified old new 0)) (add 0) (del 0) (pos 0))
     (while (< pos (length hunks))
       (let ((c (aref hunks pos)))

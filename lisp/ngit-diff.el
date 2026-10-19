@@ -47,7 +47,8 @@
                          (ngit--octal6 new-mode) "\n")
                  header)))
     (when rename
-      (push (concat "similarity index 100%\nrename from " (ngit-quote-path path-a)
+      (push (concat "similarity index " (number-to-string (if (numberp rename) rename 100))
+                    "%\nrename from " (ngit-quote-path path-a)
                     "\nrename to " (ngit-quote-path path-b) "\n")
             header))
     (unless (equal old-bin new-bin)
@@ -90,7 +91,10 @@
           (ngit--emit-patch-part repo old-path path old-mode (aref c 3) 0 nil nil nil nil ctx)
           (ngit--emit-patch-part repo old-path path 0 nil new-mode new-bin (aref c 7) nil nil ctx))
       (ngit--emit-patch-part repo old-path path old-mode (aref c 3) new-mode new-bin
-                             (aref c 7) dirty (= (aref c 1) ?R) ctx))))
+                             (aref c 7) dirty
+                             (and (= (aref c 1) ?R)
+                                  (if (> (length c) 9) (/ (* (aref c 9) 100) 60000) 100))
+                             ctx))))
 
 (defun ngit--compose-tree-wt (tree-changes wt-changes)
   "Combine tree->index and index->work tree changes into tree->work tree."

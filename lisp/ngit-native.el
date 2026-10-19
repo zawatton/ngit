@@ -35,6 +35,26 @@
   [:sint32 :pointer :pointer :pointer :uint64 :sint32]
   "compress2(dest, &destLen, source, sourceLen, level).")
 
+(defvar ngit-native--direct (make-hash-table :test 'equal)
+  "Resolved addresses of the zlib functions, for direct `ptr-call's.")
+
+(defun ngit-native--zlib-call (symbol fallback &rest args)
+  "Call zlib SYMBOL with ARGS (at most six integers) through `ptr-call'.
+`ffi:defun' wrappers convert arguments, miss the build-time table and
+re-resolve the symbol on every call, which costs most of a millisecond;
+the address resolved once by nl-ffi's own lookup is equivalent.  Falls
+back to FALLBACK, the `ffi:defun' wrapper, when that lookup is missing."
+  (let ((addr (or (gethash symbol ngit-native--direct)
+                  (puthash symbol
+                           (if (and (fboundp 'nl-ffi--resolve-via-dlsym) (fboundp 'ptr-call))
+                               (funcall 'nl-ffi--resolve-via-dlsym symbol)
+                             0)
+                           ngit-native--direct))))
+    (if (zerop addr)
+        (apply fallback args)
+      (let ((padded (append args (make-list (- 6 (length args)) 0))))
+        (apply #'ptr-call addr padded)))))
+
 (defconst ngit-native--sys-close 3)
 (defconst ngit-native--sys-open 2)
 (defconst ngit-native--sys-pread64 17)
@@ -76,18 +96,11 @@
             (nl-ffi-memory-allocate (max size 4096 (if owner (* 2 (aref owner 3)) 0)))))))
 
 (defun ngit-native--write-bytes (addr bytes)
-  "Copy unibyte BYTES to ADDR, four bytes per store."
-  (let ((n (length bytes)) (i 0))
-    (while (<= (+ i 4) n)
-      (ptr-write-u32 addr i (logior (aref bytes i) (ash (aref bytes (+ i 1)) 8)
-                                    (ash (aref bytes (+ i 2)) 16)
-                                    (ash (aref bytes (+ i 3)) 24)))
-      (setq i (+ i 4)))
-    (while (< i n)
-      (ptr-write-u8 addr i (aref bytes i))
-      (setq i (1+ i)))))
+  "Copy unibyte BYTES to ADDR."
+  (ptr-write-bytes addr bytes))
 
-(defun ngit-native--open (path)
+(defun ngit-native-try-open (path)
+  "Open PATH read-only and cache the descriptor; return nil when that fails."
   (or (gethash path ngit-native--fds)
       (let* ((bytes (encode-coding-string path 'utf-8))
              (addr (nl-ffi-memory-address
@@ -96,9 +109,11 @@
         (ptr-write-u8 addr (length bytes) 0)
         (let ((fd (syscall-direct ngit-native--sys-open addr
                                   ngit-native--o-rdonly-cloexec 0 0 0 0)))
-          (when (< fd 0)
-            (error "ngit: cannot open %s (errno %d)" path (- fd)))
-          (puthash path fd ngit-native--fds)))))
+          (and (>= fd 0) (puthash path fd ngit-native--fds))))))
+
+(defun ngit-native--open (path)
+  (or (ngit-native-try-open path)
+      (error "ngit: cannot open %s" path)))
 
 (defun ngit-native--pread (path owner offset len)
   "Read up to LEN bytes of PATH at OFFSET into OWNER; return the count."
@@ -139,14 +154,16 @@
           (setq i (1+ i)))
         (syscall-direct 1 2 addr (length bytes) 0 0 0)))))
 
-(defun ngit-native--inflate-once (src src-len dst-cap)
-  "Inflate SRC-LEN bytes of owner SRC into a DST-CAP buffer.
+(defun ngit-native--inflate-once (src src-len dst-cap &optional skip)
+  "Inflate SRC-LEN bytes of owner SRC (from byte SKIP) into a DST-CAP buffer.
 Return (RC . (DATA . CONSUMED)); DATA is nil unless RC is Z_OK."
   (let ((da (nl-ffi-memory-address (ngit-native--buffer 1 dst-cap)))
         (la (nl-ffi-memory-address (ngit-native--buffer 2 16))))
     (ptr-write-u64 la 0 dst-cap)
     (ptr-write-u64 la 8 src-len)
-    (let ((rc (ngit-native--uncompress2 da la (nl-ffi-memory-address src) (+ la 8))))
+    (let ((rc (ngit-native--zlib-call "uncompress2" #'ngit-native--uncompress2
+                                      da la (+ (nl-ffi-memory-address src) (or skip 0))
+                                      (+ la 8))))
       ;; The dlsym path returns :sint32 zero-extended; sign-extend it.
       (setq rc (logand rc #xffffffff))
       (when (>= rc #x80000000) (setq rc (- rc #x100000000)))
@@ -183,6 +200,38 @@ Return (DATA . CONSUMED-COMPRESSED-BYTES)."
     (when (and size (/= (length (car result)) size))
       (error "ngit: inflated %d bytes, expected %d (%s at %d)"
              (length (car result)) size path offset))
+    result))
+
+(defun ngit-native-read-head (path offset len)
+  "Read up to LEN bytes of PATH at OFFSET into the read buffer.
+Return the number of bytes read; see `ngit-native-head-bytes' and
+`ngit-native-inflate-head'."
+  (ngit-native--pread path (ngit-native--buffer 0 len) offset len))
+
+(defun ngit-native-head-bytes (n)
+  "Return the first N bytes of the read buffer as a unibyte string."
+  (ptr-read-bytes (nl-ffi-memory-address (aref ngit-native--buffers 0)) n))
+
+(defun ngit-native-inflate-head (skip avail size)
+  "Inflate the SIZE-byte stream at byte SKIP of the read buffer.
+AVAIL bytes are available from SKIP.  Return the data, or nil when the
+stream does not inflate from those bytes."
+  (let ((r (ngit-native--inflate-once (aref ngit-native--buffers 0) avail size skip)))
+    (and (= (car r) ngit-native--z-ok)
+         (= (length (cadr r)) size)
+         (cadr r))))
+
+(defun ngit-native-inflate-whole-head (n)
+  "Inflate the N bytes in the read buffer, a whole zlib stream of unknown
+inflated size.  Return the data, or nil when it does not inflate."
+  (let ((cap (+ (* 4 n) 1024)) (result nil) (done nil))
+    (while (not done)
+      (let* ((r (ngit-native--inflate-once (aref ngit-native--buffers 0) n cap))
+             (rc (car r)))
+        (cond ((= rc ngit-native--z-ok) (setq result (cadr r) done t))
+              ((and (= rc ngit-native--z-buf-error) (< cap (* 64 1024 1024)))
+               (setq cap (* 2 cap)))
+              (t (setq done t)))))
     result))
 
 (defun ngit-native-deflate-file (path len level)

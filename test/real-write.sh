@@ -4,6 +4,8 @@
 #            has staged the modifications
 #   add    - add -A after modifying the clone
 #   commit - commit -a -m after modifying the clone (fixed dates)
+#   branch - a create/track/rename/copy/upstream/delete sequence; config,
+#            packed-refs, refs, reflogs and output must match
 # git and ngit start from the same index (and refs, for commit); the
 # resulting index bytes, stdout and HEAD must be identical, and ngit's
 # runs must take at most LIMIT seconds in total.  The clone lives in
@@ -50,9 +52,9 @@ mkdir -p ngit-real-write-dir/sub && echo new >ngit-real-write-dir/sub/n.txt
 
 snap="$out/snap"
 save() { rm -rf "$snap"; mkdir -p "$snap"
-  for p in index HEAD refs logs packed-refs COMMIT_EDITMSG; do
+  for p in index HEAD refs logs packed-refs COMMIT_EDITMSG config; do
     [ -e ".git/$p" ] && cp -a ".git/$p" "$snap/"; done; }
-restore() { for p in index HEAD refs logs packed-refs COMMIT_EDITMSG; do
+restore() { for p in index HEAD refs logs packed-refs COMMIT_EDITMSG config; do
     rm -rf ".git/$p"; [ -e "$snap/$p" ] && cp -a "$snap/$p" ".git/$p"; done; }
 spent=0
 timed() { # timed OUTFILE ARGS...: run ngit, add the elapsed time to $spent
@@ -87,6 +89,30 @@ case $mode in
     save; run_both add add -A ;;
   commit)
     save; run_both commit commit -a -m "ngit real-write commit" ;;
+  branch)
+    save
+    upstream=$(git for-each-ref --format='%(refname:short)' refs/remotes | grep -v HEAD | head -1)
+    branch_state() { # branch_state FILE: refs, packed-refs, config and reflogs
+      { cat .git/config; cat .git/packed-refs 2>/dev/null
+        (cd .git && find refs logs -type f | sort | while read -r f; do echo "== $f"; cat "$f"; done)
+        git for-each-ref; } >"$1"; }
+    for tool in git ngit; do
+      restore
+      for cmd in "branch nb1" "branch nb2 HEAD~5" "branch -t nb3 HEAD~2" "branch nb4 $upstream" \
+                 "branch -a -vv" "branch -m nb1 nb1r" "branch -c nb2 nb2c" "branch -u $upstream nb2c" \
+                 "branch --unset-upstream nb4" "branch -d nb1r" "branch -D nb2" "branch -vv"; do
+        # shellcheck disable=SC2086
+        if [ $tool = git ]; then
+          git -c gc.auto=0 $cmd; echo "exit $?"
+        else
+          s=$(date +%s.%N); "$ngit" $cmd; st=$?; e=$(date +%s.%N)
+          spent=$(echo "$spent + $e - $s" | bc); echo "exit $st"
+        fi
+      done >"$out/$tool.out" 2>&1
+      branch_state "$out/$tool.state"
+    done
+    same "branch output" "$out/git.out" "$out/ngit.out"
+    same "branch state" "$out/git.state" "$out/ngit.state" ;;
   *) echo "unknown mode $mode"; exit 2 ;;
 esac
 echo "ngit total: ${spent}s (limit ${limit}s)"

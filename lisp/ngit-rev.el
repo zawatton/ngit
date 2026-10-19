@@ -67,6 +67,47 @@
       (setq rules (cdr rules)))
     found))
 
+;;;; Ref listing
+
+(defun ngit--loose-ref-names (dir prefix acc)
+  "Push the names of loose refs below DIR (named PREFIX...) onto ACC."
+  (dolist (f (directory-files dir nil nil t))
+    (unless (member f '("." ".."))
+      (let ((path (concat dir "/" f)))
+        (if (file-directory-p path)
+            (setq acc (ngit--loose-ref-names path (concat prefix f "/") acc))
+          (unless (string-suffix-p ".lock" f)
+            (push (concat prefix f) acc))))))
+  acc)
+
+(defun ngit-list-refs (repo &optional prefix)
+  "Return the refs of REPO below PREFIX (default \"refs/\"), sorted by name.
+Each element is (REFNAME HEX SYMREF-TARGET); loose refs override packed
+ones and refs that do not resolve are left out."
+  (let* ((prefix (or prefix "refs/"))
+         (common (ngit-repo-commondir repo))
+         (dir (directory-file-name (expand-file-name prefix common)))
+         (names (make-hash-table :test 'equal))
+         (all nil)
+         (out nil))
+    ;; `maphash' is slow in NeLisp; collect the distinct names as we go.
+    (dolist (r (ngit--packed-refs repo))
+      (when (and r (string-prefix-p prefix (car r)) (not (gethash (car r) names)))
+        (puthash (car r) t names)
+        (push (car r) all)))
+    (when (file-directory-p dir)
+      (dolist (n (ngit--loose-ref-names dir prefix nil))
+        (unless (gethash n names)
+          (puthash n t names)
+          (push n all))))
+    (progn
+      (dolist (name (sort all #'string<))
+        (let* ((raw (ngit-read-ref repo name))
+               (target (and raw (string-prefix-p "ref: " raw) (substring raw 5)))
+               (hex (and raw (ngit-resolve-ref repo name))))
+          (when hex (push (list name hex target) out)))))
+    (nreverse out)))
+
 ;;;; Peeling
 
 (defun ngit--object-type (repo hex)

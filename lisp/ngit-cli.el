@@ -4,7 +4,7 @@
 
 ;; Command implementations whose stdout is meant to be byte-identical to
 ;; git's for the supported options: rev-parse, symbolic-ref, cat-file,
-;; ls-tree and log (medium and raw formats).  `ngit-main' dispatches a
+;; ls-tree; log lives in ngit-log.el.  `ngit-main' dispatches a
 ;; git-style argument list and returns the process exit status.
 
 ;;; Code:
@@ -24,6 +24,10 @@
 (defun ngit--die (fmt &rest args)
   (signal 'ngit-fatal (list (apply #'format fmt args))))
 
+(defun ngit--die-with (status fmt &rest args)
+  "Like `ngit--die' but exit with STATUS (e.g. 129 for usage errors)."
+  (signal 'ngit-fatal (list (apply #'format fmt args) status)))
+
 (define-error 'ngit-fatal "ngit fatal error")
 
 ;;;; Abbreviation
@@ -39,12 +43,61 @@
               (while (> count 0) (setq count (ash count -1) msb (1+ msb)))
               (max 7 (/ (1+ (+ msb 2)) 2))))))
 
-(defun ngit-abbrev (repo hex)
-  "Return the shortest unique abbreviation of HEX, at least the default."
-  (let ((len (ngit-default-abbrev repo)))
-    (while (and (< len 40) (cdr (ngit-find-prefix repo (substring hex 0 len))))
-      (setq len (1+ len)))
-    (substring hex 0 len)))
+(defvar ngit--abbrev-cache (make-hash-table :test 'equal)
+  "Unique abbreviations at the default length, by hex name.")
+
+(defvar ngit--abbrev-cache (make-hash-table :test 'equal)
+  "Unique abbreviations at the default length, by hex name.")
+
+(defun ngit-abbrev-forget ()
+  "Drop cached abbreviations after objects were written."
+  (clrhash ngit--abbrev-cache)
+  (ngit-forget-loose-names))
+
+(defun ngit--common-hex-digits (a b)
+  "Number of leading hex digits shared by the 20-byte names A and B."
+  (let ((i 0))
+    (while (and (< i 20) (= (aref a i) (aref b i))) (setq i (1+ i)))
+    (if (= i 20)
+        40
+      (+ (* 2 i) (if (= (ash (aref a i) -4) (ash (aref b i) -4)) 1 0)))))
+
+(defun ngit--abbrev-len (repo bin len)
+  "git's find_unique_abbrev: LEN extended past the names next to BIN in
+each pack and past the loose names sharing its first two bytes."
+  (let ((cur len))
+    (dolist (pack (ngit-repo-packs repo))
+      (let* ((slice (ngit--pack-slice pack (aref bin 0)))
+             (count (/ (length slice) 20))
+             (pos (ngit--slice-lower-bound slice bin))
+             (exact (and (< pos count)
+                         (string= (substring slice (* 20 pos) (+ 20 (* 20 pos))) bin))))
+        (dolist (i (list (if exact (1+ pos) pos) (1- pos)))
+          (when (and (>= i 0) (< i count))
+            (let ((c (ngit--common-hex-digits bin (substring slice (* 20 i) (+ 20 (* 20 i))))))
+              (when (and (< c 32) (>= c cur)) (setq cur (1+ c))))))))
+    (let* ((hex (ngit-hex bin))
+           (rest (substring hex 2))
+           (prefix (substring hex 2 4)))
+      (dolist (f (gethash prefix (ngit-loose-names repo (substring hex 0 2))))
+        (unless (string= f rest)
+          (let ((i 2))
+            (while (and (< i 38) (= (aref f i) (aref rest i))) (setq i (1+ i)))
+            (let ((c (+ 2 i)))
+              (when (and (< c 32) (>= c cur)) (setq cur (1+ c))))))))
+    cur))
+
+(defun ngit-abbrev (repo hex &optional len)
+  "Return the shortest unique abbreviation of HEX with at least LEN digits
+(default: git's automatic length)."
+  (let ((default (null len)))
+    (or (and default (gethash hex ngit--abbrev-cache))
+        (let* ((len (or len (ngit-default-abbrev repo)))
+               (abbrev (if (>= len 40)
+                           hex
+                         (substring hex 0 (min 40 (ngit--abbrev-len repo (ngit-unhex hex) len))))))
+          (when default (puthash hex abbrev ngit--abbrev-cache))
+          abbrev))))
 
 ;;;; Path quoting (core.quotePath=true)
 
@@ -257,80 +310,8 @@ Parsed from the end with `aref'; a regexp costs milliseconds here."
 
 ;;;; log
 
-(defun ngit--indent-message (msg)
-  "Indent each line of MSG by four spaces the way git's pretty printer does."
-  (let ((lines (split-string msg "\n")))
-    ;; Drop the empty string after the final newline.
-    (when (and lines (string= (car (last lines)) ""))
-      (setq lines (butlast lines)))
-    (mapconcat (lambda (l) (concat "    " l "\n")) lines "")))
-
 (defun ngit--commit-date (parsed)
   (nth 1 (ngit--split-ident (or (ngit-header parsed "committer") ""))))
-
-(defun ngit--log-entry (repo hex data parsed format)
-  (if (eq format 'raw)
-      (let ((end (ngit--header-end data)))
-        (concat "commit " hex "\n" (substring data 0 end) "\n\n"
-                (ngit--indent-message (plist-get parsed :message))))
-    (let* ((parents (ngit-header-all parsed "parent"))
-           (author (ngit--split-ident (or (ngit-header parsed "author") ""))))
-      (concat "commit " hex "\n"
-              (if (cdr parents)
-                  (concat "Merge: "
-                          (mapconcat (lambda (p) (ngit-abbrev repo p)) parents " ")
-                          "\n")
-                "")
-              "Author: " (nth 0 author) "\n"
-              "Date:   " (ngit-format-date (nth 1 author) (nth 2 author)) "\n\n"
-              (ngit--indent-message (plist-get parsed :message))))))
-
-(defun ngit-cmd-log (repo args)
-  (let ((limit -1) (format 'medium) (revs nil))
-    (while args
-      (let ((a (pop args)))
-        (cond ((string= a "-n") (setq limit (string-to-number (pop args))))
-              ((string-match "\\`-n?\\([0-9]+\\)\\'" a)
-               (setq limit (string-to-number (match-string 1 a))))
-              ((string-prefix-p "--max-count=" a)
-               (setq limit (string-to-number (substring a 12))))
-              ((member a '("--format=raw" "--pretty=raw")) (setq format 'raw))
-              ((member a '("--format=medium" "--pretty=medium" "--pretty" "--no-decorate"))
-               (setq format 'medium))
-              ((string-prefix-p "-" a) (ngit--die "unsupported log option %s" a))
-              (t (push a revs)))))
-    (let ((seen (make-hash-table :test 'equal))
-          (queue nil)
-          (counter 0)
-          (first t))
-      ;; QUEUE holds (DATE COUNTER HEX DATA PARSED), newest date first,
-      ;; insertion order among equal dates, like git's prio_queue.
-      (let ((enqueue
-             (lambda (hex)
-                  (unless (gethash hex seen)
-                    (puthash hex t seen)
-                    (let* ((data (cdr (ngit-read-object repo (ngit-unhex hex))))
-                           (parsed (ngit-parse-commit data))
-                           (item (list (ngit--commit-date parsed) (setq counter (1+ counter))
-                                       hex data parsed)))
-                      (if (or (null queue) (> (car item) (caar queue)))
-                          (push item queue)
-                        (let ((cell queue))
-                          (while (and (cdr cell) (<= (car item) (car (cadr cell))))
-                            (setq cell (cdr cell)))
-                          (setcdr cell (cons item (cdr cell))))))))))
-        (dolist (r (or (nreverse revs) '("HEAD")))
-          (funcall enqueue (ngit-peel repo (ngit-rev-parse repo r) 'commit)))
-        (while (and queue (/= limit 0))
-          (let ((item (pop queue)))
-            (unless first (ngit--emit "\n"))
-            (setq first nil)
-            (ngit--emit (ngit--log-entry repo (nth 2 item) (nth 3 item) (nth 4 item) format))
-            (setq limit (1- limit))
-            (when (/= limit 0)
-              (dolist (p (ngit-header-all (nth 4 item) "parent"))
-                (funcall enqueue p)))))))
-    0))
 
 (defun ngit-cmd-test-cat-all (repo _args)
   "Test hook: `cat-file -t' and `-p' for every name in $NGIT_BATCH_LIST.
@@ -366,7 +347,8 @@ Each object is also verified against its SHA-1 before it is printed."
     ("write-tree" . ngit-cmd-write-tree)
     ("update-index" . ngit-cmd-update-index)
     ("add" . ngit-cmd-add)
-    ("commit" . ngit-cmd-commit)))
+    ("commit" . ngit-cmd-commit)
+    ("branch" . ngit-cmd-branch)))
 
 (defun ngit-main (args)
   "Run the git-style command line ARGS; return the exit status."
@@ -389,7 +371,7 @@ Each object is also verified against its SHA-1 before it is printed."
                         (cadr err)
                       (error-message-string err))
                     "\n"))
-           128))))))
+           (or (and (eq (car err) 'ngit-fatal) (nth 2 err)) 128)))))))
 
 (provide 'ngit-cli)
 

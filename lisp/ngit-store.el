@@ -45,13 +45,34 @@ the whole string in NeLisp."
       (setq i (1+ i)))
     (and (< i n) i)))
 
+(defconst ngit--nibbles
+  (let ((v (make-vector 128 0)) (i 0))
+    (while (< i 10) (aset v (+ ?0 i) i) (setq i (1+ i)))
+    (setq i 0)
+    (while (< i 6) (aset v (+ ?a i) (+ 10 i)) (aset v (+ ?A i) (+ 10 i)) (setq i (1+ i)))
+    v)
+  "Value of each hex digit character.")
+
+(defmacro ngit--unhex-40 (hex tb)
+  "Unrolled conversion of the 40-character HEX using nibble table TB."
+  `(unibyte-string
+    ,@(let (forms (i 0))
+        (while (< i 40)
+          (push `(+ (ash (aref ,tb (aref ,hex ,i)) 4) (aref ,tb (aref ,hex ,(1+ i)))) forms)
+          (setq i (+ i 2)))
+        (nreverse forms))))
+
 (defun ngit-unhex (hex)
-  "Return the unibyte string for the even-length HEX string."
-  (let ((bytes nil) (i 0) (n (length hex)))
-    (while (< i n)
-      (push (string-to-number (substring hex i (+ i 2)) 16) bytes)
-      (setq i (+ i 2)))
-    (apply #'unibyte-string (nreverse bytes))))
+  "Return the unibyte string for the even-length HEX string.
+Per-call overhead dominates in NeLisp, so 40-digit names are unrolled."
+  (let ((tb ngit--nibbles))
+    (if (= (length hex) 40)
+        (ngit--unhex-40 hex tb)
+      (let ((bytes nil) (i 0) (n (length hex)))
+        (while (< i n)
+          (push (+ (ash (aref tb (aref hex i)) 4) (aref tb (aref hex (1+ i)))) bytes)
+          (setq i (+ i 2)))
+        (apply #'unibyte-string (nreverse bytes))))))
 
 (defun ngit-hex-p (s &optional len)
   "Non-nil when S is a lowercase/uppercase hex string (of LEN chars)."
@@ -132,7 +153,7 @@ Honors GIT_DIR.  Signals an error outside a repository."
       (error "ngit: unsupported pack index (only v2): %s" idx-path))
     (vector (concat (substring idx-path 0 -4) ".pack") idx-path
             (ngit--be32 head (+ 8 (* 4 255))) head
-            (make-hash-table :test 'eql) (make-hash-table :test 'eql))))
+            (make-hash-table :test 'eql) (make-hash-table :test 'eql) nil)))
 
 (defun ngit-repo-packs (repo)
   "Return the list of packs of REPO, loading the indexes on first use."
@@ -160,31 +181,47 @@ Honors GIT_DIR.  Signals an error outside a repository."
                  cache))))
 
 (defun ngit--slice-lower-bound (slice key)
-  "First position in SLICE whose name prefix is not less than KEY."
+  "First position in SLICE whose name prefix is not less than KEY.
+Names in a slice share their first byte, so the second byte usually
+decides a probe without building a substring."
   (let ((lo 0) (hi (/ (length slice) 20)) (k (length key)))
-    (while (< lo hi)
-      (let ((mid (/ (+ lo hi) 2)))
-        (if (string< (substring slice (* 20 mid) (+ (* 20 mid) k)) key)
-            (setq lo (1+ mid))
-          (setq hi mid))))
+    (if (< k 2)
+        (while (< lo hi)
+          (let ((mid (/ (+ lo hi) 2)))
+            (if (string< (substring slice (* 20 mid) (+ (* 20 mid) k)) key)
+                (setq lo (1+ mid))
+              (setq hi mid))))
+      (let ((k1 (aref key 1)))
+        (while (< lo hi)
+          (let* ((mid (ash (+ lo hi) -1))
+                 (at (* 20 mid))
+                 (b (aref slice (1+ at))))
+            (if (or (< b k1)
+                    (and (= b k1) (string< (substring slice at (+ at k)) key)))
+                (setq lo (1+ mid))
+              (setq hi mid))))))
     lo))
 
 (defun ngit--pack-find (pack bin)
   "Return the index position of BIN in PACK, or nil."
   (let* ((slice (ngit--pack-slice pack (aref bin 0)))
-         (pos (ngit--slice-lower-bound slice bin)))
-    (and (< (* 20 pos) (length slice))
-         (string= (substring slice (* 20 pos) (+ 20 (* 20 pos))) bin)
+         (pos (ngit--slice-lower-bound slice bin))
+         (at (* 20 pos)))
+    (and (< at (length slice))
+         (string= (substring slice at (+ 20 at)) bin)
          (+ pos (car (ngit--pack-range pack (aref bin 0)))))))
 
 (defun ngit--pack-offset (pack index)
+  "Offset of the INDEXth entry of PACK; the 4-byte table is read once."
   (let* ((n (aref pack 2))
-         (idx (aref pack 1))
-         (off (ngit--be32 (ngit-native-read-bytes idx (+ 1032 (* 24 n) (* 4 index)) 4) 0)))
+         (table (or (aref pack 6)
+                    (aset pack 6 (ngit-native-read-bytes (aref pack 1) (+ 1032 (* 24 n))
+                                                         (* 4 n)))))
+         (off (ngit--be32 table (* 4 index))))
     (if (zerop (logand off #x80000000))
         off
       (let ((s (ngit-native-read-bytes
-                idx (+ 1032 (* 28 n) (* 8 (logand off #x7fffffff))) 8)))
+                (aref pack 1) (+ 1032 (* 28 n) (* 8 (logand off #x7fffffff))) 8)))
         (logior (ash (ngit--be32 s 0) 32) (ngit--be32 s 4))))))
 
 ;;;; Pack entries
@@ -237,12 +274,25 @@ Honors GIT_DIR.  Signals an error outside a repository."
 
 (declare-function ngit-read-object "ngit-store")
 
+(defconst ngit--pack-head-size 4096
+  "Bytes read at an entry's offset; most commits and trees fit.")
+
+(defun ngit--pack-inflate (path offset skip size head-len)
+  "Inflate the SIZE-byte zlib stream at OFFSET+SKIP of PATH.
+HEAD-LEN bytes from OFFSET are already in the read buffer; use them when
+they hold the whole stream, otherwise read the file again."
+  (or (and (or (< head-len ngit--pack-head-size)
+               (<= (+ skip size (/ size 8) 64) head-len))
+           (ngit-native-inflate-head skip (- head-len skip) size))
+      (car (ngit-native-inflate-file path (+ offset skip) size))))
+
 (defun ngit--pack-entry (repo pack offset)
   "Return (TYPE . DATA) for the entry at OFFSET in PACK."
   (let ((cache (aref pack 5)))
     (or (gethash offset cache)
         (let* ((path (aref pack 0))
-               (h (ngit-native-read-bytes path offset 32))
+               (got (ngit-native-read-head path offset ngit--pack-head-size))
+               (h (ngit-native-head-bytes (min got 32)))
                (c (aref h 0))
                (type (aref ngit--type-names (logand (ash c -4) 7)))
                (size (logand c 15))
@@ -262,19 +312,17 @@ Honors GIT_DIR.  Signals an error outside a repository."
                      (while (/= 0 (logand c 128))
                        (setq c (aref h p) p (1+ p)
                              rel (+ (ash (1+ rel) 7) (logand c 127))))
-                     (let ((base (ngit--pack-entry repo pack (- offset rel))))
-                       (cons (car base)
-                             (ngit--apply-delta
-                              (cdr base)
-                              (car (ngit-native-inflate-file path (+ offset p) size)))))))
+                     ;; Inflate before resolving the base: that reuses the
+                     ;; read buffer.
+                     (let* ((delta (ngit--pack-inflate path offset p size got))
+                            (base (ngit--pack-entry repo pack (- offset rel))))
+                       (cons (car base) (ngit--apply-delta (cdr base) delta)))))
                   ('ref-delta
-                   (let ((base (ngit-read-object repo (substring h p (+ p 20)))))
-                     (cons (car base)
-                           (ngit--apply-delta
-                            (cdr base)
-                            (car (ngit-native-inflate-file path (+ offset p 20) size))))))
+                   (let* ((delta (ngit--pack-inflate path offset (+ p 20) size got))
+                          (base (ngit-read-object repo (substring h p (+ p 20)))))
+                     (cons (car base) (ngit--apply-delta (cdr base) delta))))
                   ((or 'commit 'tree 'blob 'tag)
-                   (cons type (car (ngit-native-inflate-file path (+ offset p) size))))
+                   (cons type (ngit--pack-inflate path offset p size got)))
                   (_ (error "ngit: bad pack entry type at %s:%d" path offset))))
           (when (> (hash-table-count cache) 1024)
             (clrhash cache))
@@ -282,41 +330,92 @@ Honors GIT_DIR.  Signals an error outside a repository."
 
 ;;;; Objects
 
+(defun ngit--objects-dir (repo)
+  "REPO's objects directory with a trailing slash (cached)."
+  (or (aref repo 5)
+      (aset repo 5 (expand-file-name "objects/" (ngit-repo-commondir repo)))))
+
 (defun ngit--loose-path (repo hex)
-  (expand-file-name (concat "objects/" (substring hex 0 2) "/" (substring hex 2))
-                    (ngit-repo-commondir repo)))
+  (concat (ngit--objects-dir repo) (substring hex 0 2) "/" (substring hex 2)))
+
+(defconst ngit--loose-head-size 65536
+  "Loose objects up to this compressed size are read with one pread.")
 
 (defun ngit--read-loose (repo hex)
   (let ((path (ngit--loose-path repo hex)))
-    (when (file-exists-p path)
-      (let* ((raw (prog1 (car (ngit-native-inflate-file path 0))
+    (when (ngit-native-try-open path)
+      (let* ((got (ngit-native-read-head path 0 ngit--loose-head-size))
+             (raw (prog1 (or (and (< got ngit--loose-head-size)
+                                  (ngit-native-inflate-whole-head got))
+                             (car (ngit-native-inflate-file path 0)))
                     (ngit-native-close path)))
              (nul (ngit--byte-pos raw 0 0))
-             (header (substring raw 0 nul))
-             (sp (ngit--byte-pos header ?\s 0))
+             (sp (ngit--byte-pos raw ?\s 0))
              (data (substring raw (1+ nul))))
-        (unless (= (string-to-number (substring header (1+ sp))) (length data))
+        (unless (= (string-to-number (substring raw (1+ sp) nul)) (length data))
           (error "ngit: loose object %s has a bad length" hex))
-        (cons (intern (substring header 0 sp)) data)))))
+        (cons (intern (substring raw 0 sp)) data)))))
+
+(defvar ngit--loose-names (make-hash-table :test 'equal)
+  "Per objects/XX directory: its loose object names, keyed by name.")
+
+(defun ngit-loose-names (repo sub)
+  "Loose object names (38 digits) in objects/SUB: a hash table of the
+names, plus under each two-digit prefix string the list of names that
+start with it (`maphash' costs tens of milliseconds even on a small
+table in NeLisp, so callers look lists up instead of iterating)."
+  (or (gethash sub ngit--loose-names)
+      (puthash sub
+               (let ((dir (concat (ngit--objects-dir repo) sub))
+                     (table (make-hash-table :test 'equal)))
+                 (when (file-directory-p dir)
+                   (dolist (f (directory-files dir nil nil t))
+                     (when (= (length f) 38)
+                       (puthash f t table)
+                       (let ((k (substring f 0 2)))
+                         (puthash k (cons f (gethash k table)) table)))))
+                 table)
+               ngit--loose-names)))
+
+(defun ngit-forget-loose-names ()
+  "Drop the cached loose object listings (after writing objects)."
+  (clrhash ngit--loose-names))
+
+(defvar ngit--pack-order nil
+  "REPO's packs, most recently hit first (git's MRU pack list).")
+
+(defun ngit--find-packed (repo bin)
+  "Return (PACK . POSITION) of BIN in REPO's packs, or nil."
+  (unless (and ngit--pack-order
+               (= (length ngit--pack-order) (length (ngit-repo-packs repo)))
+               (memq (car ngit--pack-order) (ngit-repo-packs repo)))
+    (setq ngit--pack-order (copy-sequence (ngit-repo-packs repo))))
+  (let ((packs ngit--pack-order) (found nil) (first t))
+    (while (and packs (not found))
+      (let* ((pack (car packs)) (pos (ngit--pack-find pack bin)))
+        (when pos
+          (setq found (cons pack pos))
+          (unless first
+            (setq ngit--pack-order (cons pack (delq pack ngit--pack-order))))))
+      (setq packs (cdr packs) first nil))
+    found))
 
 (defun ngit-read-object (repo bin)
-  "Return (TYPE . DATA) for object BIN in REPO, or signal an error."
-  (or (let ((packs (ngit-repo-packs repo)) (found nil))
-        (while (and packs (not found))
-          (let ((pos (ngit--pack-find (car packs) bin)))
-            (when pos
-              (setq found (ngit--pack-entry repo (car packs)
-                                            (ngit--pack-offset (car packs) pos)))))
-          (setq packs (cdr packs)))
-        found)
-      (ngit--read-loose repo (ngit-hex bin))
-      (error "fatal: Not a valid object name %s" (ngit-hex bin))))
+  "Return (TYPE . DATA) for object BIN in REPO, or signal an error.
+Packs are searched before loose objects, as in git; the order only
+affects speed, since an object's content is fixed."
+  (let* ((hex (ngit-hex bin))
+         ;; A listed loose object skips probing every pack.
+         (loose (and (gethash (substring hex 2) (ngit-loose-names repo (substring hex 0 2)))
+                     (ngit--read-loose repo hex))))
+    (or loose
+        (let ((hit (ngit--find-packed repo bin)))
+          (and hit (ngit--pack-entry repo (car hit) (ngit--pack-offset (car hit) (cdr hit)))))
+        (ngit--read-loose repo hex)
+        (error "fatal: Not a valid object name %s" hex))))
 
 (defun ngit-object-exists-p (repo bin)
-  (or (let ((packs (ngit-repo-packs repo)) (found nil))
-        (while (and packs (not found))
-          (setq found (ngit--pack-find (car packs) bin) packs (cdr packs)))
-        found)
+  (or (ngit--find-packed repo bin)
       (file-exists-p (ngit--loose-path repo (ngit-hex bin)))))
 
 (defun ngit-find-prefix (repo hex)
@@ -363,25 +462,72 @@ Honors GIT_DIR.  Signals an error outside a repository."
               (t (setq pos (1+ eol))))))
     end))
 
+(defun ngit--parse-headers (data pos end headers)
+  "Parse the header lines of DATA from POS to END onto HEADERS (reversed)."
+  (while (< pos end)
+    (let* ((eol (or (ngit--byte-pos data ?\n pos) (length data)))
+           (line (substring data pos eol)))
+      (if (and headers (string-prefix-p " " line))
+          ;; Continuation line (e.g. gpgsig).
+          (setcdr (car headers) (concat (cdar headers) "\n" (substring line 1)))
+        (let ((sp (or (ngit--byte-pos line ?\s 0) (length line))))
+          (push (cons (substring line 0 sp)
+                      (if (< sp (length line)) (substring line (1+ sp)) ""))
+                headers)))
+      (setq pos (1+ eol))))
+  headers)
+
+(defun ngit--scan-eol (data pos)
+  "Index of the first newline at or after POS in DATA (which has one)."
+  (while (/= (aref data pos) ?\n)
+    (setq pos (1+ pos)))
+  pos)
+
+(defun ngit--fast-commit-headers (data)
+  "Return (HEADERS-REVERSED . POS) for the usual commit header layout.
+Tree and parent lines have fixed lengths and the committer ident often
+repeats the author's, so only the ident lines are scanned.  POS is where
+any further headers start.  Return nil for other layouts."
+  (let ((n (length data)))
+    (when (and (> n 52) (eq (aref data 0) ?t) (eq (aref data 45) ?\n)
+               (eq (aref data 4) ?\s))
+      (let ((headers (list (cons "tree" (substring data 5 45))))
+            (pos 46))
+        (while (and (< (+ pos 48) n) (eq (aref data pos) ?p) (eq (aref data (+ pos 47)) ?\n)
+                    (eq (aref data (+ pos 6)) ?\s))
+          (push (cons "parent" (substring data (+ pos 7) (+ pos 47))) headers)
+          (setq pos (+ pos 48)))
+        (when (and (< (+ pos 7) n) (eq (aref data pos) ?a) (eq (aref data (+ pos 6)) ?\s)
+                   (string= (substring data pos (+ pos 7)) "author "))
+          (let* ((aeol (ngit--scan-eol data (+ pos 7)))
+                 (author (substring data (+ pos 7) aeol))
+                 (cpos (1+ aeol)))
+            (push (cons "author" author) headers)
+            (when (and (< (+ cpos 10) n) (eq (aref data cpos) ?c)
+                       (string= (substring data cpos (+ cpos 10)) "committer "))
+              (let* ((start (+ cpos 10))
+                     (guess (+ start (length author)))
+                     (ceol (if (and (< guess n) (eq (aref data guess) ?\n)
+                                    (string= (substring data start guess) author))
+                               guess
+                             (ngit--scan-eol data start))))
+                (push (cons "committer" (substring data start ceol)) headers)
+                (cons headers (1+ ceol))))))))))
+
 (defun ngit-parse-commit (data)
   "Parse commit or tag DATA into a plist.
 Keys: :headers (list of (NAME . VALUE) in order) and :message."
-  (let* ((end (ngit--header-end data))
-         (headers nil)
-         (pos 0))
-    (while (< pos end)
-      (let* ((eol (or (ngit--byte-pos data ?\n pos) (length data)))
-             (line (substring data pos eol)))
-        (if (and headers (string-prefix-p " " line))
-            ;; Continuation line (e.g. gpgsig).
-            (setcdr (car headers) (concat (cdar headers) "\n" (substring line 1)))
-          (let ((sp (or (ngit--byte-pos line ?\s 0) (length line))))
-            (push (cons (substring line 0 sp)
-                        (if (< sp (length line)) (substring line (1+ sp)) ""))
-                  headers)))
-        (setq pos (1+ eol))))
-    (list :headers (nreverse headers)
-          :message (if (< (+ end 2) (length data)) (substring data (+ end 2)) ""))))
+  (let* ((fast (ngit--fast-commit-headers data))
+         (n (length data)))
+    (if (and fast (< (cdr fast) n) (eq (aref data (cdr fast)) ?\n))
+        (list :headers (nreverse (car fast))
+              :message (substring data (1+ (cdr fast))))
+      (let* ((end (ngit--header-end data))
+             (headers (if fast
+                          (ngit--parse-headers data (cdr fast) end (car fast))
+                        (ngit--parse-headers data 0 end nil))))
+        (list :headers (nreverse headers)
+              :message (if (< (+ end 2) n) (substring data (+ end 2)) ""))))))
 
 (defun ngit-header (parsed name)
   (cdr (assoc name (plist-get parsed :headers))))

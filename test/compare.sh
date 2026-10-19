@@ -3,7 +3,9 @@
 # Usage: test/compare.sh SUITE   (SUITE: basic, rev, cat, all-objects,
 #        deltas, worktree, ls-tree, log, index, attr-config, diff, status,
 #        status-long, real, real-diff, write-objects, index-write,
-#        write-tree, add, add-all, commit, commit-output)
+#        write-tree, add, add-all, commit, commit-output, log-format,
+#        log-walk, log-diff, log-path, log-graph, branch-list, branch-filter,
+#        branch-create, branch-modify, branch-upstream)
 # Fixtures are rebuilt into $NGIT_FIXTURE_DIR (default: $TMPDIR/ngit-fixtures)
 # when missing.  The `real` and `real-diff` suites run against
 # $NGIT_REAL_REPO.  git must not refresh the index while comparing, or
@@ -16,6 +18,8 @@ fx=${NGIT_FIXTURE_DIR:-${TMPDIR:-/tmp}/ngit-fixtures}
   echo "fixture build failed"; exit 2; }
 [ -d "$fx/st-staged-only" ] || sh "$root/test/make-wt-fixture.sh" "$fx" >/dev/null 2>&1 || {
   echo "work tree fixture build failed"; exit 2; }
+[ -d "$fx/work" ] || sh "$root/test/make-log-fixture.sh" "$fx" >/dev/null 2>&1 || {
+  echo "log fixture build failed"; exit 2; }
 export GIT_OPTIONAL_LOCKS=0
 fail=0
 out=$(mktemp -d)
@@ -40,7 +44,7 @@ check() { # check REPO ARGS...
 export GIT_AUTHOR_NAME="Test Author" GIT_AUTHOR_EMAIL=test@example.com
 export GIT_COMMITTER_NAME="Test Author" GIT_COMMITTER_EMAIL=test@example.com
 export GIT_AUTHOR_DATE="1700600000 +0900" GIT_COMMITTER_DATE="1700600000 +0900"
-WENV=
+WENV= WREFS= WSTDERR=
 
 wstate() { # wstate DIR TAG
   d=$1 t=$2
@@ -54,6 +58,13 @@ wstate() { # wstate DIR TAG
     (cd "$d/.git" && find objects -type f ! -path '*/pack/*' ! -path '*/info/*' | sort | xargs -r md5sum)
     find "$d/.git" -maxdepth 3 -name '*.lock'
     git -C "$d" fsck --no-progress 2>&1
+    if [ -n "$WREFS" ]; then
+      for f in "$d/.git/config" "$d/.git/packed-refs"; do
+        [ -f "$f" ] && { echo "== $f"; cat "$f"; }
+      done
+      (cd "$d/.git" && find refs -type f | sort)
+      git -C "$d" for-each-ref
+    fi
   } >"$out/$t.state"
 }
 
@@ -63,12 +74,24 @@ wrun() { # wrun SRC SETUP ARGS...
   (cd "$w" && eval "$setup") >/dev/null 2>&1 || { echo "SETUP FAILED: $setup"; fail=1; return; }
   rm -rf "$out/snap"; cp -a "$w/.git" "$out/snap"
   # shellcheck disable=SC2086
-  (cd "$w" && env $WENV git -c gc.auto=0 "$@") >"$out/git.out" 2>/dev/null
+  if [ -n "$WSTDERR" ]; then
+    # shellcheck disable=SC2086
+    (cd "$w" && env $WENV git -c gc.auto=0 "$@") >"$out/git.out" 2>&1
+  else
+    # shellcheck disable=SC2086
+    (cd "$w" && env $WENV git -c gc.auto=0 "$@") >"$out/git.out" 2>/dev/null
+  fi
   echo "exit $?" >>"$out/git.out"
   wstate "$w" git
   rm -rf "$w/.git"; cp -a "$out/snap" "$w/.git"
   # shellcheck disable=SC2086
-  (cd "$w" && env $WENV "$ngit" "$@") >"$out/ngit.out" 2>"$out/err"
+  if [ -n "$WSTDERR" ]; then
+    # shellcheck disable=SC2086
+    (cd "$w" && env $WENV "$ngit" "$@") >"$out/ngit.out" 2>&1
+  else
+    # shellcheck disable=SC2086
+    (cd "$w" && env $WENV "$ngit" "$@") >"$out/ngit.out" 2>"$out/err"
+  fi
   echo "exit $?" >>"$out/ngit.out"
   wstate "$w" ngit
   if ! cmp -s "$out/git.out" "$out/ngit.out" || ! cmp -s "$out/git.state" "$out/ngit.state" ||
@@ -322,6 +345,295 @@ case $1 in
     wrun "$fx/st-staged-only" "" commit -a -m "no identity"
     WENV=
     wrun "$fx/st-uptodate" "seq 1 100 > a.txt && seq 1 2 100 > b.txt && git add a.txt b.txt" commit -m stats ;;
+  log-format)
+    h="$fx/hist"
+    for f in medium short full fuller raw oneline reference med ful; do
+      check "$h" log --pretty=$f
+    done
+    check "$h" log --oneline --all
+    check "$h" log --abbrev-commit -3
+    check "$h" log --abbrev=10 --oneline -5
+    check "$h" log --no-abbrev --pretty=medium -12
+    check "$h" log --format=%H%n%h%n%T%n%t%n%P%n%p%n%an%n%ae%n%al%n%ad%n%at%n%ai%n%aI%n%as%n%aD -6
+    check "$h" log --format=%cn%x09%ce%x09%cl%x09%cd%x09%ct%x09%ci%x09%cI%x09%cs%x09%cD -6
+    check "$h" log "--format=[%s]%n[%f]%n[%b]%n[%B]" --all
+    check "$h" log --format=format:%h%x00%s -5
+    check "$h" log "--format=tformat:%h%+b%-b% s|" --all
+    check "$h" log "--format=%h %d%n%D" --all
+    check "$h" log --format= -3
+    check "$h" log --pretty=format: -3
+    check "$h" log "--format=%m %h" main...c2
+    for d in default iso iso8601 iso-strict rfc short raw unix "format:%Y/%m/%d %H:%M:%S %z %a %b %e %j %A %B %I" default-local iso-local short-local; do
+      check "$h" log --date="$d" -4
+    done
+    check "$h" log --decorate --oneline --all
+    check "$h" log --decorate=full --all
+    check "$h" log --decorate=short -3
+    check "$h" log --decorate --no-decorate -3
+    check "$h" log --decorate --format=raw -2
+    check "$h" log --pretty=raw --decorate -2
+    check "$h" log --parents --oneline --all
+    check "$h" log --parents -3
+    check "$h" log --pretty=oneline -4
+    check "$h" log --pretty=fuller --date=iso -4
+    check "$h" log --pretty=bogus
+    check "$h" log --date=bogus ;;
+  log-walk)
+    h="$fx/hist" w="$fx/work"
+    for r in main topic c1 c2 v1.0 v2.0 light old mid docs tie; do
+      check "$h" log --oneline $r
+    done
+    check "$h" log --oneline main..topic
+    check "$h" log --oneline topic..main
+    check "$h" log --oneline main...topic
+    check "$h" log --oneline c1...c2
+    check "$h" log --oneline c1..c2 c2..c1
+    check "$h" log --oneline ^v1.0 main
+    check "$h" log --oneline main ^c1 ^c2
+    check "$h" log --oneline main --not c1 c2
+    check "$h" log --oneline ..topic
+    check "$h" log --oneline topic..
+    check "$h" log --oneline 'c1^@'
+    check "$h" log --oneline 'c2^!'
+    check "$h" log --oneline 'main^2'
+    check "$h" log --oneline --all
+    check "$h" log --oneline --branches
+    check "$h" log --oneline --branches='c*'
+    check "$h" log --oneline --tags
+    check "$h" log --oneline --tags=v1
+    check "$w" log --oneline --remotes
+    check "$w" log --oneline --remotes='*/c*'
+    check "$w" log --oneline --all
+    check "$h" log --oneline --first-parent
+    check "$h" log --oneline --first-parent main~3
+    check "$h" log --oneline --merges
+    check "$h" log --oneline --no-merges
+    check "$h" log --oneline --min-parents=3
+    check "$h" log --oneline --max-parents=0
+    check "$h" log --oneline --reverse
+    check "$h" log --oneline --reverse -n 5
+    check "$h" log --oneline --skip=4 -n 6
+    check "$h" log --oneline -n 0
+    check "$h" log --oneline --max-count=3 --skip=100
+    check "$h" log --oneline --since=1710030000
+    check "$h" log --oneline --until=1710040000
+    check "$h" log --oneline --after="2024-03-10 12:00:00 +0900" --before="2024-03-10 20:00:00 +0900"
+    check "$h" log --oneline --author=Other
+    check "$h" log --oneline --author='^Log' --all
+    check "$h" log --oneline --committer=Committer -3
+    check "$h" log --oneline --grep=c1
+    check "$h" log --oneline -i --grep=MERGE
+    check "$h" log --oneline --grep=c1 --grep=merge
+    check "$h" log --oneline --grep=c1 --grep=merge --all-match
+    check "$h" log --oneline --grep=c1 --invert-grep
+    check "$h" log --oneline -E --grep='c(1|2): (start|more)'
+    check "$h" log --oneline -F --grep='(criss-cross)'
+    check "$h" log --oneline --grep='t.p'
+    check "$h" log --oneline --topo-order --all
+    check "$h" log --oneline --date-order --all
+    check "$h" log --oneline --topo-order main...topic
+    check "$h" log --oneline --all --since=1710040000
+    check "$h" log --oneline --all ^light
+    check "$h" log --oneline nope
+    check "$h" log --oneline main..nope
+    check "$fx/st-empty" log
+    check "$fx/loose" log --oneline --all
+    check "$fx/packed" log --oneline --all --topo-order ;;
+  log-diff)
+    h="$fx/hist" r="$fx/ren"
+    for f in -p --stat --shortstat --numstat --name-only --name-status --summary; do
+      check "$h" log $f
+      check "$r" log $f
+    done
+    check "$h" log --oneline --stat
+    check "$h" log --stat -p -5
+    check "$h" log --stat --summary --all
+    check "$h" log --format=%h --name-status --all
+    check "$h" log --format=format:%s --shortstat
+    check "$h" log -U1 -3
+    check "$h" log -p --first-parent
+    check "$h" log --stat --no-renames
+    check "$h" log -s --stat -3
+    check "$r" log -p -M
+    check "$r" log --no-renames --name-status
+    check "$fx/ren-limit" log --name-status
+    check "$fx/ren-limit" log --stat
+    check "$fx/loose" log -p --all
+    check "$fx/packed" log --stat --all
+    COLUMNS=40 check "$h" log --stat -4
+    COLUMNS=200 check "$r" log --stat ;;
+  log-path)
+    h="$fx/hist"
+    for p in src/main.c doc doc/ src lib README README.md data.bin x.txt c1.txt '*.txt' 'doc/*' nonexistent; do
+      check "$h" log --oneline -- "$p"
+      check "$h" log --oneline --full-history -- "$p"
+    done
+    check "$h" log --oneline -- c1.txt c2.txt
+    check "$h" log --oneline --all -- tie.txt
+    check "$h" log --oneline --sparse -- doc
+    check "$h" log --oneline --first-parent -- doc
+    check "$h" log --oneline --parents -- doc
+    check "$h" log --oneline --topo-order -- src
+    check "$h" log --oneline main -- README.md
+    check "$h" log --oneline src/main.c
+    check "$h" log --oneline --stat -- doc
+    check "$h" log --oneline --full-diff --stat -- x.txt
+    check "$h" log -p -- data.bin
+    check "$h" log --oneline v1.0..main -- doc
+    check "$h" log --oneline main...c2 -- c1.txt c2.txt
+    check "$fx/ren" log --oneline --stat -- b
+    check "$fx/ren" log --oneline --name-status -- b/numbers2.txt ;;
+  log-graph)
+    h="$fx/hist" w="$fx/work"
+    check "$h" log --graph
+    check "$h" log --graph --oneline
+    check "$h" log --graph --oneline --all
+    check "$w" log --graph --oneline --all
+    check "$h" log --graph --oneline --decorate --all
+    check "$h" log --graph --date-order --oneline --all
+    check "$h" log --graph --oneline main...c2
+    check "$h" log --graph --oneline c1 c2 ^main~6
+    check "$h" log --graph --oneline --first-parent
+    check "$h" log --graph --oneline -- doc
+    check "$h" log --graph --oneline --full-history -- doc
+    check "$h" log --graph --oneline -- c1.txt c2.txt
+    check "$h" log --graph --oneline --merges
+    check "$h" log --graph --oneline --no-merges
+    check "$h" log --graph --oneline --grep=c1
+    check "$h" log --graph --oneline -n 7
+    check "$h" log --graph --oneline --skip=3
+    check "$h" log --graph --stat -6
+    check "$h" log --graph -p -4
+    check "$h" log --graph --name-status --all
+    check "$h" log --graph --format=%h%n%s%n
+    check "$h" log --graph --format=format:%h
+    check "$h" log --graph --pretty=fuller -5
+    check "$h" log --graph --parents --oneline
+    check "$h" log --graph --reverse
+    check "$fx/ren" log --graph --stat
+    check "$fx/packed" log --graph --oneline --all ;;
+  branch-list)
+    wk="$fx/work" h="$fx/hist"
+    for a in "" -a -r -v -vv "-a -v" "-a -vv" "-r -vv" "-a --no-abbrev -v" "-v --abbrev=10" \
+             --show-current "--list n*" "--list *o*" "-a --list origin/c*" "-r --list *main" \
+             "-l -i N*" "-a --sort=-refname" "--sort=committerdate" "--sort=-authordate -v" \
+             "-a --sort=objectname"; do
+      # shellcheck disable=SC2086
+      check "$wk" branch $a
+      # shellcheck disable=SC2086
+      check "$fx/work-wt" branch $a
+    done
+    check "$h" branch -v
+    check "$fx/st-empty" branch
+    check "$fx/st-empty" branch --show-current
+    WREFS=1
+    wrun "$wk" "git checkout -q --detach main~1" branch -v
+    wrun "$wk" "git checkout -q --detach v1.0" branch
+    wrun "$wk" "git checkout -q --detach origin/c2 && git commit -q --allow-empty -m moved" branch -vv
+    wrun "$wk" "git checkout -q --detach main" branch --show-current
+    WREFS= ;;
+  branch-filter)
+    wk="$fx/work" h="$fx/hist"
+    for a in --merged --no-merged "--merged main~2" "--no-merged notrack" "-a --merged" \
+             "--contains main~4" "--contains c1" "-a --no-contains main" "-r --contains origin/c2-base" \
+             "--points-at main" "-a --points-at origin/main" "--merged main --contains main~6" \
+             "-v --merged" "--sort=-committerdate --merged" "--contains nope"; do
+      # shellcheck disable=SC2086
+      check "$wk" branch $a
+    done
+    for a in "--contains c1" "--merged c2" "--no-merged" "-v --contains v1.0"; do
+      # shellcheck disable=SC2086
+      check "$h" branch $a
+    done ;;
+  branch-create)
+    wk="$fx/work" WREFS=1 WSTDERR=1
+    wrun "$wk" "" branch new1
+    wrun "$wk" "" branch new2 main~3
+    wrun "$wk" "" branch new3 origin/topic
+    wrun "$wk" "" branch new4 origin/c2-base
+    wrun "$wk" "" branch --no-track new5 origin/topic
+    wrun "$wk" "" branch -t new6 main
+    wrun "$wk" "" branch --track new7 origin/docs
+    wrun "$wk" "" branch -q new8 origin/topic
+    wrun "$wk" "" branch deep/name/x
+    wrun "$wk" "" branch tagged v1.0
+    wrun "$wk" "" branch -f notrack main
+    wrun "$wk" "" branch -f ahead origin/topic
+    wrun "$wk" "" branch notrack
+    wrun "$wk" "" branch -f main main~1
+    wrun "$wk" "" branch -f wtb main
+    wrun "$wk" "" branch 'bad..name'
+    wrun "$wk" "" branch 'bad name'
+    wrun "$wk" "" branch -- -dash
+    wrun "$wk" "" branch nostart nope
+    wrun "$wk" "" branch -t badtrack main~1
+    wrun "$wk" "git config branch.autoSetupMerge false" branch auto1 origin/topic
+    wrun "$wk" "git config branch.autoSetupMerge always" branch auto2 main
+    wrun "$wk" "git checkout -q --detach main~2" branch fromdetached
+    wrun "$fx/st-empty" "" branch first
+    wrun "$wk" "printf '# comment\n' >> .git/config" branch -t withcomment origin/topic
+    wrun "$wk" "git config --unset-all remote.origin.fetch" branch nofetch origin/topic
+    WREFS= WSTDERR= ;;
+  branch-modify)
+    wk="$fx/work" WREFS=1 WSTDERR=1
+    wrun "$wk" "" branch -d behind
+    wrun "$wk" "" branch -d notrack
+    wrun "$wk" "" branch -D notrack
+    wrun "$wk" "" branch -d gone
+    wrun "$wk" "" branch -d ahead
+    wrun "$wk" "" branch -D ahead loose-only
+    wrun "$wk" "" branch -d loose-only
+    wrun "$wk" "" branch -d main
+    wrun "$wk" "" branch -d wtb
+    wrun "$wk" "" branch -d nope
+    wrun "$wk" "" branch -d c2
+    wrun "$wk" "" branch -d
+    wrun "$wk" "" branch -q -D notrack
+    wrun "$wk" "" branch -d -r origin/c2
+    wrun "$wk" "" branch -r -d origin/nope
+    wrun "$wk" "" branch -d local-up
+    wrun "$wk" "git branch -q --track up2 notrack" branch -d up2
+    wrun "$wk" "" branch -m ahead renamed
+    wrun "$wk" "" branch -m notrack deep/renamed
+    wrun "$wk" "" branch -m main trunk
+    wrun "$wk" "" branch -m renamedcurrent
+    wrun "$wk" "" branch -m ahead behind
+    wrun "$wk" "" branch -M ahead behind
+    wrun "$wk" "" branch -m nope x
+    wrun "$wk" "" branch -m ahead 'bad..'
+    wrun "$wk" "" branch -m wtb wtb2
+    wrun "$wk" "" branch -m loose-only loose-moved
+    wrun "$wk" "" branch -c ahead copied
+    wrun "$wk" "" branch -c ahead behind
+    wrun "$wk" "" branch -C ahead behind
+    wrun "$wk" "" branch -c currentcopy
+    wrun "$wk" "" branch -c local-up local-copy
+    wrun "$wk" "" branch -M main main
+    wrun "$wk" "git checkout -q --detach main" branch -m x
+    wrun "$fx/st-empty" "" branch -m newmain
+    wrun "$fx/hist" "" branch -d c1
+    wrun "$fx/hist" "" branch -D old c1 c2
+    WREFS= WSTDERR= ;;
+  branch-upstream)
+    wk="$fx/work" WREFS=1 WSTDERR=1
+    wrun "$wk" "" branch -u origin/topic
+    wrun "$wk" "" branch -u origin/docs notrack
+    wrun "$wk" "" branch --set-upstream-to=origin/c2 ahead
+    wrun "$wk" "" branch --set-upstream-to origin/c2 ahead
+    wrun "$wk" "" branch -u notrack ahead
+    wrun "$wk" "" branch -u ahead ahead
+    wrun "$wk" "" branch -u origin/nope
+    wrun "$wk" "" branch -u v1.0 ahead
+    wrun "$wk" "" branch -u origin/topic nope
+    wrun "$wk" "" branch --unset-upstream ahead
+    wrun "$wk" "" branch --unset-upstream
+    wrun "$wk" "" branch --unset-upstream notrack
+    wrun "$wk" "" branch --unset-upstream local-up
+    wrun "$wk" "git checkout -q --detach main" branch -u origin/main
+    wrun "$wk" "git checkout -q --detach main" branch --unset-upstream
+    wrun "$wk" "git config branch.ahead.rebase true" branch --unset-upstream ahead
+    wrun "$wk" "git config --add branch.ahead.merge refs/heads/docs" branch --unset-upstream ahead
+    WREFS= WSTDERR= ;;
   *) echo "unknown suite $1"; exit 2 ;;
 esac
 exit $fail

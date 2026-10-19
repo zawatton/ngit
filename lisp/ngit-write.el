@@ -71,7 +71,8 @@ With DRY-RUN, only compute the name."
         (ngit-write-file tmp (ngit-native-deflate-file tmp (length obj)
                                                        (ngit--loose-level repo)))
         (set-file-modes tmp #o444)
-        (rename-file tmp path t)))
+        (rename-file tmp path t)
+        (ngit-abbrev-forget)))
     bin))
 
 ;;;; Index entries

@@ -1,0 +1,76 @@
+#+TITLE: ngit log and branch (git in NeLisp, stage 4)
+
+* S1 Revision walk and pretty formats
+
+** S1.1 log pretty formats (oneline, short, medium, full, fuller, raw, reference, format:/tformat: placeholders, --abbrev-commit, --date modes, --decorate) match git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh log-format
+
+** S1.2 log revision selection (ranges, ^REV, A...B, --all/--branches/--tags, --first-parent, --merges/--no-merges, --reverse, --skip, --since/--until, --author/--grep, tie order) matches git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh log-walk
+
+** S1.3 Full-history log --oneline and the first 300 commits of log --format=fuller on the real repository match git within 120 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-log.sh "$NGIT_REAL_REPO" walk 120
+
+* S2 Log diff output and path limiting
+
+** S2.1 log -p, --stat, --shortstat, --numstat, --name-only, --name-status (root commits, merges, renames, binary files) match git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh log-diff
+
+** S2.2 log -- PATH with git's default history simplification, --full-history and directory pathspecs matches git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh log-path
+
+** S2.3 On the real repository, log -n 50 --stat and log --oneline -- PATH (file and directory) match git within 150 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-log.sh "$NGIT_REAL_REPO" diff 150
+
+* S3 Graph
+
+** S3.1 log --graph (merges, criss-cross, octopus, --oneline, with --first-parent and path limiting) matches git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh log-graph
+
+** S3.2 log --graph --oneline over the last 500 commits of the real repository matches git within 120 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-log.sh "$NGIT_REAL_REPO" graph 120
+
+* S4 Branch listing
+
+** S4.1 branch listing (plain, -a, -r, -v, -vv with ahead/behind and gone upstreams, --list PATTERN, --show-current, detached HEAD, worktrees) matches git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh branch-list
+
+** S4.2 branch --contains/--no-contains/--merged/--no-merged/--points-at and --sort match git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh branch-filter
+
+** S4.3 branch -a -vv and branch --merged on the real repository match git within 120 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-log.sh "$NGIT_REAL_REPO" branch 120
+
+* S5 Branch writes
+
+** S5.1 branch create (NAME [START], -f, -t/--track, --no-track, auto tracking from remote branches) gives git's refs, reflogs, config and output
+#+TIMEOUT: 600
+cmd: sh test/compare.sh branch-create
+
+** S5.2 branch -d/-D (loose and packed refs, -r, unmerged and checked-out errors), -m/-M and -c/-C give git's refs, packed-refs, reflogs, config, stdout, stderr and exit status
+#+TIMEOUT: 600
+cmd: sh test/compare.sh branch-modify
+
+** S5.3 branch -u/--set-upstream-to, --unset-upstream and the error paths (bad names, existing branch, missing start point) match git
+#+TIMEOUT: 600
+cmd: sh test/compare.sh branch-upstream
+
+** S5.4 On a clone of the real repository, a create/upstream/rename/copy/delete sequence gives git's refs, config, reflogs and output within 150 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" branch 150

@@ -533,6 +533,41 @@ Mark discarded records in RCHG and return (RINDEX . RHA) vectors."
     (concat (number-to-string (if (= c 0) (1- s) s)) ","
             (number-to-string c))))
 
+(defun ngit-xdiff--sane-truncate-line (line)
+  "Truncate LINE at the first invalid UTF-8 byte, as git does."
+  (let ((len (length line)) (i 0) (valid t) c c1 step j)
+    (while (and valid (< i len))
+      (setq c (aref line i))
+      (setq step (cond ((< c #x80) 1)
+                       ((= (logand c #xe0) #xc0) 2)
+                       ((= (logand c #xf0) #xe0) 3)
+                       ((= (logand c #xf8) #xf0) 4)
+                       (t 0)))
+      (setq valid (and (> step 0) (<= (+ i step) len)) j 1)
+      (while (and valid (< j step))
+        (setq valid (= (logand (aref line (+ i j)) #xc0) #x80))
+        (setq j (1+ j)))
+      (when (and valid (> step 1))
+        (setq c1 (aref line (1+ i)))
+        ;; Match pick_one_utf8_char, including its noncharacter check.
+        (setq valid
+              (cond
+               ((= step 2) (/= (logand c #xfe) #xc0))
+               ((= step 3)
+                (not (or (and (= c #xe0) (= (logand c1 #xe0) #x80))
+                         (and (= c #xed) (= (logand c1 #xe0) #xa0))
+                         (and (= c #xef) (= c1 #xbf)
+                              (= (logand (aref line (+ i 2)) #xfe) #xbe)))))
+               (t
+                (not (or (and (= c #xf0) (= (logand c1 #xf0) #x80))
+                         (and (= c #xf4) (> c1 #x8f))
+                         (> c #xf4)))))))
+      (when valid (setq i (+ i step))))
+    (if valid
+        line
+      (concat (substring line 0 i)
+              (if (and (> i 0) (= (aref line (1- i)) 10)) "" "\n")))))
+
 (defun ngit-xdiff--emit (recs1 recs2 script ctx)
   "Port of xdl_emit_diff for SCRIPT (list of change vectors)."
   (let ((n1 (length recs1)) (n2 (length recs2))
@@ -564,12 +599,15 @@ Mark discarded records in RCHG and return (RINDEX . RHA) vectors."
           (setq l (+ l step)))
         (when found (setq func found))
         (setq funclineprev (1- s1)))
-      (setq out (cons (concat "@@ -" (ngit-xdiff--hunk-range (1+ s1) (- e1 s1))
-                              " +" (ngit-xdiff--hunk-range (1+ s2) (- e2 s2))
-                              " @@"
-                              (if (> (length func) 0) (concat " " func) "")
-                              "\n")
-                      out))
+      (let ((header (concat "@@ -" (ngit-xdiff--hunk-range (1+ s1) (- e1 s1))
+                            " +" (ngit-xdiff--hunk-range (1+ s2) (- e2 s2))
+                            " @@"
+                            (if (> (length func) 0) (concat " " func) "")
+                            "\n")))
+        ;; The prefix is ASCII; only non-ASCII function text needs decoding.
+        (when (string-match-p "[\200-\377]" func)
+          (setq header (ngit-xdiff--sane-truncate-line header)))
+        (setq out (cons header out)))
       ;; Pre-context.
       (while (< s2 (aref (car xch) 1))
         (setq rec (aref recs2 s2))
