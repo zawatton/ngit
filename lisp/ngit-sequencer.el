@@ -297,17 +297,17 @@
     (setq result (ngit-merge-trees repo base ours next "HEAD"
                                   (if revert (concat "parent of " label) label)))
     (ngit-merge-apply repo result ours (and rebase 'rebase))
-    (when (plist-get result :conflicts)
+    (when (or (plist-get result :conflicted) (plist-get result :conflicts))
       (setq message (concat message "\n# Conflicts:\n"
                             (mapconcat (lambda (p) (concat "#\t" p "\n"))
                                        (plist-get result :conflicts) ""))))
     (ngit--merge-write repo "MERGE_MSG" message)
     (cond ((and (not revert) (not no-commit))
            (ngit--merge-write repo "CHERRY_PICK_HEAD" (concat hex "\n")))
-          ((and revert (or no-commit (plist-get result :conflicts)))
+          ((and revert (or no-commit (plist-get result :conflicted) (plist-get result :conflicts)))
            (ngit--merge-write repo "REVERT_HEAD" (concat hex "\n"))))
     (cond
-     ((plist-get result :conflicts)
+     ((or (plist-get result :conflicted) (plist-get result :conflicts))
       (when rebase (ngit-ref-delete-state repo "CHERRY_PICK_HEAD"))
       (ngit-native-write-stderr (concat "error: could not " (if revert "revert " "apply ")
                                        (ngit-abbrev repo hex) "... " (ngit--subject (ngit--c-message c)) "\n"))
@@ -587,7 +587,10 @@
               (dolist (change (ngit-diff-trees repo
                                              (ngit-seq-tree repo (car (ngit-commit-parents repo hex)))
                                              (ngit-seq-tree repo hex)))
-                (ngit--emit-patch repo change 3))
+                ;; The sequencer's saved patch uses a nonrecursive tree diff.
+                ;; Nested entries are represented by tree changes, not blobs.
+                (unless (string-search "/" (aref change 0))
+                  (ngit--emit-patch repo change 3)))
               (ngit-rebase-write repo "patch" (apply #'concat (nreverse ngit--out))))
             (ngit-native-write-stderr
              (concat "Could not apply " (ngit-abbrev repo hex) "... " (ngit--subject-of repo hex) "\n"))))

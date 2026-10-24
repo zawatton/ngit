@@ -183,7 +183,10 @@
   (let* ((parsed (ngit--restore-parse repo args))
          (tree (nth 0 parsed)) (staged (nth 2 parsed))
          (worktree (nth 3 parsed)) (paths (nth 5 parsed))
-         (items (mapcar (lambda (p) (ngit--ps-item (ngit--pathspec-item repo p))) paths))
+         (magic (ngit-pathspec-magic-p (ngit-pathspec-items repo paths)))
+         (expanded (ngit-pathspec-write-items repo paths t tree))
+         (items (mapcar (lambda (path) (if magic (cons path nil) (ngit--ps-item path))) expanded))
+         (paths (if magic expanded paths))
          (matched (make-vector (length items) nil))
          (lock (ngit-lock (ngit-index-file repo))))
     (unwind-protect

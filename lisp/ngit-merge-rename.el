@@ -4,8 +4,7 @@
 
 ;; Reconcile file identities before the pathname merge.  Rename detection
 ;; receives fresh diff records: diffcore mutates its candidates in place.
-;; Directory rename inference and strategy-specific rename thresholds are
-;; deliberately outside this layer.
+;; Infer directory moves only from established file rename pairs.
 
 ;;; Code:
 
@@ -210,6 +209,176 @@ consume a source even when two different sources meet at one destination."
                                                 (if od tl ol) " and modified in " (if od ol tl)
                                                 ".  Version " (if od ol tl) " of " d
                                                 " left in tree."))))))))))))))))
+
+(defun ngit-merge-directory--parent (path)
+  "Return the non-root parent directory of PATH, without a trailing slash."
+  (let ((dir (file-name-directory path)))
+    (and dir (> (length dir) 1) (substring dir 0 -1))))
+
+(defun ngit-merge-directory--present (path entries)
+  "Return whether directory PATH still exists in tree ENTRIES."
+  (let ((prefix (concat path "/")) (i 0) (found nil))
+    (while (and (< i (length entries)) (not found))
+      (when (string-prefix-p prefix (aref (aref entries i) 0)) (setq found t))
+      (setq i (1+ i)))
+    found))
+
+(defun ngit-merge-directory-map (renames entries)
+  "Infer source directories and majority destinations from RENAMES.
+ENTRIES is the immutable tree of the renaming side.  A surviving source
+directory is not a directory rename.  A nil destination denotes a tie;
+the empty string denotes the repository root."
+  (let ((votes nil) (result nil))
+    (dolist (pair renames)
+      (let ((src (ngit-merge-directory--parent (car pair)))
+            (dst (or (ngit-merge-directory--parent (cdr pair)) "")) (again t))
+        (while (and src again (not (equal src dst)))
+          (unless (ngit-merge-directory--present src entries)
+            (let ((vote (assoc src votes)))
+              (unless vote (setq vote (list src)) (push vote votes))
+              (let ((count (assoc dst (cdr vote))))
+                (if count (setcdr count (1+ (cdr count)))
+                  (setcdr vote (cons (cons dst 1) (cdr vote)))))))
+          (setq again (equal (file-name-nondirectory src) (file-name-nondirectory dst))
+                src (ngit-merge-directory--parent src)
+                dst (or (ngit-merge-directory--parent dst) "")))))
+    (dolist (vote votes)
+      (let ((best nil) (count 0) (tie nil))
+        (dolist (candidate (cdr vote))
+          (cond ((> (cdr candidate) count)
+                 (setq best (car candidate) count (cdr candidate) tie nil))
+                ((= (cdr candidate) count) (setq tie t))))
+        (push (cons (car vote) (unless tie best)) result)))
+    (sort result (lambda (a b) (> (length (car a)) (length (car b)))))))
+
+(defun ngit-merge-directory--occupied (path entries)
+  "Return whether immutable ENTRIES obstruct an implicit move to PATH."
+  (let ((i 0) (found nil))
+    (while (and (< i (length entries)) (not found))
+      (let ((other (aref (aref entries i) 0)))
+        (when (or (equal path other) (string-prefix-p (concat path "/") other)
+                  (string-prefix-p (concat other "/") path))
+          (setq found t)))
+      (setq i (1+ i)))
+    found))
+
+(defun ngit-merge-directory-reconcile (repo table paths left right ours theirs ol tl depth)
+  "Relocate opposite-side additions using directory maps LEFT and RIGHT.
+Return (PATHS METADATA CONFLICT), where METADATA associates paths with
+(FORCE-UNMERGED . MESSAGES).  Plan all moves before mutating any record."
+  (let* ((config (downcase (or (ngit-config-get repo "merge.directoryRenames") "conflict")))
+         (enabled (not (member config '("false" "no" "off" "0"))))
+         (suggest (equal config "conflict"))
+         (metadata (make-hash-table :test 'equal))
+         (plans nil) (conflict nil) (reported nil) (skipped nil))
+    (when enabled
+      (dolist (item (list (list left 3 theirs tl ol) (list right 2 ours ol tl)))
+        (let ((mapping (nth 0 item)) (side (nth 1 item)) (tree (nth 2 item))
+              (added-label (nth 3 item)) (renamed-label (nth 4 item)))
+          (dolist (path paths)
+            (let ((rec (gethash path table)) (match nil))
+              (when (and (aref rec side) (not (eq (aref rec 7) t))
+                         (or (and (not (aref rec 1)) (not (aref rec (- 5 side))))
+                             ;; A rename into the moved directory has already
+                             ;; incorporated the opposite edit at its old name.
+                             (and (aref rec 1) (aref rec (- 5 side))
+                                  (not (equal path (aref (aref rec 1) 0)))
+                                  (equal (aref (aref rec (- 5 side)) 0)
+                                         (aref (aref rec 1) 0)))))
+                (dolist (pair mapping)
+                  (when (and (not match) (string-prefix-p (concat (car pair) "/") path))
+                    (setq match pair)))
+                (when match
+                  (cond
+                   ;; Git excludes implicit moves into a directory that the
+                   ;; receiving side itself renamed.  Preserve both layouts.
+                   ((and (cdr match) (assoc (cdr match) (if (= side 3) right left)))
+                    (unless (member match skipped)
+                      (push match skipped)
+                      (puthash path
+                               (cons nil (list (concat "WARNING: Avoiding applying "
+                                                      (car match) " -> " (cdr match) " rename to "
+                                                      path ", because " (cdr match)
+                                                      " itself was renamed."))) metadata)))
+                   ((not (cdr match))
+                      (unless (member (car match) reported)
+                        (push (car match) reported)
+                        (setq conflict t)
+                        (puthash path
+                                 (cons nil (list (concat "CONFLICT (directory rename split): Unclear where to rename "
+                                                        (car match) " to; it was renamed to multiple other directories, with no destination getting a majority of the files."))) metadata)))
+                   (t
+                    (let ((dest (if (equal (cdr match) "")
+                                    (substring path (1+ (length (car match))))
+                                  (concat (cdr match) (substring path (length (car match)))))))
+                      (push (list path dest side tree added-label renamed-label
+                                  (copy-sequence rec)) plans))))))))))
+      ;; A source is retained if its destination was independently occupied on
+      ;; that same side, or if multiple implicit renames target one pathname.
+      (let ((accepted nil))
+       (dolist (plan plans)
+        (let* ((src (nth 0 plan)) (dst (nth 1 plan)) (side (nth 2 plan))
+               (blocked (ngit-merge-directory--occupied dst (nth 3 plan)))
+               (colliders nil))
+          (dolist (other plans)
+            (when (and (equal dst (nth 1 other)) (= side (nth 2 other)))
+              (push (car other) colliders)))
+          (setq colliders (sort colliders #'string<))
+          (if (or blocked (> (length colliders) 1))
+              (progn
+                (setq conflict t)
+                (unless (member dst reported)
+                  (push dst reported)
+                  (puthash src
+                           (cons nil (list (concat "CONFLICT (implicit dir rename): "
+                                                  (if blocked
+                                                      (concat "Existing file/dir at " dst " in the way of implicit directory rename(s) putting the following path(s) there: ")
+                                                    (concat "Cannot map more than one path to " dst "; implicit directory renames tried to put these paths there: "))
+                                                  (mapconcat #'identity colliders ", ")
+                                                  (if blocked "." "")))) metadata)))
+            (push plan accepted))))
+       (setq plans (nreverse accepted)))
+      ;; Consume all accepted sources before installing any destinations.
+      ;; A destination may also be another plan's source; every read below
+      ;; uses the immutable record snapshot retained by that plan.
+      (dolist (plan plans)
+        (let ((source (gethash (car plan) table)))
+          (ngit-merge-rename--clear source)
+          (aset source 7 t)))
+      (dolist (plan plans)
+        (let* ((src (nth 0 plan)) (dst (nth 1 plan)) (side (nth 2 plan))
+               (source (nth 6 plan)) (target (gethash dst table))
+                   (base (aref source 1))
+                   (relevant (and base (not (ngit-merge--same base (aref source (- 5 side))))))
+                   (description (if relevant
+                                    (concat (aref base 0) " renamed to " src " in " (nth 4 plan) ",")
+                                  (concat src " added in " (nth 4 plan))))
+                   (message (concat (if suggest "CONFLICT (file location): " "Path updated: ")
+                                    description
+                                    " inside a directory that was renamed in " (nth 5 plan)
+                                    (if suggest ", suggesting it should perhaps be moved to " "; moving it to ")
+                                    dst ".")))
+              (unless target
+                (setq target (vector dst nil nil nil nil nil nil nil nil))
+                (puthash dst target table) (push dst paths))
+              (aset target 7 nil)
+              (if (and relevant (not (aref target (- 5 side))))
+                  (progn
+                    (dotimes (i 3) (aset target (1+ i) (aref source (1+ i))))
+                    (aset target 8 (aref source 8)))
+                (aset target 8
+                      (ngit-merge-rename--labels
+                       nil (if (= side 2) (aref source side) (aref target 2))
+                       (if (= side 3) (aref source side) (aref target 3)) ol tl))
+                (aset target side
+                      (ngit-merge--copy
+                       (if relevant
+                           (ngit-merge-rename--merged repo dst base (aref source 2)
+                                                      (aref source 3) ol tl depth)
+                         (aref source side)) dst)))
+              (when suggest (setq conflict t))
+              (puthash dst (cons (and suggest (= depth 0)) (list message)) metadata))))
+    (list (sort paths #'string<) metadata (and (= depth 0) conflict))))
 
 (provide 'ngit-merge-rename)
 ;;; ngit-merge-rename.el ends here

@@ -473,13 +473,14 @@ microseconds per byte in NeLisp."
 
 (defun ngit--commit-diffstat (repo old-tree new-tree)
   "Emit git's shortstat and summary from OLD-TREE (nil = empty) to NEW-TREE."
-  (let ((changes (ngit-detect-renames (ngit-diff-trees repo old-tree new-tree)))
+  (require 'ngit-rename)
+  (let ((changes (ngit-diffcore-rename repo (ngit-diff-trees repo old-tree new-tree)))
         (files 0) (adds 0) (dels 0) (summary nil))
     (dolist (c changes)
       (let* ((path (aref c 0)) (status (aref c 1))
              (old-mode (aref c 2)) (new-mode (aref c 4)))
         (setq files (1+ files))
-        (unless (= status ?R)
+        (unless (and (= status ?R) (= (ngit-similarity-percent c) 100))
           (let ((old (ngit--diff-blob repo old-mode (aref c 3)))
                 (new (ngit--diff-blob repo new-mode (aref c 5))))
             (unless (or (ngit--binary-p repo path old) (ngit--binary-p repo path new))
@@ -488,7 +489,8 @@ microseconds per byte in NeLisp."
         (pcase status
           (?A (push (format " create mode %06o %s\n" new-mode (ngit-quote-path path)) summary))
           (?D (push (format " delete mode %06o %s\n" old-mode (ngit-quote-path path)) summary))
-          (?R (push (format " rename %s (100%%)\n" (ngit--pprint-rename (aref c 8) path)) summary)
+          (?R (push (format " rename %s (%d%%)\n" (ngit--pprint-rename (aref c 8) path)
+                            (ngit-similarity-percent c)) summary)
               (unless (= old-mode new-mode)
                 (push (format " mode change %06o => %06o\n" old-mode new-mode) summary)))
           (_ (unless (= old-mode new-mode)

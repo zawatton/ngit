@@ -494,7 +494,7 @@ Return (t . DATA) on success, or nil when a hunk cannot be found."
        (aset repo 6 nil)
        (aset repo 7 nil)
        (setq failed t)))
-    (if (or failed (plist-get result :conflicts))
+    (if (or failed (plist-get result :conflicted) (plist-get result :conflicts))
         (progn
           (when restore-index (ngit-native-write-stderr "Index was not unstashed.\n"))
           (ngit--stash-restore-untracked repo untracked)
@@ -540,7 +540,11 @@ Return (t . DATA) on success, or nil when a hunk cannot be found."
          (index (ngit--stash-refresh repo)) (old (aref index 0))
          (root (or (ngit-ct-root index) (ngit-ct-new)))
          (ours (ngit-ct-update repo root old))
-         (merged (ngit--stash-merge repo base theirs index))
+         ;; Literal-path disjointness cannot prove independence after a
+         ;; deletion: an upstream file/directory rename can relocate additions.
+         (merged (and (not (seq-some (lambda (c) (= (aref c 1) ?D))
+                                    (ngit-diff-trees repo base ours)))
+                      (ngit--stash-merge repo base theirs index)))
          (changes (cadr merged)) (bad nil) (collisions nil) (new-paths nil) (loose nil)
          (saved-index (if (and restore-index merged)
                           (car (ngit--stash-restore-index repo base itree index)) old))

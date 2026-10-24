@@ -59,10 +59,11 @@ A false hit (a path argument spelled like a command) only costs time.")
 
 (let ((dir (file-name-directory (or load-file-name buffer-file-name)))
       (args (cdr (member "--" command-line-args)))
-      (files (list "ngit-native" "ngit-store" "ngit-rev" "ngit-paths" "ngit-cli" "ngit-config"
+      (files (list "ngit-native" "ngit-store" "ngit-rev" "ngit-pathspec" "ngit-paths" "ngit-cli" "ngit-config"
                    "ngit-match" "ngit-index" "ngit-worktree" "ngit-changes"
                    "ngit-status" "ngit-xdiff" "ngit-diff" "ngit-write" "ngit-add"
                    "ngit-commit")))
+  (setq load-path (cons dir load-path))
   (dolist (entry ngit-main--lazy-modules)
     (when (or (member (car entry) args) (member (concat "@" (car entry)) args))
       (dolist (f (cdr entry))

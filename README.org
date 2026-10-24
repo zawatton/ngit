@@ -3,7 +3,7 @@
 A git implementation (object store, refs, index and work tree inspection,
 plus add, commit, log, show, branch, tag, reset, switch, checkout, rm, mv,
 restore, stash, merge, cherry-pick, revert, rebase, packs and maintenance,
-fsck, clone/fetch/pull/push over local, file:// and ssh remotes, blame,
+fsck, clone/fetch/pull/push over local, file://, ssh and smart HTTP(S) remotes, blame,
 grep, describe, format-patch/apply/am, clean, worktree, config and bisect)
 that runs on the NeLisp standalone runtime (=nelisp=).  Output is byte-identical to git for the supported
 commands, verified by =test/compare.sh= against real git.
@@ -115,11 +115,26 @@ Ls-tree's =--full-name= changes displayed names; =--full-tree= also selects
 from the tree root. Ordinary =REV:path= object names remain tree-relative,
 while =REV:./path= and =REV:../path= use the invocation directory.
 
+Status, diff, add, restore, log and grep share =top=, =literal=, =glob=,
+=icase= and =exclude= pathspec magic. Ls-tree accepts =top= and =literal=
+and rejects unsupported magic. Literal filename arguments to show and blame
+retain their existing interpretation.
+
 Push supports explicit and tracking-based =--force-with-lease= expectations
-and receive-pack =--atomic= negotiation over the existing local/file/SSH
+and receive-pack =--atomic= negotiation over local/file/SSH and smart HTTP(S)
 transports. As in the Git 2.47.3 comparison oracle, explicit =--force= or a
 forced refspec overrides a lease. =--atomic= fails if the peer does not
 advertise the capability.
+
+Smart HTTP(S) uses libcurl for streamed protocol-v0 discovery and RPCs.
+HTTPS verifies the peer and hostname; =GIT_SSL_CAINFO= or =http.sslCAInfo=
+can supply a private CA. Explicit Basic URL credentials and =http.extraHeader=
+are supported. Discovery redirects are bounded and drop credentials and
+custom headers when the origin changes; RPCs are never redirected or retried.
+
+Directory rename inference follows =merge.directoryRenames= for merge,
+cherry-pick, revert and stash application. Relocation conflicts preserve
+side contents and the operation's continue/abort state.
 
 Clone, fetch and pull use a Linux/Python 3 process supervisor with an
 8192 MiB aggregate memory budget. Set =NGIT_MEMORY_BUDGET_MIB= to a positive
@@ -215,6 +230,7 @@ when the variable is unset.
 - =lisp/ngit-remote.el= (init, remotes), =lisp/ngit-transport.el= (smart
   protocol client, fetch/pull/push and clone) with
   =ngit-transport-process.el= (local and ssh subprocesses),
+  =ngit-transport-http.el= (libcurl smart HTTP(S) discovery and RPCs),
   =ngit-transport-index.el= (received-pack indexing),
   =ngit-transport-delta.el= and =ngit-transport-kernel.el= (delta
   application compiled to native code once per process) and
@@ -287,6 +303,10 @@ sh test/maintenance.sh (pack-write|gc|fsck)  # also run by compare.sh
 sh test/merge-fuzz.sh      # merge-file against git on random inputs
 sh test/xdiff-fuzz.sh 300  # xdiff port against git diff --no-index
 sh test/hunk-utf8-check.sh # hunk headers with multibyte/invalid UTF-8 (needs python3)
+sh test/smart-http.sh (discovery|fetch|push|auth|e2e) # loopback HTTP and private-CA TLS
+sh test/pathspec-magic.sh (read|write|boundaries|e2e)
+sh test/directory-rename.sh (clean|conflicts|e2e)
+python3 tools/network-compat-verify.py (controls|regression|e2e)
 nelisp --load test/hash-chars-check.el -- x  # span hash vs reference copy
 NGIT_REAL_REPO=/path/to/repo sh test/compare.sh real
 bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Notes
@@ -294,10 +314,11 @@ bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Note
 
 * Not supported yet
 
-HTTP(S) and git:// transports, shallow/partial/single-branch clones,
+Dumb HTTP, HTTP protocol v2, credential helpers and git:// transports,
+shallow/partial/single-branch clones,
 template copying, =--force-if-includes= pushes,
 push.default=matching/nothing, multi-head pulls, submodules (beyond
-gitlink entries), directory rename inference in merges, strategy-specific
+gitlink entries), strategy-specific
 rename thresholds, octopus merges, custom merge
 drivers, interactive rebase (and its hooks), rerere, =--fix-thin=, git's delta search depth
 (new deltas are limited to 4 KiB targets and 32 KiB per run; pack
@@ -305,7 +326,7 @@ compression defaults to level 1), blame -M/-C, grep -P, name-rev --all,
 mailmap, binary patches and general MIME mail in am/apply.
 
 Alternates, multi-pack-index, reftable, split or sparse
-indexes, SHA-256 repositories, magic pathspecs (log takes literal and glob pathspecs), copy detection
+indexes, SHA-256 repositories, attribute pathspec magic, copy detection
 and inexact renames outside log and merge (status, diff and commit summaries
 detect exact renames only), commit
 signing, an editor for commit messages (use -m or -F), commit with

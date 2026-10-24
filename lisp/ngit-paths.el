@@ -7,21 +7,33 @@
 
 ;;; Code:
 
+(unless (featurep 'ngit-pathspec)
+  (load (expand-file-name "ngit-pathspec.el"
+                          (file-name-directory (or load-file-name buffer-file-name))) nil t))
+
 (defvar ngit--invocation-directory nil
   "Directory after the command line's repeated -C options were applied.")
 
-(defun ngit-paths-items (repo paths)
+(defun ngit-paths-items (repo paths &optional magic)
   "Normalize literal PATHS using the existing add/restore pathspec API."
   (let ((default-directory (or ngit--invocation-directory default-directory)))
-    (mapcar (lambda (path)
+    (let ((items (mapcar (lambda (path)
               (when (string= path "")
                 (ngit--die "fatal: empty string is not a valid pathspec. please use . instead if you meant to match all paths"))
-              (let ((item (ngit--pathspec-item repo path)))
+              (let ((item (or (and magic (ngit-pathspec-compile repo path))
+                              (ngit--pathspec-item repo path))))
                 ;; The shared add/restore normalizer removes trailing
                 ;; separators.  Read pathspecs retain directory-only intent.
-                (if (and (not (string= item "")) (string-suffix-p "/" path))
+                (if (and (stringp item) (not (string= item "")) (string-suffix-p "/" path))
                     (concat item "/") item)))
             paths)))
+      (when (and magic items (seq-every-p (lambda (item) (and (vectorp item) (aref item 4))) items))
+        (setq items (cons "" items)))
+      items)))
+
+(defun ngit-pathspec-items (repo paths)
+  "Normalize PATHS and explicitly compile magic for pathspec-taking commands."
+  (ngit-paths-items repo paths t))
 
 (defun ngit-paths-covers-p (item path)
   "Whether root-relative literal ITEM selects PATH (the root is empty)."
@@ -33,8 +45,7 @@
 
 (defun ngit-paths-match-p (items path)
   "Whether root-relative PATH is selected by ITEMS, or ITEMS is nil."
-  (or (null items)
-      (seq-some (lambda (item) (ngit-paths-covers-p item path)) items)))
+  (or (null items) (ngit-pathspec-match-p items path)))
 
 (defun ngit-paths-filter-changes (items changes)
   "Select root-relative CHANGES before rename detection."

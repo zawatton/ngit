@@ -155,6 +155,10 @@
   (or (and push (ngit-config-get repo (concat "remote." remote ".pushurl")))
       (ngit-config-get repo (concat "remote." remote ".url")) remote))
 
+(defun ngit-tr--display-url (url)
+  "Remove HTTP credentials before writing URL to a diagnostic."
+  (replace-regexp-in-string "\\`\\(https?://\\)[^/@]+@" "\\1" url))
+
 (defun ngit-tr--branch (repo)
   (let ((head (ngit-read-ref repo "HEAD")))
     (and head (string-prefix-p "ref: refs/heads/" head) (substring head 16))))
@@ -281,7 +285,7 @@
         (let ((conn (ngit-transport-open repo url "git-upload-pack")) (count 0))
           (unwind-protect
               (let* ((adv (ngit-tr--advertise conn)) (refs (car adv)))
-                (when (and implicit (not quiet)) (ngit-native-write-stderr (concat "From " url "\n")))
+                (when (and implicit (not quiet)) (ngit-native-write-stderr (concat "From " (ngit-tr--display-url url) "\n")))
                 (dolist (ref refs)
                   (let ((name (car ref)) (oid (nth 1 ref)))
                     (when (and oid (or (not (or heads tags))
@@ -349,7 +353,7 @@
                  (target (if branch (ngit-tr--find refs branch) (and (nth 2 head) (assoc (nth 2 head) refs))))
                  (oid (or (nth 1 target) (nth 1 head)))
                  (head-ref (and target (string-prefix-p "refs/heads/" (car target)) (car target)))
-                 (msg (concat "clone: from " url)) wants packed)
+                 (msg (concat "clone: from " (ngit-tr--display-url url))) wants packed)
             (when (and branch (null target)) (ngit--die "fatal: Remote branch %s not found in upstream %s" branch origin))
             (dolist (ref refs)
               (when (and (nth 1 ref) (string-prefix-p "refs/" (car ref)) (not (string-suffix-p "^{}" (car ref))))
@@ -508,7 +512,7 @@
 
 (defun ngit-tr--display-fetch (url rows)
   (when rows
-    (ngit-native-write-stderr (concat "From " (if (string-suffix-p ".git" url) (substring url 0 -4) url) "\n"))
+    (ngit-native-write-stderr (concat "From " (ngit-tr--display-url (if (string-suffix-p ".git" url) (substring url 0 -4) url)) "\n"))
     (let ((source-width 10) (summary-width 17))
       (dolist (row rows)
         (setq source-width (max source-width (length (nth 2 row)))
@@ -636,7 +640,7 @@
                                              (cond ((equal src "HEAD") "") (tag (concat "tag '" short "' of "))
                                                    ((string-prefix-p "refs/heads/" src) (concat "branch '" short "' of "))
                                                    (t (concat "'" src "' of ")))
-                                             (if (string-suffix-p ".git" url) (substring url 0 -4) url) "\n")) fetch-head))
+                                             (ngit-tr--display-url (if (string-suffix-p ".git" url) (substring url 0 -4) url)) "\n")) fetch-head))
                 (cond
                  ((null dest) (setq code "*" summary "branch"))
                  ((equal old oid) (when verbose (setq code "=" summary "[up to date]")))
@@ -911,7 +915,7 @@ The first matching named lease wins, and explicit force overrides leases."
               (let ((old (aref update 3)) (dst (aref update 1)))
                 (when (and delete (equal old ngit-tr--zero))
                   (ngit--die-with 1 "error: unable to delete '%s': remote ref does not exist\nerror: failed to push some refs to '%s'"
-                                  (ngit-tr--short dst) url))))
+                                  (ngit-tr--short dst) (ngit-tr--display-url url)))))
             (ngit-tr--push-validate repo remote updates force (nreverse leases) lease-all)
             (dolist (update updates)
               (when (stringp (aref update 5)) (setq failed (or failed (aref update 5)))))
@@ -1046,7 +1050,7 @@ The first matching named lease wins, and explicit force overrides leases."
             (when (or (not quiet) failed)
               (if rows
                   (progn
-                    (ngit-native-write-stderr (concat "To " url "\n"))
+                    (ngit-native-write-stderr (concat "To " (ngit-tr--display-url url) "\n"))
                     (let ((abbrev 7) width)
                       (dolist (ref refs)
                         (setq abbrev (max abbrev (length (ngit-abbrev repo (nth 1 ref))))))
@@ -1069,7 +1073,7 @@ The first matching named lease wins, and explicit force overrides leases."
                                  (if (nth 4 row) (concat " (" (nth 4 row) ")") "") "\n")))))
                 (ngit-native-write-stderr "Everything up-to-date\n")))
             (when failed
-              (ngit-native-write-stderr (concat "error: failed to push some refs to '" url "'\n"))
+              (ngit-native-write-stderr (concat "error: failed to push some refs to '" (ngit-tr--display-url url) "'\n"))
               (when (and (member failed '("fetch first" "already exists" "non-fast-forward"))
                          (ngit-config-bool repo "advice.pushUpdateRejected" t))
                 (ngit-native-write-stderr (ngit-tr--push-hint failed))))

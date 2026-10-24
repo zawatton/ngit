@@ -339,7 +339,9 @@ INHERIT-STDOUT is non-nil it retains fd 1, as Git's pre-push runner does."
   "Open URL for SERVICE and return a binary transport connection."
   (unless (member service '("git-upload-pack" "git-receive-pack"))
     (ngit-transport--fail "fatal: unsupported Git service: %s" service))
-  (let* ((parsed (ngit-transport--parse-url url))
+  (if (string-match-p "\\`https?://" url)
+      (progn (require 'ngit-transport-http) (ngit-http-open repo url service))
+    (let* ((parsed (ngit-transport--parse-url url))
          (ssh (eq (car parsed) 'ssh))
          (v2 (string= service "git-upload-pack"))
          (argv (if ssh
@@ -347,12 +349,15 @@ INHERIT-STDOUT is non-nil it retains fd 1, as Git's pre-push runner does."
                  (list (ngit-transport--executable service)
                        (expand-file-name (car (cdr parsed)))))))
     (setcar argv (ngit-transport--executable (car argv)))
-    (ngit-transport--spawn argv (ngit-transport--env v2))))
+    (ngit-transport--spawn argv (ngit-transport--env v2)))))
 
 (defun ngit-transport-write (conn bytes)
   "Write all of unibyte string BYTES to CONN."
   (unless (and (ngit-transport--conn-p conn) (stringp bytes))
     (signal 'wrong-type-argument (list 'ngit-transport-write conn bytes)))
+  (when (and (fboundp 'ngit-http-p) (ngit-http-p conn))
+    (when (aref (aref conn 6) 5) (ngit-transport--fail "fatal: HTTP RPC already sent"))
+    (aset (aref conn 6) 8 (+ (aref (aref conn 6) 8) (string-bytes bytes))))
   (let* ((n (string-bytes bytes))
          (owner (nl-ffi-memory-allocate (max 1 n)))
          (addr (nl-ffi-memory-address owner)) (done 0))
@@ -374,6 +379,7 @@ INHERIT-STDOUT is non-nil it retains fd 1, as Git's pre-push runner does."
 An EOF after a partial result is a truncated Git stream and signals an error."
   (unless (and (ngit-transport--conn-p conn) (integerp count) (>= count 0))
     (signal 'wrong-type-argument (list 'ngit-transport-read conn count)))
+  (when (and (fboundp 'ngit-http-p) (ngit-http-p conn)) (ngit-http-ready conn))
   (if (= count 0) ""
     (if (aref conn 5) nil
       (let* ((owner (nl-ffi-memory-allocate count))
@@ -406,6 +412,7 @@ An EOF after a partial result is a truncated Git stream and signals an error."
 
 (defun ngit-transport-copy (conn fd count)
   "Copy exactly COUNT bytes from CONN to FD without Lisp payload strings."
+  (when (and (fboundp 'ngit-http-p) (ngit-http-p conn)) (ngit-http-ready conn))
   (let* ((owner (ngit-native--buffer 0 (max 1 (min count 65536))))
          (address (nl-ffi-memory-address owner)) (left count))
     (while (> left 0)
@@ -428,7 +435,8 @@ An EOF after a partial result is a truncated Git stream and signals an error."
   "Close CONN's input side."
   (unless (ngit-transport--conn-p conn)
     (signal 'wrong-type-argument (list 'ngit-transport-finish-write conn)))
-  (when (>= (aref conn 2) 0)
+  (when (and (not (and (fboundp 'ngit-http-p) (ngit-http-p conn)))
+             (>= (aref conn 2) 0))
     (syscall-direct ngit-transport--sys-close (aref conn 2) 0 0 0 0 0)
     (aset conn 2 -1))
   nil)
@@ -452,7 +460,8 @@ An EOF after a partial result is a truncated Git stream and signals an error."
   "Close CONN, let the server finish its work, reap it and return status."
   (unless (ngit-transport--conn-p conn)
     (signal 'wrong-type-argument (list 'ngit-transport-close conn)))
-  (or (aref conn 4)
+  (if (and (fboundp 'ngit-http-p) (ngit-http-p conn)) (ngit-http-close conn)
+    (or (aref conn 4)
       (progn
         (ngit-transport-finish-write conn)
         (when (>= (aref conn 3) 0)
@@ -461,7 +470,7 @@ An EOF after a partial result is a truncated Git stream and signals an error."
         (let ((raw (ngit-transport--wait conn 0)))
           (when (and (> (length conn) 7) (/= (logand raw #x7f) 0))
             (aset conn 7 (logand raw #x7f)))
-          (aset conn 4 (ngit-transport--status raw))))))
+          (aset conn 4 (ngit-transport--status raw)))))))
 
 (defun ngit-transport-tty-p ()
   "Return non-nil when stderr is attached to a terminal."

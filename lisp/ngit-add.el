@@ -242,7 +242,8 @@ tree path nor an index entry, as git does."
           (ngit-native-write-stderr
            "Nothing specified, nothing added.\nhint: Maybe you wanted to say 'git add .'?\nhint: Disable this message with \"git config set advice.addEmptyPathspec false\"\n")
           0)
-      (let* ((items (if paths (mapcar (lambda (p) (ngit--pathspec-item repo p)) paths) '("")))
+      (let* ((ngit--no-excludes force)
+             (items (if paths (ngit-pathspec-write-items repo paths) '("")))
              (index (ngit-read-index repo))
              (entries (copy-sequence (aref index 0)))
              (root (ngit-ct-root index))
@@ -251,7 +252,6 @@ tree path nor an index entry, as git does."
              (log (lambda (what path)
                     (when (or verbose dry-run)
                       (ngit--emit what " '" (ngit-quote-path path) "'\n"))))
-             (ngit--no-excludes force)
              (_ (ngit--check-pathspecs repo items))
              (matched (ngit-add-tracked repo index entries items root checked log dry-run ita))
              (new-entries nil) (ignored nil))

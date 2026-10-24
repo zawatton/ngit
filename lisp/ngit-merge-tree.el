@@ -149,6 +149,7 @@ The :entries vector is a complete index, including stages 1-3 on conflicts.
 The :worktree vector contains stage-zero entries with conflict marker blobs.
 The :tree is the materialized tree, :conflicts is a sorted list of paths,
 and :messages contains ordered diagnostic strings without newlines.
+:conflicted also records conflicts which leave every index entry at stage zero.
 VIRTUAL is a positive recursive-ancestor depth, or nil for the real merge."
   (let* ((base (ngit-merge-tree-entries repo base-tree))
          (ours (ngit-merge-tree-entries repo ours-tree))
@@ -156,7 +157,8 @@ VIRTUAL is a positive recursive-ancestor depth, or nil for the real merge."
          (table (make-hash-table :test 'equal))
          (names (make-hash-table :test 'equal))
          (paths nil) (records nil) (depth (if (numberp virtual) virtual (if virtual 1 0)))
-         (entries nil) (worktree nil) (conflicts nil) (messages nil))
+         (entries nil) (worktree nil) (conflicts nil) (messages nil)
+         (directory-metadata nil) (directory-conflict nil))
     ;; Keep a side list: enumerating hash tables is expensive in NeLisp.
     (let ((side 1))
       (dolist (vector (list base ours theirs))
@@ -178,9 +180,23 @@ VIRTUAL is a positive recursive-ancestor depth, or nil for the real merge."
         (setq side (1+ side))))
     (setq paths (sort paths #'string<))
     (when (ngit-merge-renames-p repo)
-      (ngit-merge-rename-reconcile
-       repo table (ngit-merge-rename-map repo base-tree ours-tree)
-       (ngit-merge-rename-map repo base-tree theirs-tree) ours-label theirs-label depth))
+      (let* ((left (ngit-merge-rename-map repo base-tree ours-tree))
+             (right (ngit-merge-rename-map repo base-tree theirs-tree))
+             (ld (ngit-merge-directory-map left ours))
+             (rd (ngit-merge-directory-map right theirs)))
+        (ngit-merge-rename-reconcile repo table left right ours-label theirs-label depth)
+        (let ((dirs (ngit-merge-directory-reconcile
+                     repo table paths ld rd ours theirs ours-label theirs-label depth)))
+          (setq paths (nth 0 dirs) directory-metadata (nth 1 dirs)
+                directory-conflict (nth 2 dirs))
+          ;; Reserve implicit destinations before choosing conflict backups.
+          (dolist (path paths)
+            (unless (gethash path names)
+              (puthash path t names)
+              (let ((start 0) slash)
+                (while (setq slash (ngit--byte-pos path ?/ start))
+                  (puthash (substring path 0 slash) t names)
+                  (setq start (1+ slash)))))))))
     (dolist (path paths)
       (let* ((rec (gethash path table))
              (b (aref rec 1)) (o (aref rec 2)) (th (aref rec 3)))
@@ -235,6 +251,9 @@ VIRTUAL is a positive recursive-ancestor depth, or nil for the real merge."
             (aset rec 6 (list (concat "CONFLICT (modify/delete): " path " deleted in "
                                      deleted " and modified in " modified ".  Version "
                                      modified " of " path " left in tree."))))))
+        (let ((directory (and directory-metadata (gethash path directory-metadata))))
+          (when (car directory) (aset rec 5 t))
+          (when directory (aset rec 6 (append (cdr directory) (aref rec 6)))))
         (push rec records)))
     ;; A surviving directory wins the original pathname.  Its competing file
     ;; moves to the same unique branch-labelled path merge-ort would choose.
@@ -257,16 +276,19 @@ VIRTUAL is a positive recursive-ancestor depth, or nil for the real merge."
                 (aset rec i (ngit-merge--copy (aref rec i) new))
                 (setq i (1+ i))))
             (aset rec 5 t)
-            (aset rec 6
-                  (cons (concat "CONFLICT (file/directory): directory in the way of "
-                                path " from " label "; moving it to " new " instead.")
+            (let ((directory-messages
+                   (and directory-metadata (cdr (gethash path directory-metadata)))))
+             (aset rec 6
+                  (append directory-messages
+                          (list (concat "CONFLICT (file/directory): directory in the way of "
+                                        path " from " label "; moving it to " new " instead."))
                         (if (and (aref rec 1) (not (and (aref rec 2) (aref rec 3))))
                             (let ((modified (if (aref rec 2) ours-label theirs-label))
                                   (deleted (if (aref rec 2) theirs-label ours-label)))
                               (list (concat "CONFLICT (modify/delete): " new " deleted in "
                                             deleted " and modified in " modified ".  Version "
                                             modified " of " new " left in tree.")))
-                          (aref rec 6))))))))
+                          (nthcdr (length directory-messages) (aref rec 6))))))))))
     (setq records (sort records (lambda (a b) (string< (aref a 0) (aref b 0)))))
     (dolist (rec records)
       (let ((path (aref rec 0)) (result (aref rec 4)))
@@ -285,6 +307,7 @@ VIRTUAL is a positive recursive-ancestor depth, or nil for the real merge."
           worktree (vconcat (sort worktree #'ngit--entry-less)))
     (let* ((root (ngit-ct-new)) (tree (ngit-ct-update repo root worktree)))
       (list :entries entries :worktree worktree :conflicts (nreverse conflicts)
+            :conflicted (and (or conflicts directory-conflict) t)
             :messages messages :tree tree :cache-tree root))))
 
 (defun ngit-merge--base (repo one two depth &optional labelled)
@@ -434,7 +457,8 @@ index.  QUIET does not hide ort diagnostics for merge -q.  The symbol
             (aset repo 6 nil) (aset repo 7 nil))
         (when lock (ngit-unlock lock))))
     (ngit-ref-write repo "AUTO_MERGE" (ngit-hex (plist-get result :tree)))
-    (unless (and (eq quiet 'rebase) (not (plist-get result :conflicts)))
+    (unless (and (eq quiet 'rebase) (not (or (plist-get result :conflicted)
+                                          (plist-get result :conflicts))))
       (dolist (msg (plist-get result :messages)) (ngit--emit msg "\n")))
     result))
 

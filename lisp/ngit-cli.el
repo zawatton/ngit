@@ -341,7 +341,9 @@ Parsed from the end with `aref'; a regexp costs milliseconds here."
               ngit--invocation-directory))
            (items (if paths
                       (mapcar (lambda (path)
-                                (let ((item (car (ngit-paths-items repo (list path)))))
+                                (let ((item (ngit-pathspec-ls-tree-item
+                                             (or (ngit-pathspec-compile repo path)
+                                                 (car (ngit-paths-items repo (list path)))))))
                                   ;; Dot components request directory contents, like a trailing slash.
                                   (if (and (not (string= item ""))
                                            (not (string-suffix-p "/" item))

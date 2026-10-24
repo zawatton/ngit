@@ -607,7 +607,7 @@
                (push (if (string= (match-string 2 a) "") "HEAD" (match-string 2 a)) revs))
               (t (push a revs)))))
     (setq revs (nreverse revs))
-    (let* ((items (ngit-paths-items repo paths))
+    (let* ((items (ngit-pathspec-items repo paths))
            (changes
             (ngit-paths-filter-changes
              items

@@ -272,7 +272,7 @@ one concatenation for each byte that needs quoting."
 
 (defun ngit--status-directory-warning (repo items)
   "Report an inaccessible common literal directory prefix as Git does."
-  (when items
+  (when (and items (not (ngit-pathspec-magic-p items)))
     (let ((prefix (car items)))
       (dolist (item (cdr items))
         (let ((n 0) (limit (min (length prefix) (length item))))
@@ -303,7 +303,18 @@ one concatenation for each byte that needs quoting."
 (defun ngit--status-untracked (repo items)
   "Select untracked paths, expanding a collapsed ancestor of an ITEM."
   (ngit--status-directory-warning repo items)
-  (let ((paths (ngit-untracked repo)) (expanded nil) (scanned nil) (out nil))
+  (if (ngit-pathspec-magic-p items)
+      (let* ((top (file-name-as-directory (ngit-repo-toplevel repo)))
+             (tracked (ngit--tracked-set (ngit-index-entries repo))) (out nil))
+        (ngit-wt-setup top)
+        (dolist (path (ngit-untracked repo))
+          (if (ngit-pathspec-match-p items path)
+              (push path out)
+            (when (string-suffix-p "/" path)
+              (ngit--walk-untracked repo top tracked path (ngit-ignore-global-patterns repo)
+                                    (lambda (file) (when (ngit-pathspec-match-p items file) (push file out))) nil t))))
+        (sort out #'string<))
+   (let ((paths (ngit-untracked repo)) (expanded nil) (scanned nil) (out nil))
     (dolist (path paths)
       (let ((directory (string-suffix-p "/" path)))
         (if (and directory
@@ -328,7 +339,7 @@ one concatenation for each byte that needs quoting."
                         (setq dir (and slash (substring p 0 (1+ slash))))))
                     (push (or dir p) out)))))
           (when (ngit-paths-match-p items path) (push path out)))))
-    (sort (delete-dups out) #'string<)))
+    (sort (delete-dups out) #'string<))))
 
 (defvar ngit--status-prefix "" "Root-relative prefix for human status output.")
 
@@ -515,7 +526,7 @@ one concatenation for each byte that needs quoting."
               (t (setq paths (append paths (list a)))))))
     (unless (ngit-repo-toplevel repo)
       (ngit--die "fatal: this operation must be run in a work tree"))
-    (let ((st (ngit-status-collect repo (ngit-paths-items repo paths)))
+    (let ((st (ngit-status-collect repo (ngit-pathspec-items repo paths)))
           (ngit--status-prefix
            (if (or (eq fmt 'porcelain) (not (ngit-config-bool repo "status.relativepaths" t)))
                "" (ngit-paths-prefix repo))))

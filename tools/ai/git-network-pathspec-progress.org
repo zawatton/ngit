@@ -1,0 +1,75 @@
+#+TITLE: ngit HTTPS, pathspec and directory-rename compatibility
+
+Baseline: 8eb1cd5. Three isolated lanes implement smart HTTP(S), common
+top/literal/glob/icase/exclude pathspecs in selected consumers, and directory
+rename inference. Protocol v2, dumb HTTP, shallow/partial clone, credential
+helper integration, sparse indexes and interactive operations are outside
+this slice. The fifteen criteria are defined before implementation.
+
+* S1 Smart HTTP and HTTPS
+
+** S1.1 Discovery validates service framing, HTTP failures and TLS trust
+#+TIMEOUT: 300
+cmd: sh test/smart-http.sh discovery
+
+** S1.2 Clone and fetch preserve binary packs, refs, checkout and Git fsck
+#+TIMEOUT: 600
+cmd: sh test/smart-http.sh fetch
+
+** S1.3 Push preserves lease, atomic updates and receive-pack rejection semantics
+#+TIMEOUT: 600
+cmd: sh test/smart-http.sh push
+
+** S1.4 Explicit Basic credentials and extra headers authenticate without cross-origin leakage
+#+TIMEOUT: 300
+cmd: sh test/smart-http.sh auth
+
+** S1.5 Verified-TLS clone, fetch and push match Git end to end
+#+TIMEOUT: 600
+cmd: sh test/smart-http.sh e2e
+
+* S2 Common pathspecs
+
+** S2.1 Selected read commands share top, literal, glob, icase and exclusion matching
+#+TIMEOUT: 600
+cmd: sh test/pathspec-magic.sh read
+
+** S2.2 Add and restore select and mutate the same paths as Git
+#+TIMEOUT: 600
+cmd: sh test/pathspec-magic.sh write
+
+** S2.3 Nested prefixes, exclusion-only lists and invalid magic preserve Git boundaries
+#+TIMEOUT: 600
+cmd: sh test/pathspec-magic.sh boundaries
+
+** S2.4 A nested magic-pathspec edit, commit, inspect and restore workflow matches Git end to end
+#+TIMEOUT: 600
+cmd: sh test/pathspec-magic.sh e2e
+
+* S3 Directory renames
+
+** S3.1 Inferred directory renames relocate additions and modifications like Git
+#+TIMEOUT: 600
+cmd: sh test/directory-rename.sh clean
+
+** S3.2 Conflicting directory moves and occupied destinations preserve every side's content
+#+TIMEOUT: 600
+cmd: sh test/directory-rename.sh conflicts
+
+** S3.3 Merge and supported sequencer continue or abort workflows match Git end to end
+#+TIMEOUT: 600
+cmd: sh test/directory-rename.sh e2e
+
+* S4 Integration
+
+** S4.1 Actual baseline failures and original test-source preservation are verified
+#+TIMEOUT: 600
+cmd: python3 tools/network-compat-verify.py controls
+
+** S4.2 Affected existing regression suites pass with fresh source provenance
+#+TIMEOUT: 600
+cmd: python3 tools/network-compat-verify.py regression
+
+** S4.3 HTTPS, magic selection and directory rename work together in compiled and source modes
+#+TIMEOUT: 600
+cmd: python3 tools/network-compat-verify.py e2e

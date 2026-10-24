@@ -276,14 +276,16 @@
 
 (defun ngit--log-path-class (path dirp gitlink)
   "Classify log PATH with directory literal intent, including GITLINK entries."
-  (let ((items nil))
+  (if (eq (cdar ngit--rv-paths) 'magic)
+      (ngit-pathspec-class (caar ngit--rv-paths) (if gitlink (concat path "/") path) dirp)
+   (let ((items nil))
     (dolist (item ngit--rv-paths)
       (if (eq (cdr item) 'directory)
           (unless (and (string= (car item) path) (not dirp) (not gitlink))
             (push (cons (car item) nil) items))
         (push item items)))
     (let ((ngit--rv-paths (nreverse items)))
-      (ngit--ps-class path dirp))))
+      (ngit--ps-class path dirp)))))
 
 (defun ngit--ps-tree-has-match (repo tree prefix)
   "Non-nil when tree TREE (20-byte name) has an entry the pathspec matches."
@@ -1983,7 +1985,10 @@ cases: combining marks are zero and East Asian wide characters two."
 
 (defun ngit--log-pathspec (repo paths)
   "Pathspec items for PATHS given relative to the current directory."
-  (mapcar (lambda (p)
+  (let ((compiled (ngit-pathspec-items repo paths)))
+   (if (ngit-pathspec-magic-p compiled)
+       (list (cons compiled 'magic))
+    (mapcar (lambda (p)
             ;; Keep log's glob compiler; only normalize the path prefix.
             ;; The shared API also retains the invocation cwd after -C.
             (let ((item (car (ngit-paths-items
@@ -1998,7 +2003,7 @@ cases: combining marks are zero and East Asian wide characters two."
                     (if (cdr compiled) (ngit--ps-item (concat item "*"))
                       (cons (car compiled) 'directory)))
                 (ngit--ps-item item))))
-          paths))
+          paths))))
 
 (defun ngit-cmd-log (repo args)
   (let ((pending nil) (flags 0) (paths nil) (seen-rev nil)

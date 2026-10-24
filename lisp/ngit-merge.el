@@ -118,13 +118,13 @@
     (ngit--merge-write repo "SQUASH_MSG" msg)
     (ngit--emit "Squash commit -- not updating HEAD\n")))
 
-(defun ngit--merge-state (repo remote message no-ff conflicts squash)
+(defun ngit--merge-state (repo remote message no-ff conflicts squash &optional conflicted)
   "Save the state used by commit and append the conflict hint."
   (unless squash
     (ngit--merge-write repo "MERGE_HEAD" (concat remote "\n"))
     (ngit--merge-write repo "MERGE_MODE" (if no-ff "no-ff" ""))
     (ngit--merge-write repo "MERGE_MSG" message))
-  (when conflicts
+  (when (or conflicts conflicted)
     (ngit--merge-write
      repo "MERGE_MSG"
      (concat (if squash "" message) "\n# Conflicts:\n"
@@ -343,7 +343,8 @@
                   (if (= (length bases) 1) (ngit-abbrev repo (ngit--c-hex (car bases)))
                     "merged common ancestors"))
                  (result (ngit-merge-trees repo base ours theirs "HEAD" name))
-                 (conflicts (plist-get result :conflicts)))
+                 (conflicts (plist-get result :conflicts))
+                 (conflicted (or conflicts (plist-get result :conflicted))))
             (condition-case err
                 (ngit-merge-apply repo result ours quiet)
               (ngit-fatal
@@ -353,10 +354,10 @@
                      (ngit--die-with 2 "Aborting\nMerge with strategy ort failed."))
                  (signal (car err) (cdr err)))))
             (when squash (ngit--merge-squash-message repo head remote))
-            (if (or conflicts no-commit)
+            (if (or conflicted no-commit)
                 (progn
-                  (ngit--merge-state repo remote message (eq ff 'no) conflicts squash)
-                  (if conflicts
+                  (ngit--merge-state repo remote message (eq ff 'no) conflicts squash conflicted)
+                  (if conflicted
                       (progn (ngit--emit "Automatic merge failed; fix conflicts and then commit the result.\n") 1)
                     (ngit-native-write-stderr "Automatic merge went well; stopped before committing as requested\n")
                     (when squash (ngit-hook-run repo "post-merge" '("1")))
