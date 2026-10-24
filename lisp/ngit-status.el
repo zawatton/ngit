@@ -249,6 +249,16 @@ one concatenation for each byte that needs quoting."
 
 ;;;; Collecting
 
+(defvar ngit--status-rename-override 'default
+  "Command-local status rename setting, or default to use configuration.")
+
+(defun ngit--status-renames-p (repo)
+  (if (not (eq ngit--status-rename-override 'default))
+      ngit--status-rename-override
+    (let* ((key (if (ngit-config-get repo "status.renames") "status.renames" "diff.renames"))
+           (value (ngit-config-get repo key)))
+      (or (member value '("copy" "copies")) (ngit-config-bool repo key t)))))
+
 (defun ngit-status-collect (repo &optional items)
   "Return branch, merge state and staged, unmerged, unstaged and untracked paths."
   (let* ((head-raw (ngit-read-ref repo "HEAD"))
@@ -256,11 +266,16 @@ one concatenation for each byte that needs quoting."
                       (substring head-raw 16)))
          (head (ngit-resolve-ref repo "HEAD"))
          (tree (and head (ngit-unhex (ngit-peel repo head 'tree))))
-         (staged (ngit-detect-renames
-                  (ngit-paths-filter-changes items (ngit-diff-tree-index repo tree))))
-         (unstaged (ngit-paths-filter-changes items (ngit-wt-changes repo nil t)))
+         (renames (ngit--status-renames-p repo))
+         (staged (ngit-paths-filter-changes items (ngit-diff-tree-index repo tree)))
+         (unstaged (ngit-paths-filter-changes items (ngit-wt-changes repo renames t)))
          (untracked (ngit--status-untracked repo items))
          (unmerged nil))
+    (when renames
+      (require 'ngit-rename)
+      (let ((limit (ngit-config-get repo "status.renameLimit")))
+        (setq staged (ngit-diffcore-rename repo staged (and limit (string-to-number limit)))
+              unstaged (ngit-diffcore-rename repo unstaged (and limit (string-to-number limit))))))
     (setq staged (delq nil (mapcar (lambda (c)
                                     (if (= (aref c 1) ?U)
                                         (progn (push c unmerged) nil)
@@ -364,7 +379,8 @@ one concatenation for each byte that needs quoting."
     (dolist (c (plist-get st :unstaged))
       (let* ((slot (gethash (aref c 0) table))
              (flags (aref c 6))
-             (y (cond ((memq 'ita (if (listp flags) flags (list flags))) ?A)
+             (y (cond ((= (aref c 1) ?R) ?R)
+                      ((memq 'ita (if (listp flags) flags (list flags))) ?A)
                       ((and (not porcelain) (listp flags) flags)
                        (cond ((memq 'new-commits flags) ?M)
                              ((memq 'modified flags) ?m)
@@ -373,7 +389,7 @@ one concatenation for each byte that needs quoting."
                       (t (aref c 1)))))
         (if slot
             (aset slot 1 y)
-          (puthash (aref c 0) (vector ?\s y nil) table)
+          (puthash (aref c 0) (vector ?\s y (aref c 8)) table)
           (push (aref c 0) paths))))
     (dolist (c (plist-get st :unmerged))
       (let ((xy (aref [nil "DD" "AU" "UD" "UA" "DU" "AA" "UU"]
@@ -499,7 +515,8 @@ one concatenation for each byte that needs quoting."
           (ngit--emit "  (commit or discard the untracked or modified content in submodules)\n"))
         (dolist (c unstaged)
           (let ((f (aref c 6)))
-            (ngit--emit (ngit--status-line (if (eq f 'ita) ?A (aref c 1)) (aref c 0) nil
+            (ngit--emit (ngit--status-line (if (and (eq f 'ita) (/= (aref c 1) ?R)) ?A (aref c 1))
+                                           (aref c 0) (aref c 8)
                                            (ngit--submodule-extra f)))))
         (ngit--emit "\n")))
     (when untracked
@@ -515,13 +532,15 @@ one concatenation for each byte that needs quoting."
              (t "nothing to commit, working tree clean\n"))))))
 
 (defun ngit-cmd-status (repo args)
-  (let ((fmt 'long) (paths nil))
+  (let ((fmt 'long) (paths nil) (ngit--status-rename-override 'default))
     (while args
       (let ((a (pop args)))
         (cond ((string= a "--") (setq paths (append paths args) args nil))
               ((member a '("-s" "--short")) (setq fmt 'short))
               ((member a '("--porcelain" "--porcelain=v1")) (setq fmt 'porcelain))
               ((string= a "--long") (setq fmt 'long))
+              ((string= a "--no-renames") (setq ngit--status-rename-override nil))
+              ((string= a "--renames") (setq ngit--status-rename-override t))
               ((string-prefix-p "-" a) (ngit--die "unsupported status option %s" a))
               (t (setq paths (append paths (list a)))))))
     (unless (ngit-repo-toplevel repo)

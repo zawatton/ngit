@@ -60,7 +60,7 @@
          (path (or (match-string 3 url) "/"))
          (at (string-search "@" authority)) credentials)
     (when at
-      (setq credentials (ngit-transport--percent-decode (substring authority 0 at))
+      (setq credentials (substring authority 0 at)
             authority (substring authority (1+ at))))
     (unless (and (not (string-search "@" authority))
                  (string-match-p "\\`\\(?:\\[[0-9A-Fa-f:]+\\]\\|[A-Za-z0-9.-]+\\)\\(?::[0-9]+\\)?\\'" authority))
@@ -110,9 +110,11 @@
 
 (defun ngit-http--request (state url post)
   "Perform one request, with bounded manual redirects only for discovery."
-  (let ((redirects 0) (done nil) result)
+  (let ((redirects 0) (done nil) (challenged nil) result)
     (while (not done)
-      (let (handle body head info owners slist)
+      (let ((context (aref state 7))
+            (custom-auth (seq-some (lambda (header) (string-prefix-p "authorization:" (downcase header))) (aref state 6)))
+            handle body head info owners slist used)
         (unwind-protect
             (progn
               (setq handle (ngit-http--call "curl_easy_init"))
@@ -125,12 +127,16 @@
                                   (cons 10018 "ngit/0 smart-http")
                                   (cons 10065 (or (getenv "GIT_SSL_CAINFO")
                                                  (ngit-config-get (aref state 0) "http.sslCAInfo")))
-                                  (cons 10005 (aref state 7))))
+                                  (cons 10173 (and (not custom-auth) (ngit-credential--complete context)
+                                                   (cdr (assoc "username" (aref context 1)))))
+                                  (cons 10174 (and (not custom-auth) (ngit-credential--complete context)
+                                                   (cdr (assoc "password" (aref context 1)))))))
                 (when (cdr entry)
                   (let ((owner (ngit-http--string (cdr entry))))
                     (push owner owners)
                     (ngit-http--set handle (car entry) (nl-ffi-memory-address owner)))))
-              (ngit-http--set handle 107 1) ; CURLAUTH_BASIC, explicit URL credentials only.
+              (setq used (and (not custom-auth) (ngit-credential--complete context)))
+              (ngit-http--set handle 107 1) ; CURLAUTH_BASIC; separate decoded fields.
               (ngit-http--set handle 10001 body)
               (ngit-http--set handle 10029 head)
               (dolist (value (append (aref state 6)
@@ -164,12 +170,28 @@
                   (unless (and location (< redirects 5))
                     (ngit-transport--fail "fatal: HTTP redirect limit or missing location"))
                   (let* ((next (ngit-http--url (ngit-http--redirect url location)))
-                         (old (ngit-http--url url)))
+                         (old (ngit-http--url url))
+                         (suffix (concat "/info/refs?service=" (aref state 2))))
+                    (when (nth 2 next) (ngit-transport--fail "fatal: HTTP redirect userinfo refused"))
                     (unless (equal (nth 1 next) (nth 1 old))
-                      (aset state 6 nil) (aset state 7 nil))
+                      (aset state 6 nil))
+                    (unless (string-suffix-p suffix (car next))
+                      (ngit-transport--fail "fatal: unsupported HTTP discovery redirect"))
+                    (when (or (not (equal (nth 1 next) (nth 1 old)))
+                              (and (aref context 3) (not (equal (nth 5 next) (nth 5 old)))))
+                      (aset state 7 (ngit-credential-create (aref state 0)
+                                     (substring (car next) 0 (- (length (car next)) (length suffix)))))
+                      (setq challenged nil))
                     (setq url (car next) redirects (1+ redirects))))
+                 ((= status 401)
+                  (when used (ngit-credential-reject context))
+                  (when (or used custom-auth post challenged)
+                    (ngit-transport--fail "fatal: HTTP server returned status 401"))
+                  (setq challenged t)
+                  (ngit-credential-fill context))
                  ((/= status 200) (ngit-transport--fail "fatal: HTTP server returned status %d" status))
                  (t
+                  (when used (ngit-credential-approve context))
                   (unless (equal (downcase (car (split-string (or (cdr (assoc "content-type" headers)) "") ";")))
                                  (concat "application/x-" (aref state 2) (if post "-result" "-advertisement")))
                     (ngit-transport--fail "fatal: unsupported smart HTTP response type"))
@@ -195,11 +217,12 @@
 
 (defun ngit-http-open (repo url service)
   "Open smart HTTP SERVICE, validating the complete v0 advertisement."
+  (require 'ngit-credential)
   (let* ((parts (ngit-http--url url))
          (base (replace-regexp-in-string "/+\\'" "" (car parts)))
          ;; State: repo, base, service, request FILE, response FILE, posted,
          ;; ordered custom headers, credentials, request bytes.
-         (state (vector repo base service nil nil nil (ngit-http--headers repo) (nth 2 parts) 0))
+         (state (vector repo base service nil nil nil (ngit-http--headers repo) (ngit-credential-create repo url) 0))
          (conn (vector ngit-transport--tag 0 -1 -1 nil nil state)) success)
     (unwind-protect
         (progn

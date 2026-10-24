@@ -4,12 +4,20 @@
 
 ;; Reads the system, global and repository config files in git's order and
 ;; answers last-one-wins lookups.  Keys are normalized like git: section and
-;; variable names lowercased, subsection kept verbatim.  `include' and
-;; `includeIf' are not followed.
+;; variable names lowercased, subsection kept verbatim. Includes expand at
+;; their position in each file, before higher-precedence sources.
 
 ;;; Code:
 
 (require 'ngit-store)
+
+(defvar ngit--config-source nil)
+(defvar ngit--config-line 0)
+(defvar ngit--config-locations nil)
+
+(defun ngit--config-bad-line ()
+  (ngit--die "fatal: bad config line %d in file %s"
+             ngit--config-line ngit--config-source))
 
 (defun ngit--config-files (repo)
   "Return the config files of REPO, lowest precedence first."
@@ -41,9 +49,13 @@
          ((= c ?\") (setq quoted (not quoted)))
          ((= c ?\\)
           (setq pos (1+ pos))
+          (when (and (< pos n) (= (aref line pos) ?\n))
+            (setq ngit--config-line (1+ ngit--config-line)))
+          (when (or (>= pos n) (not (memq (aref line pos) '(?n ?t ?b ?\\ ?\" ?\n))))
+            (when ngit--config-source (ngit--config-bad-line)))
           (when (< pos n)
             (when pending-space (push pending-space out) (setq pending-space nil))
-            (push (pcase (aref line pos) (?n "\n") (?t "\t") (?b "\b")
+            (push (pcase (aref line pos) (?n "\n") (?t "\t") (?b "\b") (?\n "")
                          (c2 (string c2)))
                   out)))
          ((and (not quoted) (memq c '(?\s ?\t)))
@@ -52,14 +64,38 @@
           (when pending-space (push pending-space out) (setq pending-space nil))
           (push (string c) out)))
         (setq pos (1+ pos))))
+    (when (and quoted ngit--config-source) (ngit--config-bad-line))
     (apply #'concat (nreverse out))))
 
-(defun ngit--config-parse (text)
+(defun ngit--config-logical-lines (text)
+  "Return logical config lines paired with their first physical line number.
+Retain escaped newlines so value parsing diagnoses the exact physical line."
+  (let ((physical (split-string text "\n")) (number 0) (first 1) (pending "") (lines nil))
+    (while physical
+      (setq number (1+ number)
+            pending (concat pending (string-remove-suffix "\r" (pop physical))))
+      (let ((position 0) (quoted nil) (comment nil) (continued nil))
+        (while (and (< position (length pending)) (not comment))
+          (let ((char (aref pending position)))
+            (cond ((= char ?\\)
+                   (setq position (1+ position))
+                   (when (= position (length pending)) (setq continued t)))
+                  ((= char ?\") (setq quoted (not quoted)))
+                  ((and (not quoted) (memq char '(?# ?\;))) (setq comment t))))
+          (setq position (1+ position)))
+        (if (and continued physical)
+            (setq pending (concat pending "\n"))
+          (push (cons first pending) lines)
+          (setq pending "" first (1+ number)))))
+    (nreverse lines)))
+
+(defun ngit--config-parse (text &optional callback)
   "Parse config TEXT into a list of (KEY . VALUE), in file order."
   (let ((section nil) (entries nil)
-        (lines (split-string (replace-regexp-in-string "\\\\\r?\n" "" text) "\n")))
+        (lines (ngit--config-logical-lines text)))
     (dolist (raw lines)
-      (let ((line (string-trim-left raw)))
+      (setq ngit--config-line (car raw))
+      (let ((line (string-trim-left (cdr raw))) (before entries))
         (cond
          ((or (string= line "") (memq (aref line 0) '(?# ?\;))))
          ((string-match "\\`\\[\\([-A-Za-z0-9.]+\\)\\(?:[ \t]+\"\\(\\(?:[^\"\\\\]\\|\\\\.\\)*\\)\"\\)?\\][ \t]*\\(.*\\)\\'" line)
@@ -83,21 +119,143 @@
                       (if (match-beginning 2)
                           (ngit--config-value line (match-end 0))
                         t))
-                entries)))))
+                entries))
+         (ngit--config-source (ngit--config-bad-line)))
+        (unless (eq before entries)
+          (push (cons (car entries) ngit--config-line) ngit--config-locations)
+          (when callback (funcall callback (car entries))))))
     (nreverse entries)))
+
+(defun ngit--config-condition (condition file repo)
+  "Test an include CONDITION using FILE and the discovered REPO context."
+  (unless (fboundp 'ngit-wildmatch) (require 'ngit-match))
+  (cond
+   ((and repo (string-prefix-p "onbranch:" condition))
+    (let* ((path (expand-file-name "HEAD" (ngit-repo-gitdir repo)))
+           (head (and (file-readable-p path)
+                      (string-trim (decode-coding-string (ngit--read-file path) 'utf-8))))
+           (pattern (substring condition 9)))
+      (when (string-suffix-p "/" pattern) (setq pattern (concat pattern "**")))
+      (and head (string-prefix-p "ref: refs/heads/" head)
+           (ngit-wildmatch pattern (substring head 16) t))))
+   ((and repo (or (string-prefix-p "gitdir:" condition)
+                  (string-prefix-p "gitdir/i:" condition)))
+    (let* ((fold (string-prefix-p "gitdir/i:" condition))
+           (pattern (substring condition (if fold 9 7))) (prefix 0)
+           (gitdir (directory-file-name (expand-file-name (ngit-repo-gitdir repo))))
+           (physical (directory-file-name (file-truename gitdir))))
+      (cond ((string-prefix-p "~/" pattern) (setq pattern (expand-file-name pattern)))
+            ((string-prefix-p "./" pattern)
+             (let ((directory (file-name-directory (file-truename file))))
+               (setq prefix (length directory)
+                     pattern (concat directory (substring pattern 2)))))
+            ((not (file-name-absolute-p pattern)) (setq pattern (concat "**/" pattern))))
+      (when (string-suffix-p "/" pattern) (setq pattern (concat pattern "**")))
+      (when fold (setq pattern (downcase pattern) gitdir (downcase gitdir)
+                       physical (downcase physical)))
+      (let ((literal (substring pattern 0 prefix)) (glob (substring pattern prefix)))
+        (or (and (string-prefix-p literal gitdir)
+                 (ngit-wildmatch glob (substring gitdir prefix) t))
+            (and (string-prefix-p literal physical)
+                 (ngit-wildmatch glob (substring physical prefix) t))))))))
+
+(defun ngit--config-display-file (file repo)
+  "Use Git's discovered local config spelling for diagnostics."
+  (if (and repo (ngit-repo-toplevel repo) (not (getenv "GIT_DIR"))
+           (equal (expand-file-name file)
+                  (expand-file-name ".git/config" (ngit-repo-toplevel repo))))
+      ".git/config"
+    file))
+
+(defun ngit--config-access-error (file)
+  "Return zero or the actual open errno for FILE, closing any owned descriptor."
+  (let* ((bytes (encode-coding-string file 'utf-8))
+         (address (nl-ffi-memory-address (ngit-native--buffer 3 (1+ (length bytes))))))
+    (ngit-native--write-bytes address bytes)
+    (ptr-write-u8 address (length bytes) 0)
+    (let ((descriptor (syscall-direct ngit-native--sys-open address
+                                      ngit-native--o-rdonly-cloexec 0 0 0 0)))
+      (if (< descriptor 0) (- descriptor)
+        (syscall-direct ngit-native--sys-close descriptor 0 0 0 0 0)
+        0))))
+
+(defun ngit--config-access-message (number)
+  "Return the conventional Linux diagnostic for config access errno NUMBER."
+  (or (cdr (assq number '((1 . "Operation not permitted") (2 . "No such file or directory")
+                          (5 . "Input/output error") (13 . "Permission denied")
+                          (20 . "Not a directory") (21 . "Is a directory")
+                          (23 . "Too many open files in system") (24 . "Too many open files")
+                          (36 . "File name too long") (40 . "Too many levels of symbolic links"))))
+      (format "error %d" number)))
+
+(defun ngit--config-readable (file display &optional required primary)
+  "Check FILE, ignoring only optional ENOENT/ENOTDIR failures.
+REQUIRED requests the diagnostic used for an explicitly selected list source."
+  (let ((number (ngit--config-access-error file)))
+    (when (and primary (/= number 0) (not (memq number '(2 20))))
+      (ngit-native-write-stderr
+       (format "warning: unable to access '%s': %s\n" display (ngit--config-access-message number))))
+    (cond ((= number 0) t)
+          (required (ngit--die "fatal: unable to read config file '%s': %s"
+                               display (ngit--config-access-message number)))
+          ((memq number '(2 20)) nil)
+          (primary nil)
+          (t (ngit--die "fatal: unable to access '%s': %s"
+                       display (ngit--config-access-message number))))))
+
+(defvar ngit--config-startup-repo nil)
+
+(defun ngit--config-startup (repo)
+  "Validate REPO's primary syntax before command-specific include expansion.
+Git's repository setup reads the local primary config without following includes."
+  (when (and repo (not (eq repo ngit--config-startup-repo)))
+    (let ((file (expand-file-name "config" (ngit-repo-commondir repo))))
+      (ngit--config-read file repo nil))
+    (setq ngit--config-startup-repo repo)))
+
+(defun ngit--config-read (file repo includes &optional depth display)
+  "Read FILE, expanding INCLUDES in place, to Git's maximum DEPTH of ten."
+  (when (ngit--config-readable file (or display (ngit--config-display-file file repo)) nil (null depth))
+    (let* ((display (or display (ngit--config-display-file file repo)))
+           (ngit--config-source display) (ngit--config-line 0)
+           (ngit--config-locations nil)
+           (depth (or depth 0)) (out nil))
+      (ngit--config-parse
+       (decode-coding-string (ngit--read-file file) 'utf-8)
+       (lambda (entry)
+        (push entry out)
+        (let* ((key (car entry))
+               (condition (and (string-prefix-p "includeif." key)
+                               (string-suffix-p ".path" key)
+                               (substring key 10 -5))))
+          (when (and includes
+                     (or (string= key "include.path")
+                         (and condition (ngit--config-condition condition file repo))))
+            (unless (stringp (cdr entry))
+              (ngit-native-write-stderr (format "error: missing value for '%s'\n" key))
+              (ngit--config-bad-line))
+            (let* ((value (cdr entry))
+                   (shown (cond ((string-prefix-p "~" value) (expand-file-name value))
+                                ((file-name-absolute-p value) value)
+                                (t (concat (file-name-directory display) value))))
+                   (path (expand-file-name value (file-name-directory (expand-file-name file)))))
+              (when (and (ngit--config-readable path shown) (>= depth 10))
+                (ngit--die (concat "fatal: exceeded maximum include depth (10) while including\n\t%s\nfrom\n\t%s\n"
+                                   "This might be due to circular includes.") shown display))
+              (dolist (included (ngit--config-read path repo t (1+ depth) shown))
+                (push included out)))))))
+      (nreverse out))))
 
 (defvar ngit--config-cache nil "(REPO . ENTRIES) of the last config read.")
 
 (defun ngit-config-entries (repo)
   "Return all config entries of REPO, lowest precedence first."
+  (ngit--config-startup repo)
   (if (and ngit--config-cache (eq (car ngit--config-cache) repo))
       (cdr ngit--config-cache)
     (let ((entries nil))
       (dolist (f (ngit--config-files repo))
-        (when (file-readable-p f)
-          (setq entries (append entries
-                                (ngit--config-parse
-                                 (decode-coding-string (ngit--read-file f) 'utf-8))))))
+        (setq entries (append entries (ngit--config-read f repo t))))
       (setq ngit--config-cache (cons repo entries))
       entries)))
 

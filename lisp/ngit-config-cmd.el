@@ -12,24 +12,52 @@
 
 (defun ngit-config-cmd--global-file ()
   "Return the file selected by `git config --global'."
-  (let ((explicit (getenv "GIT_CONFIG_GLOBAL"))
-        (home (getenv "HOME")))
+  (let* ((explicit (getenv "GIT_CONFIG_GLOBAL"))
+         (home (getenv "HOME"))
+         (xdg (getenv "XDG_CONFIG_HOME"))
+         (user-file (and home (expand-file-name ".gitconfig" home)))
+         (xdg-file (expand-file-name "git/config"
+                                    (if (and xdg (not (string= xdg ""))) xdg
+                                      (expand-file-name ".config" home)))))
     (cond ((and explicit (not (string= explicit ""))) (expand-file-name explicit))
-          ((and home (not (string= home ""))) (expand-file-name ".gitconfig" home))
+          ((and user-file (not (file-exists-p user-file)) (file-exists-p xdg-file)) xdg-file)
+          ((and home (not (string= home ""))) user-file)
           (t (ngit--die "fatal: $HOME not set")))))
 
 (defun ngit-config-cmd--local-file (repo)
   (unless repo (ngit--die "fatal: --local can only be used inside a git repository"))
   (expand-file-name "config" (ngit-repo-commondir repo)))
 
+(defun ngit-config-cmd--lock (file)
+  "Exclusively reserve FILE.lock, preserving errno and lock ownership."
+  (let* ((lock (concat file ".lock"))
+         (bytes (encode-coding-string lock 'utf-8))
+         (address (nl-ffi-memory-address (ngit-native--buffer 3 (1+ (length bytes))))))
+    (ngit-native--write-bytes address bytes)
+    (ptr-write-u8 address (length bytes) 0)
+    ;; O_WRONLY | O_CREAT | O_EXCL, retaining the native close-on-exec flag.
+    (let ((descriptor (syscall-direct ngit-native--sys-open address
+                                     (logior ngit-native--o-rdonly-cloexec #o301)
+                                     #o666 0 0 0)))
+      (when (< descriptor 0)
+        (ngit--die-with 255 "error: could not lock config file %s: %s"
+                        file (if (= descriptor -17) "File exists"
+                               (ngit--config-access-message (- descriptor)))))
+      (syscall-direct ngit-native--sys-close descriptor 0 0 0 0 0))
+    lock))
+
 (defun ngit-config-cmd--write-file (file text)
   "Atomically replace config FILE with TEXT, preserving its mode."
-  (ngit-make-directory (file-name-directory file) t)
+  (let ((directory (file-name-directory file)))
+    (when directory (ngit-make-directory directory t)))
   (let* ((mode (or (and (file-exists-p file) (file-modes file))
                    (ngit-native-creation-mode #o666)))
-         (lock (ngit-lock file 'defer)))
-    (ngit-commit-lock lock (encode-coding-string text 'utf-8) mode)
-    (setq ngit--config-cache nil)))
+         (lock (ngit-config-cmd--lock file)))
+    (unwind-protect
+        (progn
+          (ngit-commit-lock lock (encode-coding-string text 'utf-8) mode)
+          (setq ngit--config-cache nil))
+      (ngit-unlock lock))))
 
 (defun ngit-config-cmd--set-file (file key value &optional add)
   "Set KEY to VALUE in FILE, or unset it when VALUE is nil.
@@ -106,14 +134,13 @@ was set, including an unset miss and a single-value write over duplicates."
             (ngit-config-cmd--write-file file (apply #'concat (nreverse out)))
             t)))))))
 
-(defun ngit-config-cmd--entries (repo global)
-  (if global
-      (let ((file (ngit-config-cmd--global-file)))
-        (if (file-readable-p file)
-            (ngit--config-parse
-             (decode-coding-string (ngit--read-file file) 'utf-8))
-          nil))
-    (ngit-config-entries repo)))
+(defun ngit-config-cmd--entries (repo file includes &optional explicit-file)
+  "Read selected FILE or all sources, with the requested INCLUDES policy."
+  (if file (ngit--config-read file repo includes nil (and explicit-file file))
+    (let (entries)
+      (dolist (source (ngit--config-files repo))
+        (setq entries (append entries (ngit--config-read source repo includes))))
+      entries)))
 
 (defun ngit-config-cmd--get (entries key)
   (let ((key (ngit--config-normalize key)) (value nil) (seen nil))
@@ -133,14 +160,28 @@ was set, including an unset miss and a single-value write over duplicates."
 ;;;###autoload
 (defun ngit-cmd-config-write (repo args)
   "Implement config get/list/set/add/unset and --global."
-  (let ((global nil) (action nil) (rest nil))
+  (ngit--config-startup repo)
+  (let ((file nil) (selection nil) (explicit-file nil) (includes 'default) (all nil)
+        (action nil) (rest nil))
     ;; Git 2.47 accepts these subcommands only in the first argument slot.
     ;; A later literal "list" or "add" is an ordinary value.
     (when (member (car args) '("get" "list" "set" "add" "unset"))
       (setq action (intern (pop args))))
     (while args
       (let ((arg (pop args)))
-        (cond ((string= arg "--global") (setq global t))
+        (cond ((string= arg "--global")
+               (setq selection t file (ngit-config-cmd--global-file)))
+              ((string= arg "--local")
+               (setq selection t file (ngit-config-cmd--local-file repo)))
+              ((member arg '("--file" "-f"))
+               (unless args (ngit--die-with 129 "error: option `%s' requires a value" arg))
+               (setq selection t explicit-file t file (pop args)))
+              ((string-prefix-p "--file=" arg)
+               (setq selection t explicit-file t file (substring arg 7)))
+              ((string= arg "--includes") (setq includes t))
+              ((string= arg "--no-includes") (setq includes nil))
+              ((string= arg "--get-all") (setq action 'get all t))
+              ((string= arg "--all") (setq all t))
               ((string= arg "--get") (setq action 'get))
               ((member arg '("--list" "-l")) (setq action 'list))
               ((string= arg "--unset") (setq action 'unset))
@@ -150,6 +191,7 @@ was set, including an unset miss and a single-value write over duplicates."
                (ngit--die-with 129 "error: unknown option `%s'" arg))
               (t (push arg rest)))))
     (setq rest (nreverse rest))
+    (when (eq includes 'default) (setq includes (not selection)))
     (unless action
       (setq action (cond ((= (length rest) 1) 'get)
                          ((= (length rest) 2) 'set)
@@ -157,22 +199,27 @@ was set, including an unset miss and a single-value write over duplicates."
     (pcase action
       ('list
        (when rest (ngit--die-with 129 "error: wrong number of arguments"))
-       (dolist (entry (ngit-config-cmd--entries repo global))
+       (when explicit-file (ngit--config-readable file file t t))
+       (dolist (entry (ngit-config-cmd--entries repo file includes explicit-file))
          (ngit--emit (car entry)
                      (if (eq (cdr entry) t) "\n" (concat "=" (cdr entry) "\n"))))
        0)
       ('get
        (unless (= (length rest) 1)
          (ngit--die-with 129 "error: wrong number of arguments"))
-       (let ((found (ngit-config-cmd--get
-                     (ngit-config-cmd--entries repo global) (car rest))))
+       (let* ((entries (ngit-config-cmd--entries repo file includes explicit-file))
+              (found (ngit-config-cmd--get entries (car rest))))
          (if (not (car found))
              1
-           (ngit--emit (if (eq (cdr found) t) "" (cdr found)) "\n")
+           (if all
+               (let ((key (ngit--config-normalize (car rest))))
+                 (dolist (entry entries)
+                   (when (string= key (car entry))
+                     (ngit--emit (if (eq (cdr entry) t) "" (cdr entry)) "\n"))))
+             (ngit--emit (if (eq (cdr found) t) "" (cdr found)) "\n"))
            0)))
       (_
-       (let ((file (if global (ngit-config-cmd--global-file)
-                     (ngit-config-cmd--local-file repo))))
+       (let ((file (or file (ngit-config-cmd--local-file repo))))
          (pcase action
            ('set
             (unless (= (length rest) 2)

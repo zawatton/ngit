@@ -5,13 +5,15 @@
 ;; `diff' between the index and the work tree, a tree and the index
 ;; (--cached), a tree and the work tree, or two trees, printed as git's
 ;; default patch output (diff.c builtin_diff / fill_metainfo) or with
-;; --name-only / --name-status.  Hunks come from the xdiff port.  Exact
-;; renames are detected; inexact (similarity) renames are not.
+;; --name-only / --name-status.  Hunks come from the xdiff port; rename
+;; detection uses the shared diffcore algorithm.
 
 ;;; Code:
 
 (require 'ngit-status)
 (require 'ngit-xdiff)
+
+(defvar ngit-rename-limit-warning)
 
 (defun ngit--diff-blob (repo mode bin)
   "Return the content of side (MODE BIN) as git diffs it."
@@ -529,7 +531,7 @@
                          (t ?M))
                    old-mode old-bin new-mode new-bin flags data))))
 
-(defun ngit--unmerged-name-queue (repo changes cached renames)
+(defun ngit--unmerged-name-queue (repo changes cached renames &optional minimum)
   "Expand unmerged CHANGES as Git's non-combined name queue."
   (let (queue)
     (dolist (c changes)
@@ -549,7 +551,9 @@
             (let ((ordinary (ngit--unmerged-stage2-change repo c)))
               (when ordinary (push ordinary queue)))))))
     (setq queue (nreverse queue))
-    (when renames (setq queue (ngit-detect-renames queue)))
+    (when renames
+      (require 'ngit-rename)
+      (setq queue (ngit-diffcore-rename repo queue nil minimum)))
     (dolist (c queue)
       (when (ngit--unmerged-stages c) (aset c 1 ?U)))
     queue))
@@ -585,9 +589,25 @@
 (defun ngit--tree-of (repo rev)
   (ngit-unhex (ngit-peel repo (ngit-rev-parse repo rev) 'tree)))
 
+(defun ngit--parse-rename-score (value)
+  "Parse Git's fractional or percent rename threshold VALUE."
+  (let ((num 0) (scale 1) (dot nil) (i 0))
+    (while (< i (length value))
+      (let ((c (aref value i)))
+        (cond ((and (not dot) (= c ?.)) (setq scale 1 dot t))
+              ((and (= c ?%) (= i (1- (length value))))
+               (setq scale (if dot (* scale 100) 100)))
+              ((and (>= c ?0) (<= c ?9))
+               (when (< scale 100000)
+                 (setq scale (* scale 10) num (+ (* num 10) (- c ?0)))))
+              (t (ngit--die "invalid rename threshold %s" value))))
+      (setq i (1+ i)))
+    (if (>= num scale) 60000 (/ (* num 60000) scale))))
+
 (defun ngit-cmd-diff (repo args)
   (let ((cached nil) (ctx 3) (out 'patch) (renames (ngit-config-get repo "diff.renames"))
-        (revs nil) (paths nil) (expanded-unmerged nil))
+        (revs nil) (paths nil) (expanded-unmerged nil) (minimum nil)
+        (ngit-rename-limit-warning nil))
     (setq renames (if (null renames) t
                     (or (equal renames "copies") (equal renames "copy")
                         (ngit-config-bool repo "diff.renames" t))))
@@ -599,7 +619,9 @@
               ((string= a "--name-only") (setq out 'name-only))
               ((string= a "--name-status") (setq out 'name-status))
               ((string= a "--no-renames") (setq renames nil))
-              ((member a '("-M" "--find-renames")) (setq renames t))
+              ((member a '("-M" "--find-renames" "--find-renames=")) (setq renames t minimum nil))
+              ((string-match "\\`\\(?:-M\\|--find-renames=\\)\\(.+\\)\\'" a)
+               (setq renames t minimum (ngit--parse-rename-score (match-string 1 a))))
               ((string= a "--") (setq paths args args nil))
               ((string-prefix-p "-" a) (ngit--die "unsupported diff option %s" a))
               ((string-match "\\`\\(.*\\)\\.\\.\\(.*\\)\\'" a)
@@ -624,7 +646,7 @@
               (t (ngit-wt-changes repo t))))))
       (cond
        ((memq out '(name-only name-status))
-        (setq changes (ngit--unmerged-name-queue repo changes cached renames)
+        (setq changes (ngit--unmerged-name-queue repo changes cached renames minimum)
               expanded-unmerged t))
        ((and (eq out 'patch) (not cached) (null revs))
         (let (combined queued)
@@ -632,15 +654,19 @@
             (if (ngit--combined-change-p c) (push c combined) (push c queued)))
           (setq changes
                 (append (nreverse combined)
-                        (ngit--unmerged-name-queue repo (nreverse queued) nil renames))
+                        (ngit--unmerged-name-queue repo (nreverse queued) nil renames minimum))
                 expanded-unmerged t)))
-       (renames (setq changes (ngit-detect-renames changes))))
+       (renames
+        (require 'ngit-rename)
+        (setq changes (ngit-diffcore-rename repo changes nil minimum))))
       (dolist (c changes)
         (if (null (ngit--unmerged-stages c))
             (pcase out
               ('name-only (ngit--emit (ngit-quote-path (aref c 0)) "\n"))
               ('name-status
-               (ngit--emit (if (= (aref c 1) ?R) "R100" (string (if (eq (aref c 6) 'ita) ?A (aref c 1))))
+               (ngit--emit (if (= (aref c 1) ?R)
+                               (format "R%03d" (ngit-similarity-percent c))
+                             (string (if (eq (aref c 6) 'ita) ?A (aref c 1))))
                            "\t"
                            (if (aref c 8) (concat (ngit-quote-path (aref c 8)) "\t") "")
                            (ngit-quote-path (aref c 0)) "\n"))
@@ -664,6 +690,10 @@
                 (t
                  (ngit--emit "* Unmerged path " (or (aref c 8) (aref c 0)) "\n")
                  (when ordinary (ngit--emit-patch repo ordinary ctx)))))))))
+    (when ngit-rename-limit-warning
+      (ngit-native-write-stderr
+       (format "warning: exhaustive rename detection was skipped due to too many files.\nwarning: you may want to set your diff.renameLimit variable to at least %d and retry the command.\n"
+               ngit-rename-limit-warning)))
     0)))
 
 (provide 'ngit-diff)

@@ -137,19 +137,25 @@
 (defvar ngit-rename-limit-warning nil
   "Set to the rename limit git would ask for when detection was skipped.")
 
-(defun ngit-diffcore-rename (repo changes &optional limit)
-  "Return CHANGES with git's default rename detection applied."
+(defun ngit-diffcore-rename (repo changes &optional limit minimum)
+  "Return CHANGES with rename detection applied at MINIMUM score.
+LIMIT defaults to diff.renameLimit; zero means unlimited.  MINIMUM uses
+the same 0..60000 scale as the returned scores and defaults to 50%."
   (let* ((limit (or limit
                     (let ((v (ngit-config-get repo "diff.renameLimit")))
                       (and v (string-to-number v)))
                     1000))
+         (minimum (if (or (null minimum) (= minimum 0)) ngit--default-rename-score minimum))
          (srcs nil) (dsts nil))
     ;; rename_src: deleted entries; rename_dst: added entries, in order.
     (dolist (c changes)
       (cond ((= (aref c 1) ?D)
              (push (vector (ngit--spec (aref c 0) (aref c 2) (aref c 3)) c 0) srcs))
             ((= (aref c 1) ?A)
-             (push (vector (ngit--spec (aref c 0) (aref c 4) (aref c 5)) c nil nil) dsts))))
+             (let ((spec (ngit--spec (aref c 0) (aref c 4) (aref c 5))))
+               ;; Work-tree hashes need not exist in the object database.
+               (aset spec 3 (aref c 7))
+               (push (vector spec c nil nil) dsts)))))
     ;; srcs: [SPEC CHANGE USED]; dsts: [SPEC CHANGE RENAMED-FROM SCORE]
     (if (or (null srcs) (null dsts))
         changes
@@ -157,17 +163,17 @@
             (dst-v (vconcat (nreverse dsts))))
         (ngit--find-exact-renames src-v dst-v)
         (setq src-v (ngit--unused-sources src-v))
-        (let ((min-basename (+ ngit--default-rename-score
-                               (/ (- ngit-max-score ngit--default-rename-score) 2))))
-          (ngit--find-basename-matches repo src-v dst-v min-basename))
+        (when (< minimum ngit-max-score)
+          (let ((min-basename (+ minimum (/ (- ngit-max-score minimum) 2))))
+            (ngit--find-basename-matches repo src-v dst-v min-basename)))
         (setq src-v (ngit--unused-sources src-v))
         (let ((num-dst 0))
           (dotimes (i (length dst-v))
             (unless (aref (aref dst-v i) 2) (setq num-dst (1+ num-dst))))
-          (when (and (> num-dst 0) (> (length src-v) 0))
-            (if (> (* num-dst (length src-v)) (* limit limit))
+          (when (and (< minimum ngit-max-score) (> num-dst 0) (> (length src-v) 0))
+            (if (and (> limit 0) (> (* num-dst (length src-v)) (* limit limit)))
                 (setq ngit-rename-limit-warning (max num-dst (length src-v)))
-              (ngit--find-inexact-renames repo src-v dst-v))))
+              (ngit--find-inexact-renames repo src-v dst-v minimum))))
         (ngit--rename-write-back changes dst-v)))))
 
 (defun ngit--record-rename (src dst score)
@@ -219,8 +225,8 @@
                 (when (>= score minimum)
                   (ngit--record-rename src dst score))))))))))
 
-(defun ngit--find-inexact-renames (repo src-v dst-v)
-  (let ((mx nil) (minimum ngit--default-rename-score))
+(defun ngit--find-inexact-renames (repo src-v dst-v &optional minimum)
+  (let ((mx nil) (minimum (or minimum ngit--default-rename-score)))
     (dotimes (i (length dst-v))
       (let ((dst (aref dst-v i)))
         (unless (aref dst 2)

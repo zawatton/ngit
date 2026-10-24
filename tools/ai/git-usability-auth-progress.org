@@ -1,0 +1,76 @@
+#+TITLE: ngit configuration, similarity renames and credential helpers
+
+Baseline: 57bcb52. Three isolated lanes add configuration includes with
+gitdir/gitdir-i/onbranch conditions, similarity rename detection for status
+and diff, and noninteractive HTTP credential helpers. Interactive prompts,
+OAuth browser flows, protocol v2, attribute pathspecs and remote-URL-based
+include conditions remain outside this slice. Fifteen criteria are defined
+before implementation; original test sources remain unchanged.
+
+* S1 Configuration includes
+
+** S1.1 Includes preserve relative resolution, precedence and repeated values
+#+TIMEOUT: 600
+cmd: sh test/config-includes.sh read
+
+** S1.2 Git-directory and branch conditions match Git in nested invocations
+#+TIMEOUT: 600
+cmd: sh test/config-includes.sh conditional
+
+** S1.3 Missing files, cycles and writes retain Git boundaries
+#+TIMEOUT: 600
+cmd: sh test/config-includes.sh boundaries
+
+** S1.4 Included configuration drives a real repository workflow end to end
+#+TIMEOUT: 600
+cmd: sh test/config-includes.sh e2e
+
+* S2 Similarity rename detection
+
+** S2.1 Status detects modified renames and honors rename configuration
+#+TIMEOUT: 600
+cmd: sh test/similarity-read.sh status
+
+** S2.2 Diff renders similarity renames and supported threshold options
+#+TIMEOUT: 600
+cmd: sh test/similarity-read.sh diff
+
+** S2.3 Ambiguity, binary data, path selection and disabled detection preserve boundaries
+#+TIMEOUT: 600
+cmd: sh test/similarity-read.sh boundaries
+
+** S2.4 Edit, move, stage, inspect and commit match Git end to end
+#+TIMEOUT: 600
+cmd: sh test/similarity-read.sh e2e
+
+* S3 Credential helpers
+
+** S3.1 Configured helpers exchange credentials and honor helper-list resets
+#+TIMEOUT: 600
+cmd: sh test/credential-helpers.sh helpers
+
+** S3.2 Verified HTTPS uses helper credentials for clone, fetch and push
+#+TIMEOUT: 600
+cmd: sh test/credential-helpers.sh auth
+
+** S3.3 Auth failures, redirects and malformed helpers preserve credential boundaries
+#+TIMEOUT: 600
+cmd: sh test/credential-helpers.sh boundaries
+
+** S3.4 A helper-authenticated verified-TLS workflow matches Git end to end
+#+TIMEOUT: 600
+cmd: sh test/credential-helpers.sh e2e
+
+* S4 Integration
+
+** S4.1 Named baseline failures and original test sources are verified
+#+TIMEOUT: 600
+cmd: python3 tools/usability-verify.py controls
+
+** S4.2 Affected existing regression suites pass with fresh source provenance
+#+TIMEOUT: 600
+cmd: python3 tools/usability-verify.py regression
+
+** S4.3 Included credentials and similarity renames work together in compiled and source modes
+#+TIMEOUT: 600
+cmd: python3 tools/usability-verify.py e2e

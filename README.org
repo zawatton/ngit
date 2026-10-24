@@ -52,7 +52,7 @@ bin/ngit [-C DIR] stash (list | show [-p | --stat] | apply [--index] | pop | dro
 bin/ngit [-C DIR] stash branch NAME [STASH]
 bin/ngit [-C DIR] ls-files [-s]
 bin/ngit [-C DIR] status [-s | --porcelain] [--] [PATH...]
-bin/ngit [-C DIR] diff [--cached] [-U N] [--name-only | --name-status] [--no-renames] [REV [REV] | A..B] [-- PATH...]
+bin/ngit [-C DIR] diff [--cached] [-U N] [--name-only | --name-status] [-M[THRESHOLD] | --no-renames] [REV [REV] | A..B] [-- PATH...]
 bin/ngit [-C DIR] config --get KEY
 bin/ngit [-C DIR] check-attr ATTR... -- PATH...
 bin/ngit [-C DIR] add [-v] [-n] [-f] [-N] [-A | -u] [--] [PATH...]
@@ -91,7 +91,7 @@ bin/ngit [-C DIR] am [MBOX] | am (--abort | --continue | --skip)
 bin/ngit [-C DIR] clean [-n] [-f] [-d] [-x | -X] [--] [PATHSPEC...]
 bin/ngit [-C DIR] worktree add [-b NEW | --detach] PATH [REV] | list [--porcelain]
                            | remove [--force] PATH | prune
-bin/ngit [-C DIR] config [--global] [--add | --unset] KEY [VALUE] | --list
+bin/ngit [-C DIR] config [--global | --local | --file PATH] [--includes | --no-includes] [--get | --get-all | --add | --unset] KEY [VALUE] | --list
 bin/ngit [-C DIR] bisect start | good | bad | skip | reset | log | run CMD...
 #+end_src
 
@@ -131,6 +131,26 @@ HTTPS verifies the peer and hostname; =GIT_SSL_CAINFO= or =http.sslCAInfo=
 can supply a private CA. Explicit Basic URL credentials and =http.extraHeader=
 are supported. Discovery redirects are bounded and drop credentials and
 custom headers when the origin changes; RPCs are never redirected or retried.
+Discovery redirects currently omit Git's redirect warning on stderr.
+
+Noninteractive Basic authentication supports ordered =credential.helper=
+get/store/erase chains, empty-value resets, URL-scoped settings and
+=credential.useHttpPath=. Helpers may use shell snippets, absolute commands,
+or names available through =PATH= or explicit =GIT_EXEC_PATH=. Exchanges have
+bounded input, output and deadlines; interactive prompts and OAuth flows
+are not implemented. A discovery challenge can trigger one authenticated
+GET retry; a POST is never replayed.
+
+Configuration expands =include.path= and =includeIf= conditions for =gitdir:=,
+=gitdir/i:= and =onbranch:= at their source positions. Relative paths resolve
+against the including file. Selected =config --file=, =--local= and =--global=
+reads follow includes only with =--includes=; writes affect the selected
+primary file. Remote-URL-based include conditions remain unsupported.
+
+Status and diff detect modified renames with the shared similarity detector.
+Diff accepts fractional or percent =-M= / =--find-renames== thresholds and
+=diff.renameLimit=; status honors =status.renames= and =status.renameLimit=.
+Inspection uses work-tree bytes without storing new blob objects.
 
 Directory rename inference follows =merge.directoryRenames= for merge,
 cherry-pick, revert and stash application. Relocation conflicts preserve
@@ -168,7 +188,7 @@ when the variable is unset.
 - =lisp/ngit-worktree.el= — lstat/open/readlink by syscall, end-of-line
   conversion (core.autocrlf, text/eol attributes, safer autocrlf).
 - =lisp/ngit-changes.el= — tree/tree, tree/index (cache-tree skipping),
-  index/work tree, untracked walk, submodule dirtiness, exact renames.
+  index/work tree, untracked walk, submodule dirtiness, similarity renames.
 - =lisp/ngit-xdiff.el= — port of git's xdiff (Myers with git's heuristics,
   indent heuristic, function-name hunk headers cut at invalid UTF-8
   like diff.c sane_truncate_line).
@@ -307,6 +327,10 @@ sh test/smart-http.sh (discovery|fetch|push|auth|e2e) # loopback HTTP and privat
 sh test/pathspec-magic.sh (read|write|boundaries|e2e)
 sh test/directory-rename.sh (clean|conflicts|e2e)
 python3 tools/network-compat-verify.py (controls|regression|e2e)
+sh test/config-includes.sh (read|conditional|boundaries|e2e)
+sh test/similarity-read.sh (status|diff|boundaries|e2e)
+sh test/credential-helpers.sh (helpers|auth|boundaries|e2e)
+python3 tools/usability-verify.py (controls|regression|e2e)
 nelisp --load test/hash-chars-check.el -- x  # span hash vs reference copy
 NGIT_REAL_REPO=/path/to/repo sh test/compare.sh real
 bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Notes
@@ -314,7 +338,7 @@ bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Note
 
 * Not supported yet
 
-Dumb HTTP, HTTP protocol v2, credential helpers and git:// transports,
+Dumb HTTP, HTTP protocol v2, interactive credential prompts, OAuth and git:// transports,
 shallow/partial/single-branch clones,
 template copying, =--force-if-includes= pushes,
 push.default=matching/nothing, multi-head pulls, submodules (beyond
@@ -326,13 +350,12 @@ compression defaults to level 1), blame -M/-C, grep -P, name-rev --all,
 mailmap, binary patches and general MIME mail in am/apply.
 
 Alternates, multi-pack-index, reftable, split or sparse
-indexes, SHA-256 repositories, attribute pathspec magic, copy detection
-and inexact renames outside log and merge (status, diff and commit summaries
-detect exact renames only), commit
+indexes, SHA-256 repositories, attribute pathspec magic, copy detection, commit
 signing, an editor for commit messages (use -m or -F), commit with
 paths, guessed identities (user.name and user.email or the GIT_*
 variables must be set), date formats other than raw and ISO 8601 in
-GIT_*_DATE, index.version for new indexes, =-uall=/ignored listings, include/includeIf in config,
+GIT_*_DATE, index.version for new indexes, =-uall=/ignored listings,
+remote-URL-based includeIf conditions,
 custom attribute macros and diff drivers, =diff --relative= and comprehensive
 subdirectory path handling outside status/diff/add/restore/log/show/grep/blame/ls-tree,
 log's --follow, -L, -m/--cc (show has the default --cc), --simplify-merges,

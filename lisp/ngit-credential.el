@@ -1,0 +1,283 @@
+;;; ngit-credential.el --- bounded noninteractive credentials -*- lexical-binding: t; -*-
+
+;;; Commentary:
+;; Configured helpers are trusted executable code, not a sandbox.  Secrets
+;; travel only on a private pipe; helper diagnostics are deliberately discarded.
+;; Linux x86_64 syscall numbers match the existing transport substrate.
+
+;;; Code:
+(require 'ngit-transport-process)
+(define-error 'ngit-credential-error "fatal: credential helper failed safely")
+
+(defun ngit-credential--fail ()
+  (signal 'ngit-credential-error nil))
+
+(defun ngit-credential--safe (value)
+  (unless (and (stringp value) (<= (length value) 65535)
+               (not (string-match-p "[\r\n\0]" value)))
+    (ngit-credential--fail))
+  value)
+
+(defun ngit-credential--clock (memory)
+  (let ((p (nl-ffi-memory-address memory)))
+    (unless (= 0 (syscall-direct 228 1 p 0 0 0 0))
+      (ngit-credential--fail))
+    (+ (* 1000 (ptr-read-u64 p 0)) (/ (ptr-read-u64 p 8) 1000000))))
+
+(defun ngit-credential--exchange (command input deadline)
+  "Exchange bounded INPUT with COMMAND and return stdout, irrespective of status.
+Kill only this invocation's owned process group, including pipe descendants."
+  (let* ((in (ngit-transport--pipe)) (out (ngit-transport--pipe))
+         (av (ngit-transport--cstring-vector (list "/bin/sh" "-c" command)))
+         (environment nil)
+         (controls '("GIT_TERMINAL_PROMPT" "GIT_ASKPASS" "SSH_ASKPASS" "GCM_INTERACTIVE"))
+         (ev nil) (dv (ngit-transport--cstring-vector '("/dev/null")))
+         (clock (nl-ffi-memory-allocate 16))
+         (pause (nl-ffi-memory-allocate 16))
+         (status (nl-ffi-memory-allocate 4))
+         (buffer (nl-ffi-memory-allocate 8192))
+         (bytes (encode-coding-string input 'utf-8))
+         (data (nl-ffi-memory-allocate (max 1 (length bytes))))
+         (written 0) (total 0) chunks pid reaped eof)
+    (unwind-protect
+        (progn
+          (when (> (length bytes) 262144) (ngit-credential--fail))
+          (dolist (entry process-environment)
+            (unless (member (car (split-string entry "=")) controls)
+              (push entry environment)))
+          (setq ev (ngit-transport--cstring-vector
+                    (append '("GIT_TERMINAL_PROMPT=0" "GIT_ASKPASS=/bin/false"
+                              "SSH_ASKPASS=/bin/false" "GCM_INTERACTIVE=never") environment)))
+          (ptr-write-bytes (nl-ffi-memory-address data) bytes)
+          (ptr-write-u64 (nl-ffi-memory-address pause) 0 0)
+          (ptr-write-u64 (nl-ffi-memory-address pause) 8 10000000)
+          (let ((now (ngit-credential--clock clock)))
+            (when (>= now deadline) (ngit-credential--fail))
+            (setq deadline (min deadline (+ 10000 now))))
+          (setq pid (syscall-direct 57 0 0 0 0 0 0))
+          (cond
+           ((= pid 0)
+            (syscall-direct 109 0 0 0 0 0 0)
+            (syscall-direct 33 (car in) 0 0 0 0 0)
+            (syscall-direct 33 (cdr out) 1 0 0 0 0)
+            (let ((fd (syscall-direct 2 (ptr-read-u64 (cdr dv) 0) 1 0 0 0 0)))
+              (when (< fd 0) (syscall-direct 60 127 0 0 0 0 0))
+              (syscall-direct 33 fd 2 0 0 0 0))
+            ;; Do not inherit a parent network connection or HTTP spool.
+            (unless (= 0 (syscall-direct 436 3 #xffffffff 0 0 0 0))
+              (syscall-direct 60 127 0 0 0 0 0))
+            (syscall-direct 59 (ptr-read-u64 (cdr av) 0) (cdr av) (cdr ev) 0 0 0)
+            (syscall-direct 60 127 0 0 0 0 0))
+           ((< pid 0) (ngit-credential--fail)))
+          (syscall-direct 109 pid pid 0 0 0 0)
+          (syscall-direct 3 (car in) 0 0 0 0 0) (setcar in -1)
+          (syscall-direct 3 (cdr out) 0 0 0 0 0) (setcdr out -1)
+          (dolist (fd (list (cdr in) (car out)))
+            (unless (= 0 (syscall-direct 72 fd 4 2048 0 0 0))
+              (ngit-credential--fail)))
+          (while (not (and eof reaped))
+            (when (>= (ngit-credential--clock clock) deadline) (ngit-credential--fail))
+            (when (>= (cdr in) 0)
+              (if (= written (length bytes))
+                  (progn (syscall-direct 3 (cdr in) 0 0 0 0 0) (setcdr in -1))
+                (let ((n (syscall-direct 1 (cdr in) (+ (nl-ffi-memory-address data) written)
+                                         (min 8192 (- (length bytes) written)) 0 0 0)))
+                  (cond ((> n 0) (setq written (+ written n)))
+                        ((= n -32) (syscall-direct 3 (cdr in) 0 0 0 0 0) (setcdr in -1))
+                        ((not (memq n '(0 -4 -11))) (ngit-credential--fail))))))
+            (unless eof
+              (let ((n (syscall-direct 0 (car out) (nl-ffi-memory-address buffer) 8192 0 0 0)))
+                (cond ((> n 0)
+                       (setq total (+ total n))
+                       (when (> total 262144) (ngit-credential--fail))
+                       (push (ptr-read-bytes (nl-ffi-memory-address buffer) n) chunks))
+                      ((= n 0) (setq eof t))
+                      ((not (memq n '(-4 -11))) (ngit-credential--fail)))))
+            (unless reaped
+              (let ((n (syscall-direct 61 pid (nl-ffi-memory-address status) 1 0 0 0)))
+                (cond ((= n pid) (setq reaped t))
+                      ((not (memq n '(0 -4))) (ngit-credential--fail)))))
+            (unless (and eof reaped)
+              (syscall-direct 35 (nl-ffi-memory-address pause) 0 0 0 0 0)))
+          (apply #'concat (nreverse chunks)))
+      (when (and pid (> pid 0))
+        (syscall-direct 62 (- pid) 9 0 0 0 0)
+        (unless reaped
+          (syscall-direct 62 pid 9 0 0 0 0)
+          (syscall-direct 61 pid (nl-ffi-memory-address status) 0 0 0 0)))
+      (dolist (fd (list (car in) (cdr in) (car out) (cdr out)))
+        (when (>= fd 0) (syscall-direct 3 fd 0 0 0 0 0)))
+      (dolist (owner (list (car av) (car ev) (car dv) clock pause status buffer data))
+        (when owner (nl-ffi-memory-release owner))))))
+
+(defun ngit-credential--decode (value)
+  (let ((pos 0))
+    (while (string-match "%" value pos)
+      (setq pos (match-beginning 0))
+      (unless (and (< (+ pos 2) (length value))
+                   (ngit-transport--hex (aref value (1+ pos)))
+                   (ngit-transport--hex (aref value (+ pos 2))))
+        (ngit-credential--fail))
+      (setq pos (+ pos 3))))
+  (ngit-credential--safe (ngit-transport--percent-decode value)))
+
+(defun ngit-credential--url (url)
+  "Parse URL without exposing secret text in a diagnostic."
+  (ngit-credential--safe url)
+  (unless (string-match "\\`\\([A-Za-z][A-Za-z0-9+.-]*\\)://\\([^/]*\\)\\(/[^?#]*\\)?\\(?:[?#].*\\)?\\'" url)
+    (ngit-credential--fail))
+  (let* ((scheme (downcase (match-string 1 url)))
+         (authority (match-string 2 url))
+         (path (ngit-credential--decode (or (match-string 3 url) "")))
+         (at (string-search "@" authority)) user password)
+    (when at
+      (let* ((info (substring authority 0 at)) (colon (string-search ":" info)))
+        (setq user (ngit-credential--decode (if colon (substring info 0 colon) info))
+              password (and colon (ngit-credential--decode (substring info (1+ colon))))
+              authority (substring authority (1+ at)))))
+    (when (string-search "@" authority) (ngit-credential--fail))
+    (list scheme (downcase (ngit-credential--decode authority)) (string-trim-left path "/") user password)))
+
+(defun ngit-credential--host (host scheme)
+  (if (or (and (equal scheme "http") (string-suffix-p ":80" host))
+          (and (equal scheme "https") (string-suffix-p ":443" host)))
+      (substring host 0 (if (equal scheme "https") -4 -3)) host))
+
+(defun ngit-credential--config-pattern (pattern)
+  "Normalize a possibly partial CONFIG PATTERN without relaxing request URLs.
+A missing scheme or host leaves that component unconstrained.  The strict
+destination parser remains the only entry point for actual request URLs."
+  (ngit-credential--safe pattern)
+  (let* ((full (string-match-p "\\`[A-Za-z][A-Za-z0-9+.-]*://" pattern))
+         (parts (ngit-credential--url (if full pattern (concat "http://" pattern)))))
+    (unless full (setcar parts nil))
+    (when (equal (nth 1 parts) "") (setcar (cdr parts) nil))
+    parts))
+
+(defun ngit-credential--match (pattern parts)
+  (let* ((wanted (ngit-credential--config-pattern pattern))
+         (scheme (or (nth 0 wanted) (nth 0 parts)))
+         (host (and (nth 1 wanted) (ngit-credential--host (nth 1 wanted) scheme)))
+         (actual (ngit-credential--host (nth 1 parts) (nth 0 parts)))
+         (path (nth 2 wanted))
+         (regexp (and host (mapconcat (lambda (part) (if (equal part "*") "[^.]+" (regexp-quote part)))
+                                      (split-string host "\\.") "\\."))))
+    (and (or (null (nth 0 wanted)) (equal scheme (nth 0 parts)))
+         (or (null host) (string-match-p (concat "\\`" regexp "\\'") actual))
+         (or (equal path "") (equal path (nth 2 parts))
+             (string-prefix-p (concat (string-trim-right path "/") "/") (nth 2 parts)))
+         (or (null (nth 3 wanted)) (equal (nth 3 wanted) (nth 3 parts))))))
+
+(defun ngit-credential-create (repo url)
+  "Snapshot ordered matching helper configuration for immutable destination URL.
+Context is [DESTINATION FIELDS HELPERS USE-HTTP-PATH APPROVED DEADLINE]."
+  (let* ((parts (ngit-credential--url url)) (helpers nil) (config-bytes 0) username path)
+    (dolist (entry (ngit-config-entries repo))
+      (when (string-match "\\`credential\\(?:\\.\\(.*\\)\\)?\\.\\([^.]+\\)\\'" (car entry))
+        (let ((sub (match-string 1 (car entry))) (key (match-string 2 (car entry))) (value (cdr entry)))
+          (when (or (null sub) (ngit-credential--match sub parts))
+            (setq config-bytes (+ config-bytes (length (car entry))
+                                  (if (stringp value) (length (encode-coding-string value 'utf-8)) 1)))
+            (when (> config-bytes 262144) (ngit-credential--fail))
+            (cond ((equal key "helper")
+                   (ngit-credential--safe value)
+                   (if (equal value "") (setq helpers nil) (push value helpers)))
+                  ((equal key "username") (setq username (ngit-credential--safe value)))
+                  ((equal key "usehttppath") (setq path (or (eq value t) (member (downcase value) '("true" "yes" "1" "on"))))))))))
+    (vector (list (nth 0 parts) (nth 1 parts) (nth 2 parts))
+            (append (list (cons "protocol" (nth 0 parts)) (cons "host" (nth 1 parts)))
+                    (and path (list (cons "path" (string-trim-right (nth 2 parts) "/"))))
+                    (and (or (nth 3 parts) username) (list (cons "username" (or (nth 3 parts) username))))
+                    (and (nth 4 parts) (list (cons "password" (nth 4 parts)))))
+            (nreverse helpers) path nil nil)))
+
+(defun ngit-credential--complete (context)
+  (and (assoc "username" (aref context 1)) (assoc "password" (aref context 1))
+       (let ((expiry (cdr (assoc "password_expiry_utc" (aref context 1)))))
+         (or (null expiry) (> (string-to-number expiry) (float-time))))))
+
+(defun ngit-credential--command (helper operation)
+  (concat
+   (cond ((string-prefix-p "!" helper) (substring helper 1))
+         ((string-prefix-p "/" helper) helper)
+         (t
+          (let* ((space (string-match "[ \t]" helper))
+                 (name (concat "git-credential-" (if space (substring helper 0 space) helper)))
+                 (exec (getenv "GIT_EXEC_PATH"))
+                 (candidate (and exec (expand-file-name name exec))))
+            (concat (if (and candidate (file-executable-p candidate))
+                        (ngit-transport--shell-quote candidate)
+                      (ngit-transport--shell-quote name))
+                    (if space (substring helper space) "")))))
+   " " operation))
+
+(defun ngit-credential--input (context)
+  (concat (mapconcat (lambda (entry)
+                       (let ((line (concat (car entry) "=" (ngit-credential--safe (cdr entry)))))
+                         (when (> (length (encode-coding-string line 'utf-8)) 65535)
+                           (ngit-credential--fail))
+                         line))
+                     (aref context 1) "\n") "\n\n"))
+
+(defun ngit-credential--parse (context output)
+  "Apply complete lines, retaining fields before a malformed line like Git."
+  (let (done quit)
+    (dolist (line (split-string output "\n"))
+      (unless done
+        (when (> (length line) 65535) (ngit-credential--fail))
+        (when (string-suffix-p "\r" line) (setq line (substring line 0 -1)))
+        (when (string-match-p "[\r\0]" line) (ngit-credential--fail))
+        (let ((equal (string-search "=" line)))
+          (cond ((or (equal line "") (null equal)) (setq done t))
+                (t
+                 (let ((key (substring line 0 equal)) (value (ngit-credential--safe (substring line (1+ equal)))))
+                   (cond
+                    ((member key '("protocol" "host" "path"))
+                     (unless (equal value (cdr (assoc key (aref context 1))))
+                       (ngit-credential--fail)))
+                    ((equal key "quit") (setq quit (member (downcase value) '("1" "true" "yes" "on"))))
+                    ((member key '("username" "password" "password_expiry_utc"))
+                     (let ((entry (assoc key (aref context 1))))
+                       (if entry (setcdr entry value) (aset context 1 (append (aref context 1) (list (cons key value))))))))))))))
+    quit))
+
+(defun ngit-credential--deadline (context)
+  (let ((clock (nl-ffi-memory-allocate 16)))
+    (unwind-protect (aset context 5 (+ 30000 (ngit-credential--clock clock)))
+      (nl-ffi-memory-release clock))))
+
+(defun ngit-credential-fill (context)
+  (ngit-credential--deadline context)
+  (let ((helpers (aref context 2)) quit)
+    (while (and helpers (not (ngit-credential--complete context)) (not quit))
+      (when (let ((expiry (cdr (assoc "password_expiry_utc" (aref context 1)))))
+              (and expiry (<= (string-to-number expiry) (float-time))))
+        (aset context 1 (seq-filter (lambda (entry) (not (member (car entry) '("password" "password_expiry_utc")))) (aref context 1))))
+      (setq quit (ngit-credential--parse context
+                   (ngit-credential--exchange (ngit-credential--command (pop helpers) "get")
+                                              (ngit-credential--input context) (aref context 5)))))
+    (unless (ngit-credential--complete context) (ngit-credential--fail)))
+  context)
+
+(defun ngit-credential--notify (context operation)
+  (ngit-credential--deadline context)
+  (let ((helpers (aref context 2)) (clock (nl-ffi-memory-allocate 16)))
+    (unwind-protect
+        (while (and helpers (< (ngit-credential--clock clock) (aref context 5)))
+          (condition-case nil
+              (ngit-credential--exchange (ngit-credential--command (pop helpers) operation)
+                                         (ngit-credential--input context) (aref context 5))
+            (ngit-credential-error nil)))
+      (nl-ffi-memory-release clock))))
+
+(defun ngit-credential-approve (context)
+  (when (and (ngit-credential--complete context) (not (equal (aref context 4) (aref context 1))))
+    (ngit-credential--notify context "store")
+    (aset context 4 (copy-tree (aref context 1)))))
+
+(defun ngit-credential-reject (context)
+  (ngit-credential--notify context "erase")
+  (aset context 4 nil))
+
+(provide 'ngit-credential)
+;;; ngit-credential.el ends here
