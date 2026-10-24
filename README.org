@@ -14,7 +14,7 @@ commands, verified by =test/compare.sh= against real git.
 bin/ngit [-C DIR] rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] REV...
 bin/ngit [-C DIR] symbolic-ref [--short] [HEAD]
 bin/ngit [-C DIR] cat-file (-t | -s | -p | -e | TYPE) OBJECT
-bin/ngit [-C DIR] ls-tree [-r] [-t] [--name-only] TREE-ISH
+bin/ngit [-C DIR] ls-tree [-r] [-t] [--name-only] [--full-name | --full-tree] TREE-ISH [-- PATH...]
 bin/ngit [-C DIR] log [-n N] [--skip=N] [--reverse] [--graph] [--oneline]
                       [--pretty=FMT | --format=FMT] [--abbrev-commit] [--date=MODE]
                       [--decorate[=short|full]] [--parents] [--all] [--branches[=P]]
@@ -106,6 +106,14 @@ Status, diff, add and restore accept literal paths relative to the invocation
 directory, including repeated =-C=. Human status paths follow
 =status.relativePaths=; porcelain status and default diff paths remain
 relative to the work-tree root. Diff path arguments require =--=.
+
+Log, show, grep, blame and ls-tree also resolve literal path arguments from
+the invocation directory. Log keeps its existing glob support and remains
+repository-wide without paths; grep defaults to the invocation subtree.
+Blame's porcelain paths and history diff paths remain root-relative.
+Ls-tree's =--full-name= changes displayed names; =--full-tree= also selects
+from the tree root. Ordinary =REV:path= object names remain tree-relative,
+while =REV:./path= and =REV:../path= use the invocation directory.
 
 Push supports explicit and tracking-based =--force-with-lease= expectations
 and receive-pack =--atomic= negotiation over the existing local/file/SSH
@@ -305,7 +313,7 @@ paths, guessed identities (user.name and user.email or the GIT_*
 variables must be set), date formats other than raw and ISO 8601 in
 GIT_*_DATE, index.version for new indexes, =-uall=/ignored listings, include/includeIf in config,
 custom attribute macros and diff drivers, =diff --relative= and comprehensive
-subdirectory path handling outside status/diff/add/restore,
+subdirectory path handling outside status/diff/add/restore/log/show/grep/blame/ls-tree,
 log's --follow, -L, -m/--cc (show has the default --cc), --simplify-merges,
 --ancestry-path, --boundary, --left-right, notes, mailmap, %(trailers),
 %w(), padding and color placeholders, --date=relative/human and

@@ -371,10 +371,31 @@ Ties choose NEW, as in combine-diff.c's coalesce_lines."
                 (push v opts)
                 (when (string= a "--date") (setq date-mode (ngit-parse-date-mode v)))))))
          (t
-          (unless (string-search ":" a)
-            (when (or (string-search ".." a) (string-prefix-p "^" a)
-                      (string-suffix-p "^!" a) (string-suffix-p "^@" a)) (setq walk t)))
-          (push a objects)))))
+          (if (and (not (member "--" args))
+                   (file-exists-p (expand-file-name a (or ngit--invocation-directory default-directory)))
+                   (let ((resolved (condition-case err (ngit-rev-parse repo a)
+                                     (error
+                                      (let ((message (error-message-string err)))
+                                        ;; A missing tree path is unresolved revision
+                                        ;; syntax too; retain corruption/ref errors.
+                                        (if (or (string-prefix-p "fatal: ambiguous argument" message)
+                                                (and (string-prefix-p "fatal: path " message)
+                                                     (string-search " does not exist in " message)))
+                                            nil
+                                          (signal (car err) (cdr err))))))))
+                     (when resolved
+                       (ngit--die "fatal: ambiguous argument '%s': both revision and filename\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'" a))
+                     (not resolved)))
+              ;; As in log, everything after the first path is a path.
+              (progn
+                (dolist (rest args)
+                  (unless (file-exists-p (expand-file-name rest (or ngit--invocation-directory default-directory)))
+                    (ngit--die "fatal: %s: no such path in the working tree.\nUse 'git <command> -- <path>...' to specify paths that do not exist locally." rest)))
+                (setq paths (cons "--" (cons a args)) args nil))
+            (unless (string-search ":" a)
+              (when (or (string-search ".." a) (string-prefix-p "^" a)
+                        (string-suffix-p "^!" a) (string-suffix-p "^@" a)) (setq walk t)))
+            (push a objects))))))
     (setq opts (nreverse opts) objects (nreverse objects))
     (unless diff-given (setq opts (cons "-p" opts)))
     (if walk
@@ -385,7 +406,16 @@ Ties choose NEW, as in combine-diff.c's coalesce_lines."
       ;; Resolve every argument before producing output, as setup_revisions.
       (let ((pending nil) (seen (make-hash-table :test 'equal)))
         (dolist (name objects)
-          (let ((hex (condition-case err (ngit-rev-parse repo name)
+          (let* ((colon (string-search ":" name))
+                 (path (and colon (substring name (1+ colon))))
+                 ;; revision:path stays root-relative, except Git's explicit
+                 ;; ./ and ../ spellings which use the invocation directory.
+                 (spec (if (and path (or (string-prefix-p "./" path)
+                                         (string-prefix-p "../" path)))
+                           (concat (encode-coding-string (substring name 0 (1+ colon)) 'utf-8)
+                                   (car (ngit-paths-items repo (list path))))
+                         (if colon (encode-coding-string name 'utf-8) name)))
+                 (hex (condition-case err (ngit-rev-parse repo spec)
                        (error
                         (if (string-prefix-p "fatal: ambiguous argument" (error-message-string err))
                             (if paths (ngit--die "fatal: bad revision '%s'" name)

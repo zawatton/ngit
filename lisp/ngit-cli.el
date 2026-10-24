@@ -300,18 +300,58 @@ Parsed from the end with `aref'; a regexp costs milliseconds here."
            (t (ngit--die "fatal: unsupported cat-file mode %s" mode))))
         0))))
 
+(defun ngit--ls-tree-emit (repo hex prefix items display-prefix recursive show-trees name-only)
+  "Emit literal ITEMS from HEX; keep object paths separate from display paths."
+  (dolist (entry (ngit-parse-tree (cdr (ngit-read-object repo (ngit-unhex hex)))))
+    (let* ((mode (nth 0 entry))
+           (type (ngit-mode-type mode))
+           (path (concat prefix (nth 1 entry)))
+           (ehex (ngit-hex (nth 2 entry)))
+           (selected (ngit-paths-match-p items (if (string= mode "160000") (concat path "/") path)))
+           (ancestor (seq-some (lambda (item) (string-prefix-p (concat path "/") item)) items))
+           (tree (string= type "tree"))
+           (descend (and tree (or ancestor (and recursive selected)))))
+      (when (or (and selected (not descend))
+                (and tree show-trees (or selected ancestor)))
+        (let ((display (ngit-paths-relative display-prefix path)))
+          (ngit--emit (if name-only (concat (ngit-quote-path display) "\n")
+                        (ngit--tree-line mode type ehex display)))))
+      (when descend
+        (ngit--ls-tree-emit repo ehex (concat path "/") items display-prefix
+                            recursive show-trees name-only)))))
+
 (defun ngit-cmd-ls-tree (repo args)
-  (let ((recursive nil) (show-trees nil) (name-only nil) (rev nil))
+  (let ((recursive nil) (show-trees nil) (name-only nil) (rev nil)
+        (full-name nil) (full-tree nil) (paths nil) (literal nil))
     (dolist (a args)
-      (cond ((string= a "-r") (setq recursive t))
+      (cond (literal (if rev (push a paths) (setq rev a)))
+            ((string= a "--") (setq literal t))
+            ((string= a "-r") (setq recursive t))
             ((string= a "-t") (setq show-trees t))
             ((member a '("--name-only" "--name-status")) (setq name-only t))
+            ((string= a "--full-name") (setq full-name t))
+            ((string= a "--full-tree") (setq full-tree t full-name t))
             ((string-prefix-p "-" a) (ngit--die "unsupported ls-tree option %s" a))
             ((null rev) (setq rev a))
-            (t (ngit--die "ngit: ls-tree path filters are not supported"))))
+            (t (push a paths))))
     (unless rev (ngit--die "usage: git ls-tree [<options>] <tree-ish>"))
-    (ngit--emit-tree repo (ngit-peel repo (ngit-rev-parse repo rev) 'tree) "" recursive
-                     (or show-trees (not recursive)) name-only)
+    (let* ((invocation-prefix (ngit-paths-prefix repo))
+           (ngit--invocation-directory
+            (if full-tree (file-name-as-directory (ngit-repo-toplevel repo))
+              ngit--invocation-directory))
+           (items (if paths
+                      (mapcar (lambda (path)
+                                (let ((item (car (ngit-paths-items repo (list path)))))
+                                  ;; Dot components request directory contents, like a trailing slash.
+                                  (if (and (not (string= item ""))
+                                           (not (string-suffix-p "/" item))
+                                           (member (car (last (split-string path "/" t))) '("." "..")))
+                                      (concat item "/") item)))
+                              (nreverse paths))
+                    (list (if (or full-tree (string= invocation-prefix "")) ""
+                            (concat invocation-prefix "/"))))))
+      (ngit--ls-tree-emit repo (ngit-peel repo (ngit-rev-parse repo rev) 'tree) "" items
+                          (if full-name "" invocation-prefix) recursive show-trees name-only))
     0))
 
 ;;;; log

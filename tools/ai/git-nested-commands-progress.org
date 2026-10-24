@@ -1,0 +1,62 @@
+#+TITLE: ngit nested read-command compatibility
+
+Extend the b59825a baseline with literal nested-path handling for history,
+search and tree inspection. Existing log glob behavior must be preserved.
+Magic pathspec expansion, transport protocols and interactive workflows
+remain outside this objective. The twelve criteria are fixed before coding.
+
+* S1 History selection
+
+** S1.1 Log and show select literal paths relative to the invocation directory
+#+TIMEOUT: 300
+cmd: sh test/nested-history.sh selection
+
+** S1.2 Parent paths, repeated -C and revision/path boundaries match Git
+#+TIMEOUT: 300
+cmd: sh test/nested-history.sh boundaries
+
+** S1.3 A nested history and object inspection workflow matches Git end to end
+#+TIMEOUT: 300
+cmd: sh test/nested-history.sh e2e
+
+* S2 Search and attribution
+
+** S2.1 Grep selection and displayed paths match Git from nested directories
+#+TIMEOUT: 300
+cmd: sh test/nested-search.sh grep
+
+** S2.2 Blame resolves nested and parent paths across supported output modes
+#+TIMEOUT: 300
+cmd: sh test/nested-search.sh blame
+
+** S2.3 A nested search and attribution workflow preserves Git state end to end
+#+TIMEOUT: 300
+cmd: sh test/nested-search.sh e2e
+
+* S3 Tree inspection
+
+** S3.1 Ls-tree filters literal paths relative to the invocation directory
+#+TIMEOUT: 300
+cmd: sh test/nested-tree.sh selection
+
+** S3.2 Recursive, full-name and full-tree output matches Git
+#+TIMEOUT: 300
+cmd: sh test/nested-tree.sh format
+
+** S3.3 Nested tree and blob inspection matches Git end to end
+#+TIMEOUT: 300
+cmd: sh test/nested-tree.sh e2e
+
+* S4 Integration
+
+** S4.1 Each lane has a genuine baseline failure and preserves existing test sources
+#+TIMEOUT: 600
+cmd: python3 tools/nested-verify.py controls
+
+** S4.2 Focused existing history, search and tree regression suites pass
+#+TIMEOUT: 600
+cmd: python3 tools/nested-verify.py regression
+
+** S4.3 Combined nested read commands match Git in compiled and source-only modes
+#+TIMEOUT: 600
+cmd: python3 tools/nested-verify.py e2e

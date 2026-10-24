@@ -8,6 +8,7 @@
 
 (require 'ngit-log)
 (require 'ngit-lines)
+(require 'ngit-paths)
 
 (defvar ngit-blame--origins nil)
 (defvar ngit-blame--blobs nil)
@@ -192,7 +193,8 @@
               ((string-prefix-p "-" a) (ngit--die "unsupported blame option %s" a))
               (t (setq positional (append positional (list a)))))))
     (unless (and positional (<= (length positional) 2)) (ngit--die "usage: git blame [rev] -- file"))
-    (let* ((path (car (last positional))) (rev (if (cdr positional) (car positional) "HEAD"))
+    (let* ((path (car (ngit-paths-items repo (last positional))))
+           (rev (if (cdr positional) (car positional) "HEAD"))
            (hex (ngit-peel repo (ngit-rev-parse repo rev) 'commit))
            (c (ngit-commit hex))
            (ngit-blame--origins (make-hash-table :test 'equal))

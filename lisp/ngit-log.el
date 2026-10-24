@@ -274,6 +274,17 @@
       (setq items (cdr items)))
     result))
 
+(defun ngit--log-path-class (path dirp gitlink)
+  "Classify log PATH with directory literal intent, including GITLINK entries."
+  (let ((items nil))
+    (dolist (item ngit--rv-paths)
+      (if (eq (cdr item) 'directory)
+          (unless (and (string= (car item) path) (not dirp) (not gitlink))
+            (push (cons (car item) nil) items))
+        (push item items)))
+    (let ((ngit--rv-paths (nreverse items)))
+      (ngit--ps-class path dirp))))
+
 (defun ngit--ps-tree-has-match (repo tree prefix)
   "Non-nil when tree TREE (20-byte name) has an entry the pathspec matches."
   (if (and (string= prefix "") (ngit--ps-literal-only-p))
@@ -283,7 +294,7 @@
       (let* ((e (car items))
              (dirp (= (nth 0 e) ngit-mode-tree))
              (path (concat prefix (nth 1 e)))
-             (class (ngit--ps-class path dirp)))
+             (class (ngit--log-path-class path dirp (= (nth 0 e) #o160000))))
         (cond ((eq class 'full) (setq found t))
               ((eq class 'partial)
                (setq found (ngit--ps-tree-has-match repo (nth 2 e) (concat path "/"))))))
@@ -380,7 +391,8 @@ parsed entry by entry."
             (unless (and (equal (nth 2 ea) (nth 2 eb)) (= (nth 0 ea) (nth 0 eb)))
               (let* ((dirp (= (nth 0 ea) ngit-mode-tree))
                      (path (concat prefix (nth 1 ea)))
-                     (class (ngit--ps-class path dirp)))
+                     (class (ngit--log-path-class path dirp (or (= (nth 0 ea) #o160000)
+                                                        (= (nth 0 eb) #o160000)))))
                 (cond ((eq class 'full) (setq differ t))
                       ((eq class 'partial)
                        (setq differ (ngit--ps-trees-differ repo (nth 2 ea) (nth 2 eb)
@@ -398,7 +410,7 @@ parsed entry by entry."
   "Non-nil when the one-sided entry E has something inside the pathspec."
   (let* ((dirp (= (nth 0 e) ngit-mode-tree))
          (path (concat prefix (nth 1 e)))
-         (class (ngit--ps-class path dirp)))
+         (class (ngit--log-path-class path dirp (= (nth 0 e) #o160000))))
     (cond ((eq class 'full) t)
           ((eq class 'partial) (ngit--ps-tree-has-match repo (nth 2 e) (concat path "/"))))))
 
@@ -1752,7 +1764,9 @@ the new PENDING, or the symbol `not-a-rev'."
       (let ((changes (ngit-diff-trees repo (and (not (eq base 'root)) (ngit--tree-bin base))
                                       (ngit--tree-bin c))))
         (when (and ngit--rv-paths (not ngit--ld-full-diff))
-          (setq changes (seq-filter (lambda (ch) (eq (ngit--ps-class (aref ch 0) nil) 'full))
+          (setq changes (seq-filter (lambda (ch) (eq (ngit--log-path-class (aref ch 0) nil
+                                                                  (or (= (aref ch 2) #o160000)
+                                                                      (= (aref ch 4) #o160000))) 'full))
                                     changes)))
         (when ngit--ld-renames
           (setq changes (ngit-diffcore-rename repo changes)))
@@ -1969,14 +1983,22 @@ cases: combining marks are zero and East Asian wide characters two."
 
 (defun ngit--log-pathspec (repo paths)
   "Pathspec items for PATHS given relative to the current directory."
-  (let* ((top (file-name-as-directory (ngit-repo-toplevel repo)))
-         (cwd (file-name-as-directory (expand-file-name default-directory)))
-         (prefix (if (string-prefix-p top cwd) (substring cwd (length top)) "")))
-    (mapcar (lambda (p)
-              (let* ((full (if (string-prefix-p ":/" p) (substring p 2) (concat prefix p)))
-                     (norm (if (string-prefix-p "./" full) (substring full 2) full)))
-                (ngit--ps-item (if (member norm '("." "./")) "" (if (string-suffix-p "/." norm) (substring norm 0 -2) norm)))))
-            paths)))
+  (mapcar (lambda (p)
+            ;; Keep log's glob compiler; only normalize the path prefix.
+            ;; The shared API also retains the invocation cwd after -C.
+            (let ((item (car (ngit-paths-items
+                              repo (list (if (string-prefix-p ":/" p)
+                                             (concat (file-name-as-directory (ngit-repo-toplevel repo))
+                                                     (substring p 2))
+                                           p))))))
+              ;; Directory literals also select gitlinks, but never regular
+              ;; files. Keep glob directory matching on the existing matcher.
+              (if (string-suffix-p "/" item)
+                  (let ((compiled (ngit--ps-item item)))
+                    (if (cdr compiled) (ngit--ps-item (concat item "*"))
+                      (cons (car compiled) 'directory)))
+                (ngit--ps-item item))))
+          paths))
 
 (defun ngit-cmd-log (repo args)
   (let ((pending nil) (flags 0) (paths nil) (seen-rev nil)
@@ -2118,11 +2140,13 @@ cases: combining marks are zero and East Asian wide characters two."
          (t
           (let ((r (ngit--handle-revision repo a flags pending)))
             (cond ((not (eq r 'not-a-rev)) (setq pending r seen-rev t))
-                  ((file-exists-p (expand-file-name a))
+                  ((file-exists-p (expand-file-name a (or ngit--invocation-directory default-directory)))
                    (setq paths (append paths (list a)))
                    ;; Everything after the first path is a path too.
                    (dolist (rest args)
-                     (when (string= rest "--") (ngit--die "fatal: bad revision '%s'" rest)))
+                     (when (string= rest "--") (ngit--die "fatal: bad revision '%s'" rest))
+                     (unless (file-exists-p (expand-file-name rest (or ngit--invocation-directory default-directory)))
+                       (ngit--die "fatal: %s: no such path in the working tree.\nUse 'git <command> -- <path>...' to specify paths that do not exist locally." rest)))
                    (setq paths (append paths (delete "--" args)) args nil))
                   (t (ngit--bad-revision a))))))))
     (when (or (memq 'name-only ngit--ld-formats) (memq 'name-status ngit--ld-formats))
