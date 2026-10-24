@@ -30,17 +30,23 @@
 (defvar ngit-wt--dir nil "Relative directory prefix currently written after the top.")
 
 (defun ngit-wt--write (addr off bytes from)
-  "Write BYTES starting at index FROM to ADDR+OFF, four bytes per store."
-  (let ((n (length bytes)) (i from) (o off))
-    (while (<= (+ i 4) n)
-      (ptr-write-u32 addr o (logior (aref bytes i) (ash (aref bytes (+ i 1)) 8)
-                                    (ash (aref bytes (+ i 2)) 16)
-                                    (ash (aref bytes (+ i 3)) 24)))
-      (setq i (+ i 4) o (+ o 4)))
-    (while (< i n)
-      (ptr-write-u8 addr o (aref bytes i))
-      (setq i (1+ i) o (1+ o)))
-    o))
+  "Write BYTES starting at index FROM to ADDR+OFF; return the ending offset."
+  (let ((n (length bytes)))
+    (if (and (not (multibyte-string-p bytes)) (>= from 0) (<= from n))
+        (progn
+          (when (< from n)
+            (ptr-write-bytes (+ addr off) (substring bytes from)))
+          (+ off (- n from)))
+      (let ((i from) (o off))
+        (while (<= (+ i 4) n)
+          (ptr-write-u32 addr o (logior (aref bytes i) (ash (aref bytes (+ i 1)) 8)
+                                        (ash (aref bytes (+ i 2)) 16)
+                                        (ash (aref bytes (+ i 3)) 24)))
+          (setq i (+ i 4) o (+ o 4)))
+        (while (< i n)
+          (ptr-write-u8 addr o (aref bytes i))
+          (setq i (1+ i) o (1+ o)))
+        o))))
 
 (defun ngit-wt-setup (top)
   "Prepare the path buffer for work tree TOP (a directory name)."
@@ -130,7 +136,7 @@
 
 (defun ngit-hash-blob (data)
   "Return the 20-byte blob name of unibyte DATA."
-  (ngit-unhex (secure-hash 'sha1 (concat "blob " (number-to-string (length data)) "\0" data))))
+  (ngit-native-object-id 'blob data))
 
 (defun ngit--count-literal (lit s)
   "Count occurrences of literal string LIT in S (~1 ms per occurrence)."
@@ -200,7 +206,11 @@ when the binary test needs them."
             (t 'binary)))))
 
 (defun ngit--index-has-crlf-p (repo path)
-  (let ((e (ngit-index-lookup (ngit-index-entries repo) path)))
+  (let* ((entries (ngit-index-entries repo))
+         (e (ngit-index-lookup entries path)))
+    ;; read_blob_data_from_index uses our side during a conflict.
+    (when (and e (> (aref e 3) 0))
+      (setq e (aref (cdr (ngit-index-group entries (ngit-index-find entries path))) 2)))
     (and e
          (let ((data (cdr (ngit-read-object repo (aref e 1)))))
            (and (string-match-p "\r" data)

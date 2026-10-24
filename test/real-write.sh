@@ -12,31 +12,47 @@
 #   rm-mv  - cached/work-tree removals and file/directory renames
 #   restore - restore the index and work tree, including an older tree
 #   stash  - save tracked/untracked changes, list/show, then pop
+#   merge  - merge branches, cherry-pick, revert and rebase --onto
+#   gc     - pack maintenance; refs, packed-refs, logs, object set and fsck
+#   transport - file URL clone, new commit, push and cross-fetch
+#   hooks  - commit, switch, merge and local push with recording hooks
 # git and ngit start from the same index (and refs, for commit); the
 # resulting index bytes, stdout and HEAD must be identical, and ngit's
 # runs must take at most LIMIT seconds in total.  The clone lives in
 # $NGIT_FIXTURE_DIR/real-clone and is reset to the cloned commit first.
 # Usage: test/real-write.sh REPO MODE LIMIT
-# NGIT_MAX_LOAD optionally waits for this one-minute load before each
-# measured sequence step.  Waiting is excluded from ngit's elapsed time.
+# NGIT_MAX_LOAD optionally waits for this one-minute load before gc or
+# each measured sequence step.  Waiting is excluded from ngit's elapsed time.
 set -u
+if [ "$2" = transport ]; then
+  exec sh "$(dirname "$0")/real-transport.sh" "$1" "$3"
+fi
+if [ "$2" = hooks ]; then
+  exec sh "$(dirname "$0")/real-hooks.sh" "$1" "$3"
+fi
 root=$(cd "$(dirname "$0")/.." && pwd)
 ngit="$root/bin/ngit"
+# Byte code makes ngit several times faster; without Emacs, sources run.
+sh "$root/tools/build-elc.sh" || :
 repo=$1 mode=$2 limit=$3
 fx=${NGIT_FIXTURE_DIR:-${TMPDIR:-/tmp}/ngit-fixtures}
 clone="$fx/real-clone"
 mkdir -p "$fx"
 if [ ! -f "$clone/.git/ngit-base" ]; then
   rm -rf "$clone"
-  # A plain local clone hardlinks the objects; -s would need alternates,
-  # which ngit does not read.
-  git clone -q "$repo" "$clone" || { echo "clone failed"; exit 2; }
+  # Keep the source's object files independent from maintenance tests.
+  # A shared clone would need alternates, which ngit does not read.
+  git clone -q --no-hardlinks "$repo" "$clone" || { echo "clone failed"; exit 2; }
   git -C "$clone" config gc.auto 0
   git -C "$clone" config maintenance.auto false
   git -C "$clone" rev-parse HEAD >"$clone/.git/ngit-base"
 fi
 cd "$clone" || exit 2
-out=$(mktemp -d)
+if [ "$mode" = gc ]; then
+  out=$(mktemp -d "$fx/.gc-XXXXXXXX")
+else
+  out=$(mktemp -d)
+fi
 trap 'rm -rf "$out"' EXIT
 export GIT_OPTIONAL_LOCKS=0
 export GIT_AUTHOR_NAME="Test Author" GIT_AUTHOR_EMAIL=test@example.com
@@ -64,9 +80,13 @@ esac
 
 snap="$out/snap"
 save() { rm -rf "$snap"; mkdir -p "$snap"
-  for p in index HEAD refs logs packed-refs COMMIT_EDITMSG config ORIG_HEAD; do
+  for p in index HEAD refs logs packed-refs COMMIT_EDITMSG config ORIG_HEAD \
+           AUTO_MERGE REBASE_HEAD CHERRY_PICK_HEAD REVERT_HEAD MERGE_MSG \
+           MERGE_HEAD MERGE_MODE sequencer rebase-merge; do
     [ -e ".git/$p" ] && cp -a ".git/$p" "$snap/"; done; }
-restore() { for p in index HEAD refs logs packed-refs COMMIT_EDITMSG config ORIG_HEAD; do
+restore() { for p in index HEAD refs logs packed-refs COMMIT_EDITMSG config ORIG_HEAD \
+                    AUTO_MERGE REBASE_HEAD CHERRY_PICK_HEAD REVERT_HEAD MERGE_MSG \
+                    MERGE_HEAD MERGE_MODE sequencer rebase-merge; do
     rm -rf ".git/$p"; [ -e "$snap/$p" ] && cp -a "$snap/$p" ".git/$p"; done; }
 spent=0
 timed() { # timed OUTFILE ARGS...: run ngit, add the elapsed time to $spent
@@ -191,6 +211,11 @@ run_sequence() {
   base=$(cat .git/ngit-base)
   # These names belong only to this disposable clone's checks.
   git branch -D ngit-real-switch >/dev/null 2>&1 || :
+  if [ "$mode" = merge ]; then
+    git switch -q --detach "$base" || exit 2
+    git branch -D ngit-real-left ngit-real-right ngit-real-pick >/dev/null 2>&1 || :
+    merge_base=$(git rev-parse "$base~6")
+  fi
   git tag -d ngit-real-light ngit-real-annotated >/dev/null 2>&1 || :
   if [ "$mode" = stash ]; then git stash clear; fi
   # Prefer a file HEAD modified or deleted; otherwise any top-level file of
@@ -246,15 +271,36 @@ PY
     f3=$(sed -n 3p "$out/write-paths") real_dir=$(sed -n 4p "$out/write-paths")
     dir_file=$(sed -n 5p "$out/write-paths")
   fi
+  sequence_base=$base
+  if [ "$mode" = merge ]; then
+    # Seed identical histories outside the timed replay sequence, just as
+    # the small comparison suites build their input histories with Git.
+    git switch -qc ngit-real-left "$merge_base" || exit 2
+    printf 'left\n' >ngit-real-left.txt
+    git add ngit-real-left.txt && git commit -qm 'real left' || exit 2
+    git switch -qc ngit-real-pick "$merge_base" || exit 2
+    printf 'pick\n' >ngit-real-pick.txt
+    git add ngit-real-pick.txt && git commit -qm 'real pick' || exit 2
+    git switch -qc ngit-real-right "$merge_base" || exit 2
+    printf 'right\n' >ngit-real-right.txt
+    git add ngit-real-right.txt && git commit -qm 'real right' || exit 2
+    sequence_base=$(git rev-parse HEAD)
+  fi
   save
   for tool in git ngit; do
     restore
     # Recreate the initial work tree before restoring the identical ref/log
     # snapshot.  Only the clone is ever reset or cleaned.
-    git reset -q --hard "$base" && git clean -fdq || exit 2
+    git reset -q --hard "$sequence_base" && git clean -fdq || exit 2
     restore
     git update-index -q --refresh || exit 2
     case $mode in
+      merge)
+        sequence_step merge merge -m 'real merge' ngit-real-left
+        sequence_step cherry-pick cherry-pick ngit-real-pick
+        sequence_step revert revert HEAD
+        sequence_step rebase rebase --onto "$base" "$merge_base"
+        ;;
       reset)
         sequence_step soft reset --soft HEAD~1
         sequence_step mixed reset --mixed HEAD~1
@@ -307,7 +353,53 @@ PY
 }
 
 case $mode in
-  reset|tag|switch|rm-mv|restore|stash) run_sequence ;;
+  gc)
+    save
+    # Objects are immutable.  Keeping this snapshot inside the fixture
+    # mount permits hard links even under the sandbox's separate mounts.
+    cp -al .git/objects "$out/gc-objects" || exit 2
+    gc_state() {
+      {
+        git show-ref --head --dereference
+        if [ -f .git/packed-refs ]; then cat .git/packed-refs; fi
+        find .git/refs .git/logs -type f | LC_ALL=C sort | while read -r f; do
+          echo "== $f"; cat "$f"
+        done
+        git rev-list --all --objects | LC_ALL=C sort
+      } >"$1"
+    }
+    git gc --prune=now >"$out/git.gc.out" 2>"$out/git.gc.err"; gs=$?
+    echo "exit $gs" >>"$out/git.gc.out"
+    gc_state "$out/git.gc.state"
+    git fsck --no-progress --connectivity-only >"$out/git.gc.fsck" 2>&1; gfs=$?
+    restore
+    rm -rf .git/objects; cp -al "$out/gc-objects" .git/objects || exit 2
+    if [ -n "${NGIT_MAX_LOAD:-}" ]; then
+      while :; do
+        load=$(LC_ALL=C uptime | awk -F 'load average: ' '{split($2, a, ","); print a[1]+0}')
+        awk -v current="$load" -v ceiling="$NGIT_MAX_LOAD" 'BEGIN {exit !(current <= ceiling)}' && break
+        sleep 5
+      done
+      echo "load before gc: $load"
+    fi
+    s=$(date +%s.%N)
+    timeout "$limit" "$ngit" gc --prune=now >"$out/ngit.gc.out" 2>"$out/err"; ns=$?
+    e=$(date +%s.%N); spent=$(echo "$e - $s" | bc)
+    echo "exit $ns" >>"$out/ngit.gc.out"
+    if [ "$ns" != 0 ]; then
+      echo "ngit gc: exit $ns"
+      tail -8 "$out/err"
+      echo "ngit total: ${spent}s (limit ${limit}s)"
+      exit 1
+    fi
+    gc_state "$out/ngit.gc.state"
+    git fsck --no-progress >"$out/ngit.gc.fsck" 2>&1; nfs=$?
+    same 'gc stdout/status' "$out/git.gc.out" "$out/ngit.gc.out"
+    same 'gc refs, packed-refs, reflogs and reachable objects' "$out/git.gc.state" "$out/ngit.gc.state"
+    same 'gc fsck' "$out/git.gc.fsck" "$out/ngit.gc.fsck"
+    [ "$gs" = 0 ] && [ "$ns" = 0 ] && [ "$gfs" = 0 ] && [ "$nfs" = 0 ] || fail=1
+    ;;
+  reset|tag|switch|rm-mv|restore|stash|merge) run_sequence ;;
   tree)
     save; run_both rewrite update-index --force-write-index
     git add -A; save; run_both write-tree write-tree ;;

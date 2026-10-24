@@ -305,6 +305,8 @@ protected entry checks and before the first work-tree deletion or write."
             (aset root 0 0)
             (aset root 1 ngit-empty-tree-bin)
             (aset root 2 nil))
+          (aset index 8 nil)
+          (aset index 9 nil)
           (ngit-commit-lock lock (ngit-index-bytes repo index entries root checked))
           (aset repo 6 nil))
       (ngit-unlock lock))))
@@ -377,16 +379,17 @@ protected entry checks and before the first work-tree deletion or write."
               (ngit--write-ref repo "ORIG_HEAD" head orig
                                (unless (equal head orig)
                                  (concat (or action "reset") ": updating ORIG_HEAD")))
-            (when orig (delete-file (ngit--ref-file repo "ORIG_HEAD"))))
-          ;; A no-op ref update still logs HEAD, but not its branch.
-          (if (equal hex head)
-              (ngit--append-reflog repo "HEAD" head hex (ngit-ident repo "COMMITTER") msg)
-            (ngit-update-head repo hex head (ngit-ident repo "COMMITTER") msg))))
+            (when orig (ngit-ref-delete-state repo "ORIG_HEAD")))
+          (ngit-update-head repo hex head (ngit-ident repo "COMMITTER") msg)))
       (unless paths
+        (dolist (name '("CHERRY_PICK_HEAD" "REVERT_HEAD"))
+          (when (ngit-read-ref repo name) (ngit-ref-delete-state repo name)))
+        (ngit-ref-delete-state repo "AUTO_MERGE")
         (dolist (name '("MERGE_HEAD" "MERGE_RR" "MERGE_MSG" "MERGE_MODE"
-                        "SQUASH_MSG" "AUTO_MERGE" "CHERRY_PICK_HEAD" "REVERT_HEAD"))
+                        "SQUASH_MSG"))
           (let ((file (expand-file-name name (ngit-repo-gitdir repo))))
-            (when (file-exists-p file) (delete-file file)))))
+            (when (file-exists-p file) (delete-file file))))
+        (ngit-ref-delete-state repo "AUTO_MERGE"))
       (when (and (equal mode "--hard") hex (not quiet))
         (let ((subject (ngit--subject-of repo hex)))
           (ngit--emit "HEAD is now at " (ngit-abbrev repo hex)

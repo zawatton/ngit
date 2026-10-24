@@ -27,6 +27,12 @@
   (load (expand-file-name "nl-ffi-memory.el" src) nil t))
 
 (ffi:library "libz.so.1")
+(ffi:library "libcrypto.so.3")
+(ffi:defun ngit-native--sha1 "SHA1"
+  [:pointer :pointer :uint64 :pointer]
+  "SHA1(data, length, output).")
+(defvar ngit-native--sha1-context nil)
+(defvar ngit-native--sha1-functions nil)
 (ffi:defun ngit-native--uncompress2 "uncompress2"
   [:sint32 :pointer :pointer :pointer :pointer]
   "uncompress2(dest, &destLen, source, &sourceLen).")
@@ -110,6 +116,53 @@ back to FALLBACK, the `ffi:defun' wrapper, when that lookup is missing."
 (defun ngit-native--write-bytes (addr bytes)
   "Copy unibyte BYTES to ADDR."
   (ptr-write-bytes addr bytes))
+
+(defun ngit-native-sha1 (bytes)
+  "Return the twenty-byte SHA-1 of BYTES through the crypto library.
+Standalone secure-hash is interpreted Lisp; hashing a received pack's
+100,000 objects there dominates transport time.  Crypto, like zlib, is
+an external library boundary rather than a delegated Git operation."
+  (let* ((length (length bytes))
+         (source (nl-ffi-memory-address (ngit-native--buffer 0 length)))
+         (output (nl-ffi-memory-address (ngit-native--buffer 2 32))))
+    (ptr-write-bytes source bytes)
+    (ngit-native--zlib-call "SHA1" #'ngit-native--sha1 source length output)
+    (ptr-read-bytes output 20)))
+
+(defun ngit-native-object-id (type data)
+  "Return the binary Git object name of TYPE and unibyte DATA."
+  (let ((address (nl-ffi-memory-address (ngit-native--buffer 0 (length data)))))
+    (ptr-write-bytes address data)
+    (ngit-native-object-id-pointer type address (length data))))
+
+(defun ngit-native-object-id-pointer (type address length)
+  "Hash a Git object already held at ADDRESS without copying its payload.
+Use an independent SHA_CTX, header and digest allocation: inflate's source,
+destination and length buffers remain live throughout this call."
+  (unless ngit-native--sha1-context
+    ;; OpenSSL's public SHA_CTX occupies 96 bytes.  Reserve 128 for the
+    ;; context, then 32 for the digest and 96 for the small object header.
+    (setq ngit-native--sha1-context (nl-ffi-memory-allocate 256)
+          ngit-native--sha1-functions
+          (vector (nl-ffi--resolve-via-dlsym "SHA1_Init")
+                  (nl-ffi--resolve-via-dlsym "SHA1_Update")
+                  (nl-ffi--resolve-via-dlsym "SHA1_Final")))
+    (dotimes (i 3)
+      (when (zerop (aref ngit-native--sha1-functions i))
+        (error "ngit: missing SHA-1 crypto function"))))
+  (let* ((context (nl-ffi-memory-address ngit-native--sha1-context))
+         (digest (+ context 128)) (header-address (+ context 160))
+         (header (concat (if (symbolp type) (symbol-name type) type) " "
+                         (number-to-string length) "\0"))
+         (functions ngit-native--sha1-functions))
+    (when (> (length header) 96) (error "ngit: invalid object type"))
+    (ptr-write-bytes header-address header)
+    (unless (and (= 1 (ptr-call (aref functions 0) context 0 0 0 0 0))
+                 (= 1 (ptr-call (aref functions 1) context header-address (length header) 0 0 0))
+                 (= 1 (ptr-call (aref functions 1) context address length 0 0 0))
+                 (= 1 (ptr-call (aref functions 2) digest context 0 0 0 0)))
+      (error "ngit: SHA-1 crypto failure"))
+    (ptr-read-bytes digest 20)))
 
 (defun ngit-native-try-open (path)
   "Open PATH read-only and cache the descriptor; return nil when that fails."

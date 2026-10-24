@@ -5,12 +5,16 @@
 #   graph  - log --graph --oneline -n 500
 #   branch - branch -a -vv and branch --merged
 #   show   - tip patch, five earlier commit headers/stats, and a raw blob
+#   inspect - three blames (including an old path), three tracked searches,
+#             describe, shortlog and the count of all reachable commits
 # Every ngit run's stdout and exit status must equal git's, and ngit's runs
 # must take at most LIMIT seconds in total.
 # Usage: test/real-log.sh REPO MODE LIMIT
 set -u
 root=$(cd "$(dirname "$0")/.." && pwd)
 ngit="$root/bin/ngit"
+# Byte code makes ngit several times faster; without Emacs, sources run.
+sh "$root/tools/build-elc.sh" || :
 repo=$1 mode=$2 limit=$3
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
@@ -18,9 +22,15 @@ export GIT_OPTIONAL_LOCKS=0
 spent=0 fail=0 n=0
 run() { # run ARGS...: compare one command, add ngit's time to $spent
   n=$((n + 1))
+  echo "checking $*"
   git -C "$repo" "$@" >"$out/git.$n" 2>/dev/null; gs=$?
   s=$(date +%s.%N)
-  "$ngit" -C "$repo" "$@" >"$out/ngit.$n" 2>"$out/err"; ns=$?
+  remaining=$(echo "$limit - $spent" | bc)
+  if [ "$(echo "$remaining > 0" | bc)" = 1 ]; then
+    timeout --kill-after=2s "${remaining}s" "$ngit" -C "$repo" "$@" >"$out/ngit.$n" 2>"$out/err"; ns=$?
+  else
+    : >"$out/ngit.$n"; : >"$out/err"; ns=124
+  fi
   e=$(date +%s.%N)
   spent=$(echo "$spent + $e - $s" | bc)
   echo "ngit $*: $(echo "$e - $s" | bc)s"
@@ -59,6 +69,43 @@ case $mode in
       }')
     [ -n "$file" ] || { echo "no small top-level blob"; exit 2; }
     run show "$head:$file" ;;
+  inspect)
+    # Select text paths up to 8 KiB, including the oldest surviving path.  The two
+    # others have the most changes among the recent history's small files.
+    git -C "$repo" ls-tree -rl "$head" >"$out/tree"
+    git -C "$repo" log --no-renames --reverse --diff-filter=A --format= --name-only "$head" >"$out/added"
+    git -C "$repo" log --no-renames -n 500 --format= --name-only "$head" >"$out/changed"
+    python3 - "$out" <<'PY'
+import collections, pathlib, sys
+out = pathlib.Path(sys.argv[1])
+eligible = set()
+for line in (out / 'tree').read_text().splitlines():
+    meta, path = line.split('\t', 1)
+    mode, kind, oid, size = meta.split()
+    if kind == 'blob' and mode in ('100644', '100755') and 0 < int(size) <= 8192:
+        if path.endswith(('.org', '.el', '.sh', '.py', '.md')) or path in ('AGENTS.md', '.gitignore'):
+            eligible.add(path)
+added = (out / 'added').read_text().splitlines()
+old = next((p for p in added if p in eligible), None)
+counts = collections.Counter((out / 'changed').read_text().splitlines())
+paths = [old] if old else []
+for path, _ in counts.most_common():
+    if path in eligible and path not in paths:
+        paths.append(path)
+    if len(paths) == 3:
+        break
+if len(paths) != 3:
+    raise SystemExit('need three small text files')
+(out / 'files').write_text('\n'.join(paths) + '\n')
+PY
+    [ $? = 0 ] || exit 2
+    while IFS= read -r file; do run blame "$head" -- "$file"; done <"$out/files"
+    run grep TODO
+    run grep defun
+    run grep '電気'
+    run describe --always "$head"
+    run shortlog -sn "$head"
+    run rev-list --count --all ;;
   *) echo "unknown mode $mode"; exit 2 ;;
 esac
 echo "ngit total: ${spent}s (limit ${limit}s)"

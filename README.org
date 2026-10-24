@@ -2,8 +2,10 @@
 
 A git implementation (object store, refs, index and work tree inspection,
 plus add, commit, log, show, branch, tag, reset, switch, checkout, rm, mv,
-restore and stash) that runs on the NeLisp standalone runtime
-(=target/nelisp=).  Output is byte-identical to git for the supported
+restore, stash, merge, cherry-pick, revert, rebase, packs and maintenance,
+fsck, clone/fetch/pull/push over local, file:// and ssh remotes, blame,
+grep, describe, format-patch/apply/am, clean, worktree, config and bisect)
+that runs on the NeLisp standalone runtime (=nelisp=).  Output is byte-identical to git for the supported
 commands, verified by =test/compare.sh= against real git.
 
 * Usage
@@ -59,6 +61,38 @@ bin/ngit [-C DIR] commit [-q] [-a] [--allow-empty] [--allow-empty-message]
 bin/ngit [-C DIR] hash-object [-w] [-t TYPE] [--no-filters] FILE...
 bin/ngit [-C DIR] write-tree
 bin/ngit [-C DIR] update-index --force-write-index
+bin/ngit [-C DIR] ls-files (-s | -u)
+bin/ngit merge-file [-p] [--diff3 | --zdiff3] [--ours | --theirs | --union]
+                    [--marker-size=N] [-L LABEL]... CURRENT BASE OTHER
+bin/ngit [-C DIR] merge [--ff | --no-ff | --ff-only] [--squash] [-m MSG] COMMIT...
+bin/ngit [-C DIR] merge (--abort | --continue)
+bin/ngit [-C DIR] (cherry-pick | revert) [-n] [-x] [-m PARENT] COMMIT... | A..B
+bin/ngit [-C DIR] (cherry-pick | revert) (--continue | --abort | --skip | --quit)
+bin/ngit [-C DIR] rebase [--onto NEWBASE] [UPSTREAM [BRANCH]]
+bin/ngit [-C DIR] rebase (--continue | --abort | --skip | --quit)
+bin/ngit [-C DIR] pack-objects | index-pack | verify-pack | repack [-a] [-d]
+bin/ngit [-C DIR] gc | prune | pack-refs --all | count-objects [-v] | reflog expire
+bin/ngit [-C DIR] fsck [--dangling | --no-dangling] [--unreachable]
+bin/ngit init [--bare] [-b BRANCH] [DIR]
+bin/ngit clone [--bare] [-b BRANCH] [--no-checkout] [--origin NAME] URL [DIR]
+bin/ngit [-C DIR] fetch [--prune] [--tags] [REMOTE [REFSPEC...]]
+bin/ngit [-C DIR] pull [--rebase] [REMOTE [REFSPEC]]
+bin/ngit [-C DIR] push [--delete] [--force] [--tags] [-u] [REMOTE [REFSPEC...]]
+bin/ngit [-C DIR] remote [-v] | add | remove | rename | set-url | get-url
+bin/ngit ls-remote URL
+bin/ngit [-C DIR] blame [-L RANGE] [-s] [-e] [-w] [--porcelain] [REV] [--] FILE
+bin/ngit [-C DIR] grep [-n] [-i] [-w] [-v] [-l] [-c] [-e PAT [--and | --or]]
+                       [--cached | TREE-ISH] [--] [PATHSPEC...]
+bin/ngit [-C DIR] describe [--tags] [--always] [--long] [--dirty] [--abbrev=N] [REV]
+bin/ngit [-C DIR] name-rev | shortlog [-s] [-n] [-e] | rev-list [--count] [--objects] [--all]
+bin/ngit [-C DIR] format-patch [-o DIR | --stdout] [-N] RANGE
+bin/ngit [-C DIR] apply [--check] [--index | --cached] [-R] [--stat] PATCH
+bin/ngit [-C DIR] am [MBOX] | am (--abort | --continue | --skip)
+bin/ngit [-C DIR] clean [-n] [-f] [-d] [-x | -X] [--] [PATHSPEC...]
+bin/ngit [-C DIR] worktree add [-b NEW | --detach] PATH [REV] | list [--porcelain]
+                           | remove [--force] PATH | prune
+bin/ngit [-C DIR] config [--global] [--add | --unset] KEY [VALUE] | --list
+bin/ngit [-C DIR] bisect start | good | bad | skip | reset | log | run CMD...
 #+end_src
 
 =bin/ngit= passes each argument with an "@" prefix because the NeLisp
@@ -80,6 +114,9 @@ runtime drops =-q=, =-Q=, =--batch= and =--no-init-file= even after =--=.
 - =lisp/ngit-cli.el= — commands and git-compatible formatting (C-style path
   quoting, default date format, automatic abbreviation length).
 - =lisp/ngit-config.el= — system/global/repository config, last one wins.
+- =lisp/ngit-hook.el= — runs hooks from core.hooksPath or =$GIT_DIR/hooks=
+  (loaded only when the hook exists): commit, merge, sequencer, checkout,
+  am, push/receive, gc --auto and reference-transaction hooks.
 - =lisp/ngit-match.el= — wildmatch port, .gitignore and .gitattributes.
 - =lisp/ngit-index.el= — index v2/v3/v4 and the cache-tree extension.
 - =lisp/ngit-worktree.el= — lstat/open/readlink by syscall, end-of-line
@@ -126,8 +163,8 @@ runtime drops =-q=, =-Q=, =--batch= and =--no-init-file= even after =--=.
 - =lisp/ngit-restore.el= — restore of the index and/or work tree from the
   index or a revision.
 - =lisp/ngit-stash.el= — stash: index/work-tree/untracked commits, the
-  refs/stash reflog, list/show/apply/pop/drop/clear/branch.  Applying a stash
-  that needs a content merge is refused.
+  refs/stash reflog, list/show/apply/pop/drop/clear/branch; applying runs a
+  three-way merge, and conflicts keep the stash as in git.
 - =lisp/ngit-profile.el= — with =NGIT_PROFILE=1=, prints per-phase times
   to stderr.
 - =ngit-main.el= loads the larger command modules only when an argument
@@ -135,6 +172,26 @@ runtime drops =-q=, =-Q=, =--batch= and =--no-init-file= even after =--=.
 - =lisp/ngit-commit.el= — commit: index refresh, -a, COMMIT_EDITMSG,
   commit object, ref and reflog updates, the summary (shortstat, create/
   delete/rename/mode lines), local time zone from TZif files.
+- =lisp/ngit-merge-file.el= — byte-exact port of xdiff/xmerge.c and the
+  merge-file command.  =lisp/ngit-merge-tree.el= merges three trees (no
+  rename detection); =lisp/ngit-merge.el= runs merge and its state files;
+  =lisp/ngit-sequencer.el= replays commits for cherry-pick, revert and the
+  merge backend of rebase.
+- =lisp/ngit-objects.el=, =lisp/ngit-pack.el=, =lisp/ngit-maint.el=,
+  =lisp/ngit-fsck.el= — object enumeration and reachability, pack writing
+  and indexing, repack/gc/prune/pack-refs/reflog, and fsck.
+- =lisp/ngit-remote.el= (init, remotes), =lisp/ngit-transport.el= (smart
+  protocol client, fetch/pull/push and clone) with
+  =ngit-transport-process.el= (local and ssh subprocesses),
+  =ngit-transport-index.el= (received-pack indexing),
+  =ngit-transport-delta.el= and =ngit-transport-kernel.el= (delta
+  application compiled to native code once per process) and
+  =ngit-transport-checkout.el= (parallel initial checkout).
+- =lisp/ngit-blame.el=, =lisp/ngit-grep.el=, =lisp/ngit-describe.el= (with
+  name-rev, shortlog and rev-list), =lisp/ngit-lines.el= (line scans).
+- =lisp/ngit-patch.el= (format-patch, apply, am), =lisp/ngit-clean.el=,
+  =lisp/ngit-worktree-cmd.el=, =lisp/ngit-config-cmd.el= (config writes)
+  and =lisp/ngit-bisect.el=.
 
 ** NeLisp performance notes
 
@@ -156,6 +213,22 @@ order, abbreviations follow find_unique_abbrev with one binary search per
 pack, and zlib's =uncompress2= is called through =ptr-call= with an address
 resolved once.
 
+** Byte code
+
+NeLisp spends 20–40 ms on the first call of each function loaded from
+source, which dominated every ngit command.  =tools/build-elc.sh= compiles
+=lisp/*.el= with the host GNU Emacs (=EMACS=, default =emacs=) through
+=tools/compile.el=; NeLisp runs the byte code and commands become two to
+four times faster.  =ngit-main.el= uses the =.elc= files only while
+=lisp/.elc-stamp= is newer than every source (any change rebuilds all
+modules) and falls back to the sources otherwise or with =NGIT_NO_ELC=1=.
+The test scripts call =tools/build-elc.sh= first; without Emacs they run
+from source.  =tools/compile.el= works around three NeLisp limits found on
+2026-10-20: the Bsubstring opcode rejects vectors, and the reader reads
+neither =#@= lazy docstrings nor =#N==/=#N#= labels.  =NGIT_PROFILE_FNS=
+(with =NGIT_PROFILE=1=) adds space-separated function names to the
+profiled phases.
+
 * Tests
 
 #+begin_src sh
@@ -168,8 +241,15 @@ sh test/compare.sh SUITE   # basic rev cat all-objects deltas worktree ls-tree l
                            # branch-upstream reset-index reset-hard tag-list
                            # tag-write show switch checkout worktree-overlay
                            # modes rm mv restore stash-push stash-apply
-sh test/real-write.sh /path/to/repo (tree|add|commit|branch|reset|tag|switch|rm-mv|restore|stash) LIMIT  # on a clone
-sh test/real-log.sh /path/to/repo (walk|diff|graph|branch|show) LIMIT     # read-only
+                           # unmerged merge-file merge cherry-pick rebase
+                           # stash-merge blame grep describe pack-write gc
+                           # fsck patch misc bisect clone fetch push remote ssh
+                           # hooks hooks-extra
+sh test/real-write.sh /path/to/repo MODE LIMIT  # on a clone; MODE: tree add commit
+    # branch reset tag switch rm-mv restore stash merge gc transport hooks
+sh test/real-log.sh /path/to/repo (walk|diff|graph|branch|show|inspect) LIMIT  # read-only
+sh test/maintenance.sh (pack-write|gc|fsck)  # also run by compare.sh
+sh test/merge-fuzz.sh      # merge-file against git on random inputs
 sh test/xdiff-fuzz.sh 300  # xdiff port against git diff --no-index
 sh test/hunk-utf8-check.sh # hunk headers with multibyte/invalid UTF-8 (needs python3)
 nelisp --load test/hash-chars-check.el -- x  # span hash vs reference copy
@@ -179,10 +259,19 @@ bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Note
 
 * Not supported yet
 
-Network, alternates, multi-pack-index, reftable, split or sparse
+HTTP(S) and git:// transports, shallow/partial/single-branch clones,
+template copying, atomic and force-with-lease pushes,
+push.default=matching/nothing, multi-head pulls, submodules (beyond
+gitlink entries), rename detection in merges, octopus merges, custom merge
+drivers, interactive rebase (and its hooks), rerere, =--fix-thin=, git's delta search depth
+(new deltas are limited to 4 KiB targets and 32 KiB per run; pack
+compression defaults to level 1), blame -M/-C, grep -P, name-rev --all,
+mailmap, binary patches and general MIME mail in am/apply.
+
+Alternates, multi-pack-index, reftable, split or sparse
 indexes, SHA-256 repositories, magic pathspecs (log takes literal and glob pathspecs), copy detection
 and inexact renames outside log (status, diff and commit summaries
-detect exact renames only), unmerged entries, hooks, commit
+detect exact renames only), commit
 signing, an editor for commit messages (use -m or -F), commit with
 paths, guessed identities (user.name and user.email or the GIT_*
 variables must be set), date formats other than raw and ISO 8601 in
@@ -196,5 +285,4 @@ approximate dates (--since takes timestamps and ISO dates with a time),
 branch --format, --column, --edit-description, -t inherit and colors,
 tag signing/--format/--column/--edit, reset --merge/--keep/-p,
 checkout/switch --merge/--conflict/-p/--overlay options and sparse
-checkouts, restore -p/--ours/--theirs, rm/mv --sparse, stash content
-merges, stash -p/--all/--staged.
+checkouts, restore -p/--ours/--theirs, rm/mv --sparse, stash -p/--all/--staged.

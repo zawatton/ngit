@@ -447,8 +447,9 @@ Mark discarded records in RCHG and return (RINDEX . RHA) vectors."
           nil)
       t)))
 
-(defun ngit-xdiff--change-compact (xdf xdfo)
-  "Port of xdl_change_compact with XDF_INDENT_HEURISTIC."
+(defun ngit-xdiff--change-compact (xdf xdfo &optional indent-heuristic)
+  "Port of xdl_change_compact.
+When INDENT-HEURISTIC is non-nil, apply XDF_INDENT_HEURISTIC."
   (let ((g (vector 0 0)) (go (vector 0 0))
         earliest-end end-matching-other groupsize done)
     (ngit-xdiff--group-init xdf g)
@@ -474,7 +475,7 @@ Mark discarded records in RCHG and return (RINDEX . RHA) vectors."
           (while (= (aref go 1) (aref go 0))
             (ngit-xdiff--slide-up xdf g)
             (ngit-xdiff--group-prev xdfo go)))
-         (t
+         (indent-heuristic
           (let ((shift earliest-end) (best-shift -1) (best-score nil)
                 (gend (aref g 1)) score)
             (when (> (- gend groupsize 1) shift)
@@ -652,6 +653,50 @@ Mark discarded records in RCHG and return (RINDEX . RHA) vectors."
 
 ;;;; Entry point
 
+(defun ngit-xdiff--diff-script (recs1 recs2 &optional indent-heuristic)
+  "Return an xdiff edit script between record vectors RECS1 and RECS2.
+Each script entry is [OLD-START NEW-START OLD-COUNT NEW-COUNT].  Apply
+XDF_INDENT_HEURISTIC when INDENT-HEURISTIC is non-nil."
+  (let* ((n1 (length recs1)) (n2 (length recs2))
+         (table (make-hash-table :test 'equal :size (+ n1 n2 1)))
+         (counts (vector (make-vector (+ n1 n2 1) 0)
+                         (make-vector (+ n1 n2 1) 0)))
+         ha1 ha2 rchg1 rchg2 dstart dend1 dend2 r1 r2 lim i)
+    (puthash :count 0 table)
+    (setq ha1 (ngit-xdiff--classify recs1 table counts 0))
+    (setq ha2 (ngit-xdiff--classify recs2 table counts 1))
+    (setq rchg1 (make-vector (+ n1 2) 0))
+    (setq rchg2 (make-vector (+ n2 2) 0))
+    ;; xdl_trim_ends
+    (setq i 0 lim (min n1 n2))
+    (while (and (< i lim) (eq (aref ha1 i) (aref ha2 i)))
+      (setq i (1+ i)))
+    (setq dstart i)
+    (setq lim (- lim i) i 0)
+    (while (and (< i lim)
+                (eq (aref ha1 (- n1 1 i)) (aref ha2 (- n2 1 i))))
+      (setq i (1+ i)))
+    (setq dend1 (- n1 i 1) dend2 (- n2 i 1))
+    ;; xdl_cleanup_records
+    (setq r1 (ngit-xdiff--cleanup ha1 n1 dstart dend1 (aref counts 1) rchg1))
+    (setq r2 (ngit-xdiff--cleanup ha2 n2 dstart dend2 (aref counts 0) rchg2))
+    ;; xdl_do_diff
+    (let* ((nreff1 (length (car r1))) (nreff2 (length (car r2)))
+           (ndiags (+ nreff1 nreff2 3)))
+      (setq ngit-xdiff--kvdf (make-vector (+ ndiags 1) 0))
+      (setq ngit-xdiff--kvdb (make-vector (+ ndiags 1) 0))
+      (setq ngit-xdiff--koff (1+ nreff2))
+      (setq ngit-xdiff--mxcost (max (ngit-xdiff--bogosqrt ndiags)
+                                    ngit-xdiff--max-cost-min))
+      (ngit-xdiff--recs-cmp (cdr r1) (car r1) rchg1 0 nreff1
+                            (cdr r2) (car r2) rchg2 0 nreff2 nil))
+    (setq ngit-xdiff--kvdf nil ngit-xdiff--kvdb nil)
+    (let ((xdf1 (vector n1 ha1 rchg1 recs1 (make-vector (max n1 1) -2)))
+          (xdf2 (vector n2 ha2 rchg2 recs2 (make-vector (max n2 1) -2))))
+      (ngit-xdiff--change-compact xdf1 xdf2 indent-heuristic)
+      (ngit-xdiff--change-compact xdf2 xdf1 indent-heuristic))
+    (ngit-xdiff--build-script rchg1 n1 rchg2 n2)))
+
 (defun ngit-xdiff-unified (old new context)
   "Return git-style unified diff hunks between unibyte strings OLD and NEW.
 CONTEXT is the number of context lines.  Return \"\" when equal."
@@ -659,48 +704,10 @@ CONTEXT is the number of context lines.  Return \"\" when equal."
       ""
     (let* ((recs1 (ngit-xdiff--split old))
            (recs2 (ngit-xdiff--split new))
-           (n1 (length recs1)) (n2 (length recs2))
-           (table (make-hash-table :test 'equal :size (+ n1 n2 1)))
-           (counts (vector (make-vector (+ n1 n2 1) 0)
-                           (make-vector (+ n1 n2 1) 0)))
-           ha1 ha2 rchg1 rchg2 dstart dend1 dend2 r1 r2 lim i)
-      (puthash :count 0 table)
-      (setq ha1 (ngit-xdiff--classify recs1 table counts 0))
-      (setq ha2 (ngit-xdiff--classify recs2 table counts 1))
-      (setq rchg1 (make-vector (+ n1 2) 0))
-      (setq rchg2 (make-vector (+ n2 2) 0))
-      ;; xdl_trim_ends
-      (setq i 0 lim (min n1 n2))
-      (while (and (< i lim) (eq (aref ha1 i) (aref ha2 i)))
-        (setq i (1+ i)))
-      (setq dstart i)
-      (setq lim (- lim i) i 0)
-      (while (and (< i lim)
-                  (eq (aref ha1 (- n1 1 i)) (aref ha2 (- n2 1 i))))
-        (setq i (1+ i)))
-      (setq dend1 (- n1 i 1) dend2 (- n2 i 1))
-      ;; xdl_cleanup_records
-      (setq r1 (ngit-xdiff--cleanup ha1 n1 dstart dend1 (aref counts 1) rchg1))
-      (setq r2 (ngit-xdiff--cleanup ha2 n2 dstart dend2 (aref counts 0) rchg2))
-      ;; xdl_do_diff
-      (let* ((nreff1 (length (car r1))) (nreff2 (length (car r2)))
-             (ndiags (+ nreff1 nreff2 3)))
-        (setq ngit-xdiff--kvdf (make-vector (+ ndiags 1) 0))
-        (setq ngit-xdiff--kvdb (make-vector (+ ndiags 1) 0))
-        (setq ngit-xdiff--koff (1+ nreff2))
-        (setq ngit-xdiff--mxcost (max (ngit-xdiff--bogosqrt ndiags)
-                                      ngit-xdiff--max-cost-min))
-        (ngit-xdiff--recs-cmp (cdr r1) (car r1) rchg1 0 nreff1
-                              (cdr r2) (car r2) rchg2 0 nreff2 nil))
-      (setq ngit-xdiff--kvdf nil ngit-xdiff--kvdb nil)
-      (let ((xdf1 (vector n1 ha1 rchg1 recs1 (make-vector (max n1 1) -2)))
-            (xdf2 (vector n2 ha2 rchg2 recs2 (make-vector (max n2 1) -2))))
-        (ngit-xdiff--change-compact xdf1 xdf2)
-        (ngit-xdiff--change-compact xdf2 xdf1))
-      (let ((script (ngit-xdiff--build-script rchg1 n1 rchg2 n2)))
+           (script (ngit-xdiff--diff-script recs1 recs2 t)))
         (if script
             (ngit-xdiff--emit recs1 recs2 script context)
-          "")))))
+          ""))))
 
 (provide 'ngit-xdiff)
 

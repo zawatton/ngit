@@ -4,8 +4,8 @@
 
 ;; Stash objects follow builtin/stash.c.  Temporary indexes share unchanged
 ;; entries and cache-tree subtrees; only differing paths need tree lookups.
-;; Apply merges entry modes and object names independently, refusing
-;; divergent content until a content merge engine is available.
+;; Simple applications merge entry modes and object names directly.
+;; Divergent paths use the shared tree/content merge engine.
 
 ;;; Code:
 
@@ -195,7 +195,7 @@
             ;; refs/stash is always logged, even with logAllRefUpdates=false.
             (ngit-make-directory (file-name-directory log) t)
             (unless (file-exists-p log) (ngit-write-file log ""))
-            (ngit--write-ref repo "refs/stash" hex (ngit-resolve-ref repo "refs/stash") msg)
+            (ngit--write-ref repo "refs/stash" hex (ngit-resolve-ref repo "refs/stash") msg t)
             (unless quiet (ngit--emit "Saved working directory and index state " (decode-coding-string msg 'utf-8) "\n"))
             (dolist (p unames)
               (unless (string-suffix-p "/" p)
@@ -238,26 +238,52 @@
                 (push (concat prev (substring line 40) "\n") out)
                 (setq prev (substring line 41 81)))
               (setq i (1+ i)))
-            (if (null out) (ngit--delete-ref repo "refs/stash")
-              (let ((lock (ngit-lock (ngit--stash-log-file repo))))
-                (ngit-commit-lock lock (apply #'concat (nreverse out))))
-              (ngit-commit-lock ref-lock (concat prev "\n"))
-              (setq ref-lock nil)
-              (aset repo 4 nil)))
+            (let ((lock (ngit-lock (ngit--stash-log-file repo))))
+              (ngit-commit-lock lock (apply #'concat (nreverse out))))
+            (if out
+                (ngit-commit-lock ref-lock (concat prev "\n"))
+              (ngit-unlock ref-lock))
+            (setq ref-lock nil)
+            (aset repo 4 nil)
+            (unless quiet (ngit--emit "Dropped " (nth 2 selected) " (" hex ")\n"))
+            ;; reflog_delete finishes before do_clear_stash starts its
+            ;; reference transaction, including when that hook rejects it.
+            (unless out (ngit--stash-clear repo)))
         (when ref-lock (ngit-unlock ref-lock))))
-    (unless quiet (ngit--emit "Dropped " (nth 2 selected) " (" hex ")\n"))
     0))
 
 (defun ngit--stash-clear (repo)
-  (when (ngit-resolve-ref repo "refs/stash")
-    (let ((lock (ngit--stash-ref-lock repo)))
-      (unwind-protect (ngit--delete-ref repo "refs/stash")
-        (ngit-unlock lock))))
+  (let ((hex (ngit-resolve-ref repo "refs/stash")))
+    (when hex
+      (let ((lock (ngit--stash-ref-lock repo)))
+        (unwind-protect (ngit--delete-ref repo "refs/stash" lock hex)
+          (ngit-unlock lock)))))
   0)
 
+(defun ngit--stash-reset-refs (repo)
+  "Update the references touched by stash's internal mixed reset."
+  (condition-case err
+      (let* ((head (ngit-resolve-ref repo "HEAD"))
+             (orig (ngit-resolve-ref repo "ORIG_HEAD"))
+             (action (getenv "GIT_REFLOG_ACTION")))
+        (ngit--write-ref repo "ORIG_HEAD" head orig
+                         (unless (equal head orig)
+                           (concat (or action "reset") ": updating ORIG_HEAD")))
+        (ngit-update-head repo head head (ngit-ident repo "COMMITTER")
+                          (if action (concat action ": updating HEAD")
+                            "reset: moving to HEAD"))
+        (ngit-commit-clear-merge-state repo)
+        (ngit-ref-delete-state repo "AUTO_MERGE"))
+    (ngit-fatal
+     ;; git-stash ignores the child reset's status and continues applying.
+     (if (equal (cadr err) "fatal: ref updates aborted by hook")
+         (ngit-native-write-stderr (concat (cadr err) "\n"))
+       (signal (car err) (cdr err))))))
+
 (defun ngit--stash-merge (repo base theirs index)
-  "Return (MERGED-ENTRIES CHANGES), merging THEIRS onto INDEX."
-  (let* ((old (aref index 0)) (targets nil) (dropped (make-hash-table :test 'equal))
+  "Return (MERGED-ENTRIES CHANGES), or nil when a tree merge is needed."
+  (catch 'stash-needs-merge
+   (let* ((old (aref index 0)) (targets nil) (dropped (make-hash-table :test 'equal))
          (changes nil))
     (dolist (c (ngit-diff-trees repo base theirs))
       (let* ((path (aref c 0)) (ours (ngit-index-lookup old path))
@@ -268,16 +294,16 @@
                         ((equal ob bb) (cons t tb))
                         ((equal tb bb) (cons t ob)))))
         (unless (and mode bin)
-          (ngit--die-with 1 "error: content merge not supported for '%s'" path))
+          (throw 'stash-needs-merge nil))
         (unless (or (and (= om bm) (equal ob bb))
                     (and (= om tm) (equal ob tb))
                     (and (= (logand bm #o170000) #o100000)
                          (= (logand om #o170000) #o100000)
                          (= (logand tm #o170000) #o100000)))
-          (ngit--die-with 1 "error: content merge not supported for '%s'" path))
+          (throw 'stash-needs-merge nil))
         (unless (and (= om mode) (equal ob (cdr bin)))
           (unless (or (= mode 0) (cdr bin))
-            (ngit--die-with 1 "error: content merge not supported for '%s'" path))
+            (throw 'stash-needs-merge nil))
           (setq c (copy-sequence c))
           (aset c 4 mode)
           (aset c 5 (cdr bin))
@@ -291,14 +317,14 @@
              (i (ngit-index-find old prefix)) (start 0) (slash nil))
         (while (and (< i (length old)) (string-prefix-p prefix (aref (aref old i) 0)))
           (unless (gethash (aref (aref old i) 0) dropped)
-            (ngit--die-with 1 "error: content merge not supported for '%s'" path))
+            (throw 'stash-needs-merge nil))
           (setq i (1+ i)))
         (while (setq slash (ngit--byte-pos path ?/ start))
           (let ((ancestor (substring path 0 slash)))
             (when (and (ngit-index-lookup old ancestor) (not (gethash ancestor dropped)))
-              (ngit--die-with 1 "error: content merge not supported for '%s'" path)))
+              (throw 'stash-needs-merge nil)))
           (setq start (1+ slash)))))
-    (list (ngit-index-overlay old targets dropped) (nreverse changes))))
+    (list (ngit-index-overlay old targets dropped) (nreverse changes)))))
 
 (defun ngit--stash-overwrite-error (paths &optional untracked)
   (when paths
@@ -327,6 +353,182 @@
     (when failed (ngit-native-write-stderr "error: could not restore untracked files from stash\n"))
     failed))
 
+(defun ngit--stash-index-conflict (repo base itree index)
+  "Report a stash index patch that cannot apply to INDEX."
+  (let ((entries (aref index 0)))
+    (dolist (c (ngit-diff-trees repo base itree))
+      (let ((e (ngit-index-lookup entries (aref c 0))))
+        (unless (or (ngit--switch-same-entry-p e (aref c 2) (aref c 3))
+                    (and (null e) (= (aref c 2) 0)))
+          (ngit-native-write-stderr
+           (concat "error: patch failed: " (aref c 0) ":1\n"
+                   "error: " (aref c 0) ": patch does not apply\n"))))))
+  (ngit--die-with 1 "error: conflicts in index. Try without --index."))
+
+(defun ngit--stash-find-hunk (text ours starts expected cursor beginning ending)
+  "Find TEXT at the nearest eligible line to EXPECTED in OURS.
+STARTS holds byte positions of line starts.  As in apply.c's find_pos,
+equally distant candidates prefer the forward match."
+  (let* ((n (1- (length starts)))
+         (wanted (max 0 (min expected n)))
+         (pos (if (= (length text) 0) (aref starts wanted)
+                (string-search text ours cursor)))
+         (best nil) (distance nil))
+    (while pos
+      (let ((lo 0) (hi n))
+        (while (< lo hi)
+          (let ((mid (ash (+ lo hi) -1)))
+            (if (< (aref starts mid) pos) (setq lo (1+ mid))
+              (setq hi mid))))
+        (when (and (= (aref starts lo) pos) (>= pos cursor)
+                   (or (not beginning) (= pos 0))
+                   (or (not ending) (= (+ pos (length text)) (length ours))))
+          (let ((d (abs (- lo wanted))))
+            (when (or (null distance) (< d distance)
+                      (and (= d distance) (> lo (cdr best))))
+              (setq best (cons pos lo) distance d)))))
+      (setq pos (and (> (length text) 0)
+                     (string-search text ours (1+ pos)))))
+    best))
+
+(defun ngit--stash-patch-data (base target ours)
+  "Apply BASE-to-TARGET text hunks to OURS, with Git's three-line context.
+Return (t . DATA) on success, or nil when a hunk cannot be found."
+  (require 'ngit-xdiff)
+  (let* ((before (ngit-xdiff--split base))
+         (after (ngit-xdiff--split target))
+         (current (ngit-xdiff--split ours))
+         (starts (make-vector (1+ (length current)) 0))
+         (script (ngit-xdiff--diff-script before after t))
+         (cursor 0) (line-offset 0) (chunks nil) (failed nil) (i 0))
+    (while (< i (length current))
+      (aset starts (1+ i) (+ (aref starts i) (length (aref current i))))
+      (setq i (1+ i)))
+    (while (and script (not failed))
+      (let* ((first (pop script)) (last first)
+             (begin (max 0 (- (aref first 0) 3)))
+             (end nil) (new-begin nil) (new-end nil)
+             (old-text nil) (new-text nil) (match nil) (pos nil))
+        (while (and script
+                    (<= (aref (car script) 0)
+                        (+ (aref last 0) (aref last 2) 6)))
+          (setq last (pop script)))
+        (setq end (min (length before) (+ (aref last 0) (aref last 2) 3))
+              new-begin (- (aref first 1) (- (aref first 0) begin))
+              new-end (+ (aref last 1) (aref last 3)
+                         (- end (aref last 0) (aref last 2)))
+              old-text (mapconcat #'identity (substring before begin end) "")
+              new-text (mapconcat #'identity (substring after new-begin new-end) "")
+              match (ngit--stash-find-hunk
+                     old-text ours starts (+ begin line-offset) cursor
+                     (= begin 0) (= end (+ (aref last 0) (aref last 2)))))
+        (if match
+            (progn
+              (setq pos (car match) line-offset (- (cdr match) begin))
+              (push (substring ours cursor pos) chunks)
+              (push new-text chunks)
+              (setq cursor (+ pos (length old-text))))
+          (setq failed t))))
+    (unless failed
+      (push (substring ours cursor) chunks)
+      (cons t (apply #'concat (nreverse chunks))))))
+
+(defun ngit--stash-restore-index (repo base itree index)
+  "Return the index restored by the saved BASE-to-ITREE patch, or nil."
+  (or (ngit--stash-merge repo base itree index)
+      (let ((old (aref index 0)) (targets nil)
+            (dropped (make-hash-table :test 'equal)) (failed nil)
+            (changes (ngit-diff-trees repo base itree)))
+        (dolist (c changes)
+          (let* ((path (aref c 0)) (e (ngit-index-lookup old path))
+                 (bm (aref c 2)) (bb (aref c 3))
+                 (tm (aref c 4)) (tb (aref c 5)) (target nil))
+            (cond
+             ((or (ngit--switch-same-entry-p e bm bb) (and (null e) (= bm 0)))
+              (when (/= tm 0) (setq target (ngit--switch-entry path tm tb e))))
+             ((and e (= (logand bm #o170000) #o100000)
+                   (= (logand tm #o170000) #o100000) (= (aref e 2) bm))
+              (let* ((bdata (cdr (ngit-read-object repo bb)))
+                     (tdata (cdr (ngit-read-object repo tb)))
+                     (odata (cdr (ngit-read-object repo (aref e 1))))
+                     (patch (and (not (ngit--byte-pos bdata 0 0))
+                                 (not (ngit--byte-pos tdata 0 0))
+                                 (ngit--stash-patch-data bdata tdata odata))))
+                (if patch
+                    (setq target (ngit--switch-entry
+                                  path tm (ngit-write-object repo "blob" (cdr patch)) e))
+                  (setq failed t))))
+             (t (setq failed t)))
+            (puthash path t dropped)
+            (when target (push target targets))))
+        (unless failed
+          (list (ngit-index-overlay old targets dropped) changes)))))
+
+(defun ngit--stash-apply-content (repo base itree theirs ours index restore-index quiet utree)
+  "Apply a stash needing a tree merge, preserving its index policy."
+  (require 'ngit-merge-tree)
+  (let* ((old (aref index 0))
+         (has-index (and restore-index (not (equal base itree))
+                         (not (equal ours itree))))
+         (saved (and has-index (ngit--stash-restore-index repo base itree index)))
+         (result nil) (untracked nil) (failed nil))
+    (when (and has-index (null saved))
+      (ngit--stash-index-conflict repo base itree index))
+    (when utree
+      (ngit--flatten-tree repo utree ""
+                          (lambda (path mode bin)
+                            (push (ngit--switch-entry path mode bin nil) untracked)))
+      (setq untracked (nreverse untracked)))
+    (when has-index
+      (ngit--stash-tree repo index (car saved) (ngit-diff-trees repo base itree))
+      (ngit--stash-reset-refs repo))
+    (let ((ngit-merge-ancestor-label "Stash base"))
+      (setq result
+            (ngit-merge-trees repo base ours theirs
+                              (if (equal base ours) "Version stash was based on" "Updated upstream")
+                              "Stashed changes")))
+    (condition-case err
+        (ngit-merge-apply repo result ours)
+      (ngit-fatal
+       (ngit-native-write-stderr (concat (cadr err) "\n"))
+       (aset repo 6 nil)
+       (aset repo 7 nil)
+       (setq failed t)))
+    (if (or failed (plist-get result :conflicts))
+        (progn
+          (when restore-index (ngit-native-write-stderr "Index was not unstashed.\n"))
+          (ngit--stash-restore-untracked repo untracked)
+          (unless quiet (ngit-cmd-status repo nil))
+          1)
+      ;; A clean merge stages every result; stash puts existing paths back
+      ;; to the pre-merge index and retains only newly introduced entries.
+      (let* ((current (ngit-read-index repo)) (entries (aref current 0))
+             (final (and has-index (car saved)))
+             (root (or (ngit-ct-root index) (ngit-ct-new)))
+             (checked (make-hash-table :test 'eql)) (new nil) (i 0))
+        (unless has-index
+          (while (< i (length entries))
+            (let ((e (aref entries i)))
+              (unless (ngit-index-lookup old (aref e 0))
+                (let ((pos (aref e 4)))
+                  (push (ngit-make-entry
+                         (aref e 0) (aref e 1) (aref e 2)
+                         (if pos (substring (aref current 1) pos (+ pos 40)) (aref e 6))
+                         (aref e 5)) new))))
+            (setq i (1+ i)))
+          (setq final (ngit-index-overlay old (nreverse new) nil)))
+        (dolist (c (ngit-diff-trees repo ours (plist-get result :tree)))
+          (ngit-ct-invalidate root (aref c 0)))
+        (when has-index
+          (dolist (c (ngit-diff-trees repo base itree))
+            (ngit-ct-invalidate root (aref c 0)))
+          (ngit-ct-update repo root final))
+        (ngit--reset-refresh repo index final checked t)
+        (ngit-write-index repo index final root checked))
+      (setq failed (ngit--stash-restore-untracked repo untracked))
+      (unless quiet (ngit-cmd-status repo nil))
+      (if failed 1 0))))
+
 (defun ngit--stash-apply (repo selected restore-index quiet)
   (catch 'stash-result
    (let* ((hex (car selected)) (commit (ngit--commit-of repo hex))
@@ -340,8 +542,15 @@
          (ours (ngit-ct-update repo root old))
          (merged (ngit--stash-merge repo base theirs index))
          (changes (cadr merged)) (bad nil) (collisions nil) (new-paths nil) (loose nil)
-         (saved-index (if restore-index (car (ngit--stash-merge repo base itree index)) old))
+         (saved-index (if (and restore-index merged)
+                          (car (ngit--stash-restore-index repo base itree index)) old))
          (untracked nil))
+    (unless merged
+      (throw 'stash-result
+             (ngit--stash-apply-content repo base itree theirs ours index
+                                        restore-index quiet utree)))
+    (when (and restore-index (null saved-index))
+      (ngit--stash-index-conflict repo base itree index))
     ;; Preflight every tracked write before updating the index or work tree.
     (dolist (c changes)
       (let ((e (ngit-index-lookup old (aref c 0))))
@@ -359,11 +568,7 @@
       (setq untracked (nreverse untracked)))
     (when (and restore-index (not (equal base itree)) (not (equal ours itree)))
       (ngit--stash-tree repo index saved-index (ngit-diff-trees repo base itree))
-      (let ((head (ngit-resolve-ref repo "HEAD")))
-        (let ((lock (ngit-lock (expand-file-name "ORIG_HEAD" (ngit-repo-gitdir repo)))))
-          (ngit-commit-lock lock (concat head "\n")))
-        (when (string-prefix-p "ref: " (or (ngit-read-ref repo "HEAD") ""))
-          (ngit--append-reflog repo "HEAD" head head (ngit-ident repo "COMMITTER") "reset: moving to HEAD"))))
+      (ngit--stash-reset-refs repo))
     (when (or bad collisions)
       (ngit--stash-overwrite-error bad collisions)
       (when restore-index (ngit-native-write-stderr "Index was not unstashed.\n"))
@@ -371,8 +576,11 @@
       (unless quiet (ngit-cmd-status repo nil))
       (throw 'stash-result 1))
     (let ((tree (ngit--stash-tree repo index (car merged) changes)))
-      (ngit--switch-twoway repo ours tree "merge" (and new-paths (list loose))))
-    (when (and (null changes) (not quiet)) (ngit--emit "Already up to date.\n"))
+      (ngit--switch-twoway repo ours tree "merge" (and new-paths (list loose)))
+      (unless (equal base theirs)
+        (ngit--write-ref repo "AUTO_MERGE" (ngit-hex tree)
+                         (ngit-resolve-ref repo "AUTO_MERGE") nil t)))
+    (when (equal base theirs) (ngit--emit "Already up to date.\n"))
     ;; By default existing paths are unstaged; newly added paths stay staged.
     (let* ((current (ngit-read-index repo)) (entries (aref current 0))
            (new nil) (final saved-index) (df-reported nil)

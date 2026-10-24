@@ -1,1 +1,4 @@
 target/
+lisp/*.elc
+lisp/.elc-stamp
+lisp/.elc-lock/

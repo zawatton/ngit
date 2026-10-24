@@ -1,0 +1,26 @@
+#+TITLE: ngit maintenance commit-graph validity
+
+The real gc criterion reproduced a stale commit-graph after unreachable
+objects were pruned. Preserve the existing 480-second requirement and
+Git state comparison; do not bypass git fsck or retain obsolete objects
+merely to keep a derived acceleration cache valid.
+
+* S1 Maintenance cache validity
+
+** S1.1 Pruning with a monolithic commit-graph leaves a valid object database
+#+TIMEOUT: 180
+cmd: sh test/gc-commit-graph.sh monolithic
+
+** S1.2 Pruning with a split commit-graph leaves a valid object database
+#+TIMEOUT: 180
+cmd: sh test/gc-commit-graph.sh split
+
+** S1.3 Existing maintenance workflows still match Git end to end
+#+TIMEOUT: 600
+cmd: sh test/compare.sh gc
+
+** S1.4 Real repository gc preserves Git state and passes git fsck within 480 seconds
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+#+NOTE: Reuse the real end-to-end run of completion criterion S8.4, requiring a fresh PASS. This avoids executing the same costly fsck twice.
+cmd: bash ../../bin/progress-meter.sh --ledger tools/ai/git-completion-progress.org --no-run --json >/dev/null && python3 -c 'import json; d=json.load(open("target/progress/git-completion-progress.json")); c=next(c for s in d["stages"] for c in s["criteria"] if c["id"]=="S8.4"); assert c["status"]=="PASS" and not c["stale"], c'

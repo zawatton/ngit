@@ -135,6 +135,10 @@ Honors GIT_DIR.  Signals an error outside a repository."
               (setq found (ngit--make-repo (file-name-as-directory dotgit) d)))
              ((file-regular-p dotgit)
               (setq found (ngit--make-repo (ngit--gitdir-from-file dotgit d) d)))
+             ((and (file-regular-p (expand-file-name "HEAD" d))
+                   (file-directory-p (expand-file-name "objects" d))
+                   (file-directory-p (expand-file-name "refs" d)))
+              (setq found (ngit--make-repo d nil)))
              (t
               (let ((parent (file-name-directory (directory-file-name d))))
                 (setq d (and parent (not (string= parent d)) parent)))))))
@@ -238,6 +242,13 @@ decides a probe without building a substring."
     (cons val pos)))
 
 (defun ngit--apply-delta (base delta)
+  "Return BASE with Git binary DELTA applied."
+  (if (and (boundp 'ngit-transport-kernel--ready)
+           ngit-transport-kernel--ready (> (length delta) 1024))
+      (ngit-transport-delta-apply-string base delta)
+    (ngit--apply-delta-lisp base delta)))
+
+(defun ngit--apply-delta-lisp (base delta)
   "Return BASE with git binary DELTA applied."
   (let* ((r1 (ngit--delta-varint delta 0))
          (r2 (ngit--delta-varint delta (cdr r1)))
@@ -252,15 +263,21 @@ decides a probe without building a substring."
         (setq p (1+ p))
         (cond
          ((/= 0 (logand cmd 128))
-          (let ((off 0) (size 0) (bit 0))
-            (while (< bit 4)
-              (when (/= 0 (logand cmd (ash 1 bit)))
-                (setq off (logior off (ash (aref delta p) (* 8 bit))) p (1+ p)))
-              (setq bit (1+ bit)))
-            (while (< bit 7)
-              (when (/= 0 (logand cmd (ash 1 bit)))
-                (setq size (logior size (ash (aref delta p) (* 8 (- bit 4)))) p (1+ p)))
-              (setq bit (1+ bit)))
+          (let ((off 0) (size 0))
+            (when (/= 0 (logand cmd 1))
+              (setq off (aref delta p) p (1+ p)))
+            (when (/= 0 (logand cmd 2))
+              (setq off (logior off (ash (aref delta p) 8)) p (1+ p)))
+            (when (/= 0 (logand cmd 4))
+              (setq off (logior off (ash (aref delta p) 16)) p (1+ p)))
+            (when (/= 0 (logand cmd 8))
+              (setq off (logior off (ash (aref delta p) 24)) p (1+ p)))
+            (when (/= 0 (logand cmd 16))
+              (setq size (aref delta p) p (1+ p)))
+            (when (/= 0 (logand cmd 32))
+              (setq size (logior size (ash (aref delta p) 8)) p (1+ p)))
+            (when (/= 0 (logand cmd 64))
+              (setq size (logior size (ash (aref delta p) 16)) p (1+ p)))
             (when (= size 0) (setq size #x10000))
             (push (substring base off (+ off size)) pieces)))
          ((> cmd 0)
@@ -285,6 +302,10 @@ they hold the whole stream, otherwise read the file again."
                (<= (+ skip size (/ size 8) 64) head-len))
            (ngit-native-inflate-head skip (- head-len skip) size))
       (car (ngit-native-inflate-file path (+ offset skip) size))))
+
+(defvar ngit--pack-cache-limit 1024
+  "Maximum materialized entries per pack before dropping the cache.
+Object graph walks bind a larger limit to retain shared delta bases.")
 
 (defun ngit--pack-entry (repo pack offset)
   "Return (TYPE . DATA) for the entry at OFFSET in PACK."
@@ -324,7 +345,7 @@ they hold the whole stream, otherwise read the file again."
                   ((or 'commit 'tree 'blob 'tag)
                    (cons type (ngit--pack-inflate path offset p size got)))
                   (_ (error "ngit: bad pack entry type at %s:%d" path offset))))
-          (when (> (hash-table-count cache) 1024)
+          (when (> (hash-table-count cache) ngit--pack-cache-limit)
             (clrhash cache))
           (puthash offset result cache)))))
 

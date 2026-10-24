@@ -59,20 +59,22 @@ one concatenation for each byte that needs quoting."
     out))
 
 (defun ngit-cmd-ls-files (repo args)
-  (let* ((stage (or (member "-s" args) (member "--stage" args)))
+  (let* ((unmerged (or (member "-u" args) (member "--unmerged" args)))
+         (stage (or unmerged (member "-s" args) (member "--stage" args)))
          (entries (ngit-index-entries repo))
          (names (ngit-quote-paths (vconcat (mapcar (lambda (e) (aref e 0)) entries))))
          (modes nil) (i 0) (n (length entries)))
     (while (< i n)
       (let ((e (aref entries i)))
-        (if stage
+        (unless (and unmerged (= (aref e 3) 0))
+          (if stage
             (let ((m (or (cdr (assq (aref e 2) modes))
                          (let ((s (ngit--octal6 (aref e 2)))) (push (cons (aref e 2) s) modes) s))))
               (push (concat m " " (ngit-hex (aref e 1))
                             (aref [" 0\t" " 1\t" " 2\t" " 3\t"] (aref e 3))
                             (aref names i) "\n")
                     ngit--out))
-          (push (concat (aref names i) "\n") ngit--out)))
+            (push (concat (aref names i) "\n") ngit--out))))
       (setq i (1+ i)))
     0))
 
@@ -248,7 +250,7 @@ one concatenation for each byte that needs quoting."
 ;;;; Collecting
 
 (defun ngit-status-collect (repo)
-  "Return a plist with :branch :head :staged :unstaged :untracked."
+  "Return branch, merge state and staged, unmerged, unstaged and untracked paths."
   (let* ((head-raw (ngit-read-ref repo "HEAD"))
          (branch (and head-raw (string-prefix-p "ref: refs/heads/" head-raw)
                       (substring head-raw 16)))
@@ -256,9 +258,16 @@ one concatenation for each byte that needs quoting."
          (tree (and head (ngit-unhex (ngit-peel repo head 'tree))))
          (staged (ngit-detect-renames (ngit-diff-tree-index repo tree)))
          (unstaged (ngit-wt-changes repo nil t))
-         (untracked (ngit-untracked repo)))
+         (untracked (ngit-untracked repo))
+         (unmerged nil))
+    (setq staged (delq nil (mapcar (lambda (c)
+                                    (if (= (aref c 1) ?U)
+                                        (progn (push c unmerged) nil)
+                                      c)) staged))
+          unstaged (seq-filter (lambda (c) (/= (aref c 1) ?U)) unstaged))
     (list :branch branch :head head :staged staged :unstaged unstaged
-          :untracked untracked)))
+          :untracked untracked :unmerged (nreverse unmerged)
+          :merging (file-exists-p (expand-file-name "MERGE_HEAD" (ngit-repo-gitdir repo))))))
 
 (defun ngit--status-quote (path)
   "quote_path with QUOTE_PATH_QUOTE_SP: paths with a space are quoted."
@@ -288,6 +297,11 @@ one concatenation for each byte that needs quoting."
             (aset slot 1 y)
           (puthash (aref c 0) (vector ?\s y nil) table)
           (push (aref c 0) paths))))
+    (dolist (c (plist-get st :unmerged))
+      (let ((xy (aref [nil "DD" "AU" "UD" "UA" "DU" "AA" "UU"]
+                      (ngit-index-stage-mask (aref c 6)))))
+        (puthash (aref c 0) (vector (aref xy 0) (aref xy 1) nil) table)
+        (push (aref c 0) paths)))
     (dolist (p (sort paths #'string<))
       (let ((v (gethash p table)))
         (ngit--emit (string (aref v 0) (aref v 1)) " "
@@ -322,6 +336,17 @@ one concatenation for each byte that needs quoting."
          (head (plist-get st :head))
          (staged (plist-get st :staged))
          (unstaged (plist-get st :unstaged))
+         (unmerged (plist-get st :unmerged))
+         (merging (plist-get st :merging))
+         (picking (let ((path (expand-file-name "CHERRY_PICK_HEAD" (ngit-repo-gitdir repo))))
+                    (and (file-exists-p path) (string-trim (ngit--read-file path)))))
+         (reverting (or (file-exists-p (expand-file-name "REVERT_HEAD" (ngit-repo-gitdir repo)))
+                        ;; sequencer_get_last_command: a range in progress
+                        ;; whose next todo command is a revert.
+                        (let ((todo (expand-file-name "sequencer/todo" (ngit-repo-gitdir repo))))
+                          (and (file-exists-p todo)
+                               (string-match-p "\\`[ \t\r\n]*r\\(?:evert\\)?[ \t]"
+                                               (ngit--read-file todo))))))
          (untracked (plist-get st :untracked)))
     (if branch
         (progn
@@ -335,14 +360,51 @@ one concatenation for each byte that needs quoting."
           (ngit--emit "Not currently on any branch.\n"))))
     (unless head
       (ngit--emit "\nNo commits yet\n\n"))
+    (when merging
+      (ngit--emit
+       (if unmerged
+           "You have unmerged paths.\n  (fix conflicts and run \"git commit\")\n  (use \"git merge --abort\" to abort the merge)\n\n"
+         "All conflicts fixed but you are still merging.\n  (use \"git commit\" to conclude merge)\n\n")))
+    (when picking
+      (ngit--emit "You are currently cherry-picking commit " (ngit-abbrev repo picking) ".\n"
+                  (if unmerged "  (fix conflicts and run \"git cherry-pick --continue\")\n"
+                    "  (all conflicts fixed: run \"git cherry-pick --continue\")\n")
+                  "  (use \"git cherry-pick --skip\" to skip this patch)\n"
+                  "  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)\n\n"))
+    (when reverting
+      (ngit--emit "Revert currently in progress.\n"
+                  (if unmerged "  (fix conflicts and run \"git revert --continue\")\n"
+                    "  (run \"git revert --continue\" to continue)\n")
+                  "  (use \"git revert --skip\" to skip this patch)\n"
+                  "  (use \"git revert --abort\" to cancel the revert operation)\n\n"))
     (when staged
       (ngit--emit "Changes to be committed:\n"
-                  (if head
-                      "  (use \"git restore --staged <file>...\" to unstage)\n"
-                    "  (use \"git rm --cached <file>...\" to unstage)\n"))
+                  (cond (merging "")
+                        (head "  (use \"git restore --staged <file>...\" to unstage)\n")
+                        (t "  (use \"git rm --cached <file>...\" to unstage)\n")))
       (dolist (c staged)
         (ngit--emit (ngit--status-line (aref c 1) (aref c 0) (aref c 8) "")))
       (ngit--emit "\n"))
+    (when unmerged
+      (let ((deleted nil) (only-deleted t))
+        (dolist (c unmerged)
+          (let ((mask (ngit-index-stage-mask (aref c 6))))
+            (when (memq mask '(1 3 5)) (setq deleted t))
+            (unless (= mask 1) (setq only-deleted nil))))
+        (ngit--emit "Unmerged paths:\n"
+                    (cond (merging "")
+                          (head "  (use \"git restore --staged <file>...\" to unstage)\n")
+                          (t "  (use \"git rm --cached <file>...\" to unstage)\n"))
+                    (cond (only-deleted "  (use \"git rm <file>...\" to mark resolution)\n")
+                          (deleted "  (use \"git add/rm <file>...\" as appropriate to mark resolution)\n")
+                          (t "  (use \"git add <file>...\" to mark resolution)\n")))
+        (dolist (c unmerged)
+          (let ((label (aref [nil "both deleted:" "added by us:" "deleted by them:"
+                                 "added by them:" "deleted by us:" "both added:" "both modified:"]
+                             (ngit-index-stage-mask (aref c 6)))))
+            (ngit--emit "\t" label (make-string (- 17 (length label)) ?\s)
+                        (ngit-quote-path (aref c 0)) "\n")))
+        (ngit--emit "\n")))
     (when unstaged
       (let ((has-deleted nil) (dirty-sub nil))
         (dolist (c unstaged)
@@ -367,9 +429,9 @@ one concatenation for each byte that needs quoting."
                   "  (use \"git add <file>...\" to include in what will be committed)\n")
       (dolist (u untracked) (ngit--emit "\t" (ngit-quote-path u) "\n"))
       (ngit--emit "\n"))
-    (unless staged
+    (unless (or staged (and merging (null unmerged)))
       (ngit--emit
-       (cond (unstaged "no changes added to commit (use \"git add\" and/or \"git commit -a\")\n")
+       (cond ((or unstaged unmerged) "no changes added to commit (use \"git add\" and/or \"git commit -a\")\n")
              (untracked "nothing added to commit but untracked files present (use \"git add\" to track)\n")
              ((null head) "nothing to commit (create/copy files and use \"git add\" to track)\n")
              (t "nothing to commit, working tree clean\n"))))))

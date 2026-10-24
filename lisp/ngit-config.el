@@ -132,6 +132,147 @@
           ((member (downcase v) '("false" "no" "off" "0" "")) nil)
           (t default))))
 
+;;;; Lazy hook gate
+
+(defun ngit-hook-setenv (name value)
+  "Export NAME as VALUE to both NeLisp and spawned hook environments.
+NeLisp's setenv updates getenv without updating process-environment."
+  (let ((prefix (concat name "=")) kept)
+    (dolist (entry process-environment)
+      (unless (or (equal entry name) (string-prefix-p prefix entry))
+        (push entry kept)))
+    (setq process-environment (nreverse kept))
+    (when value (push (concat prefix value) process-environment))
+    (setenv name value)))
+
+(defvar ngit--hook-root-cache (make-hash-table :test 'eq)
+  "Repository hook roots checked during this process.")
+
+(defvar ngit--ignored-hook-advice nil
+  "Alist of hook names already advised, keyed by repository identity.")
+
+(defvar ngit-hook-working-directory nil
+  "Working directory explicitly selected by the current hook caller.")
+
+(defun ngit--hook-relative-path (path base)
+  "Return absolute PATH relative to absolute directory BASE."
+  (let ((path-parts (split-string (expand-file-name path) "/" t))
+        (base-parts (split-string (expand-file-name base) "/" t)))
+    (while (and path-parts base-parts
+                (equal (car path-parts) (car base-parts)))
+      (setq path-parts (cdr path-parts)
+            base-parts (cdr base-parts)))
+    (mapconcat #'identity
+               (append (mapcar (lambda (_part) "..") base-parts) path-parts)
+               "/")))
+
+(defun ngit--hook-worktree (repo)
+  "Return the work tree Git uses as the hook directory for REPO, or nil."
+  (or (ngit-repo-toplevel repo)
+      (let ((environment (getenv "GIT_WORK_TREE")))
+        (and environment (not (string= environment ""))
+             (expand-file-name environment default-directory)))
+      (and (not (ngit-config-bool repo "core.bare" t))
+           (let ((configured (ngit-config-get repo "core.worktree")))
+             (cond
+              ((and (stringp configured) (file-name-absolute-p configured))
+               configured)
+              ((stringp configured)
+               (expand-file-name configured (ngit-repo-gitdir repo)))
+              (t default-directory))))))
+
+(defun ngit--hook-cwd (repo)
+  "Return Git's hook working directory for REPO."
+  (file-name-as-directory
+   (expand-file-name
+    (or ngit-hook-working-directory
+        (ngit--hook-worktree repo)
+        (ngit-repo-gitdir repo)))))
+
+(defun ngit--hook-root-info (repo)
+  "Return cached [ROOT CWD ABSOLUTE-CONFIG CONFIGURED] for REPO.
+ROOT is nil when the configured hooks directory did not exist at the first
+check.  This keeps hook-free commands to one directory test and avoids loading
+the process runner merely because git-init installed *.sample files."
+  (or (gethash repo ngit--hook-root-cache)
+      (let* ((cwd (ngit--hook-cwd repo))
+             (configured (ngit-config-get repo "core.hooksPath"))
+             (configured (and (stringp configured) configured))
+             (absolute (and configured
+                            (or (file-name-absolute-p configured)
+                                (string-prefix-p "~" configured))))
+             (root (if configured
+                       (expand-file-name configured cwd)
+                     (expand-file-name "hooks" (ngit-repo-commondir repo))))
+             (info (vector (and (file-directory-p root)
+                                (file-name-as-directory root))
+                           cwd absolute configured)))
+        (puthash repo info ngit--hook-root-cache)
+        info)))
+
+(defun ngit--hook-advised-p (repo name)
+  (member name (cdr (assq repo ngit--ignored-hook-advice))))
+
+(defun ngit--hook-mark-advised (repo name)
+  (let ((entry (assq repo ngit--ignored-hook-advice)))
+    (if entry (setcdr entry (cons name (cdr entry)))
+      (push (list repo name) ngit--ignored-hook-advice))))
+
+(defun ngit--hook-path (repo name)
+  "Return executable hook path for NAME, or nil, without loading hook code."
+  (let* ((info (ngit--hook-root-info repo))
+         (root (aref info 0))
+         (path (and root (expand-file-name name root))))
+    (cond
+     ((and path (file-executable-p path)) path)
+     ((and path (file-exists-p path)
+           (not (ngit--hook-advised-p repo name)))
+      (ngit--hook-mark-advised repo name)
+      (when (ngit-config-bool repo "advice.ignoredHook" t)
+        (let ((shown (ngit--hook-command-path repo name path)))
+          (ngit-native-write-stderr
+           (concat "hint: The '" shown "' hook was ignored because it's not set as executable.\n"
+                   "hint: You can disable this warning with `git config advice.ignoredHook false`.\n"))))
+      nil)
+     (t nil))))
+
+(defun ngit--hook-command-path (repo name &optional absolute-path absolute-gitdir)
+  "Return the hook pathname Git passes as argv[0] for NAME in REPO."
+  (let* ((info (ngit--hook-root-info repo))
+         (path (or absolute-path
+                   (and (aref info 0) (expand-file-name name (aref info 0)))))
+         (top (ngit-repo-toplevel repo))
+         (linked (and top
+                      (not (equal (directory-file-name
+                                   (expand-file-name (ngit-repo-gitdir repo)))
+                                  (directory-file-name
+                                   (expand-file-name ".git" top)))))))
+    (and path
+         (if (or (aref info 2)
+                 (and (null (aref info 3))
+                      (or absolute-gitdir
+                          (let ((gitdir (getenv "GIT_DIR")))
+                            (and gitdir (file-name-absolute-p gitdir)))
+                          linked)))
+             path
+           (ngit--hook-relative-path path (aref info 1))))))
+
+(defun ngit-hook-exists-p (repo name)
+  "Return non-nil when REPO has an executable hook named NAME.
+The implementation module is loaded only after the named executable exists."
+  (when (ngit--hook-path repo name)
+    (unless (featurep 'ngit-hook)
+      (load (expand-file-name "ngit-hook.el" ngit-native--dir) nil t))
+    t))
+
+(defun ngit-hook-run (repo name &optional args input env)
+  "Run REPO hook NAME and return its numeric exit status.
+ARGS is a list of strings.  INPUT is a string, or nil for /dev/null.  ENV is
+a list of `KEY=value' entries and bare `KEY' entries which unset variables."
+  (if (ngit-hook-exists-p repo name)
+      (ngit-hook--run repo name args input env)
+    0))
+
 (provide 'ngit-config)
 
 ;;; ngit-config.el ends here

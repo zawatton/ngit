@@ -65,7 +65,7 @@ cmd: sh test/compare.sh fsck
 ** S8.4 On a clone of the real repository, gc leaves the same refs and object set as git, git fsck is clean, and ngit finishes within 480 seconds
 #+TIMEOUT: 600
 #+REQUIRES: NGIT_REAL_REPO
-cmd: sh test/real-write.sh "$NGIT_REAL_REPO" gc 480
+cmd: sh test/real-write.sh "$NGIT_REAL_REPO" gc 480 > target/real-gc.log 2>&1
 
 * S9 Transport (file:// and ssh)
 

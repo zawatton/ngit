@@ -41,7 +41,9 @@
   "Return the raw value of ref NAME: \"ref: X\" or a hex name, or nil."
   (let ((file (ngit--ref-file repo name)))
     (if (file-regular-p file)
-        (ngit--trim-eol (ngit--read-file file))
+        (let ((value (ngit--trim-eol (ngit--read-file file))))
+          (if (and (equal name "FETCH_HEAD") (>= (length value) 40))
+              (substring value 0 40) value))
       (cdr (assoc name (ngit--packed-refs repo))))))
 
 (defun ngit-resolve-ref (repo name &optional depth)
@@ -66,6 +68,95 @@
         (when hex (setq found (cons full hex))))
       (setq rules (cdr rules)))
     found))
+
+;;;; Reference transactions
+
+(defvar ngit-ref-inhibit-hooks nil
+  "Non-nil for backend operations which do not use reference transactions.")
+
+(defvar ngit-ref-hook-env nil
+  "Additional environment exported by the current reference operation.")
+
+(defvar ngit-ref-hook-cwd nil
+  "Working directory for the current reference operation's hooks.")
+
+(defun ngit-ref-prepare (repo updates &optional abort-first locks abort-inputs abort-updates abort-locks)
+  "Prepare a reference transaction for UPDATES, returning its hook input.
+Each update is (OLD NEW REF); nil object names mean the null object.
+ABORT-FIRST represents the empty packed-refs transaction used by the
+files backend when deleting an unpacked ref.  ABORT-INPUTS are already
+prepared nested transactions to abort if this preparation fails.
+ABORT-UPDATES overrides UPDATES for the empty packed transaction abort.
+ABORT-LOCKS remain held until the nested transactions have been aborted.
+Skip all serialization
+when no executable reference-transaction hook exists."
+  (when (and (not ngit-ref-inhibit-hooks)
+             (let ((ngit-hook-working-directory ngit-ref-hook-cwd))
+               (ngit-hook-exists-p repo "reference-transaction")))
+    (let* ((ngit-hook-working-directory ngit-ref-hook-cwd)
+           (zero (make-string 40 ?0))
+           (input (mapconcat
+                   (lambda (update)
+                     (concat (or (nth 0 update) zero) " "
+                             (or (nth 1 update) zero) " "
+                             (nth 2 update) "\n"))
+                   updates "")))
+      (when abort-first
+        (ngit-hook-run repo "reference-transaction" '("aborted")
+                       (if (null abort-updates) input
+                         (mapconcat (lambda (update)
+                                      (concat (or (nth 0 update) zero) " "
+                                              (or (nth 1 update) zero) " "
+                                              (nth 2 update) "\n"))
+                                    abort-updates ""))
+                       ngit-ref-hook-env))
+      (unless (= 0 (ngit-hook-run repo "reference-transaction" '("prepared") input ngit-ref-hook-env))
+        (dolist (lock locks) (ngit-unlock lock))
+        (dolist (prior abort-inputs) (ngit-ref-finish repo prior t))
+        (dolist (lock abort-locks) (ngit-unlock lock))
+        (ngit-hook-run repo "reference-transaction" '("aborted") input ngit-ref-hook-env)
+        (ngit--die "fatal: ref updates aborted by hook"))
+      input)))
+
+(defun ngit-ref-finish (repo input &optional aborted)
+  "Notify the reference hook that INPUT committed, or ABORTED."
+  (when input
+    (let ((ngit-hook-working-directory ngit-ref-hook-cwd))
+      (ngit-hook-run repo "reference-transaction"
+                     (list (if aborted "aborted" "committed")) input ngit-ref-hook-env))))
+
+(defun ngit-ref-write (repo name value &optional old)
+  "Write raw reference VALUE to NAME, including transaction notifications."
+  (let* ((file (ngit--ref-file repo name))
+         (new (if (string-prefix-p "ref: " value)
+                  (concat "ref:" (substring value 5)) value))
+         lock input)
+    (ngit-make-directory (file-name-directory file) t)
+    (setq lock (ngit-lock file))
+    (unwind-protect
+        (progn
+          (setq input (ngit-ref-prepare repo (list (list old new name)) nil (list lock)))
+          (ngit-commit-lock lock (concat value "\n"))
+          (setq lock nil)
+          (aset repo 4 nil)
+          (ngit-ref-finish repo input))
+      (when lock (ngit-unlock lock)))))
+
+(defun ngit-ref-delete-state (repo name)
+  "Delete an unpacked state reference NAME, including when it is absent."
+  (let* ((file (ngit--ref-file repo name))
+         (lock (ngit-lock file)) packed-lock input)
+    (unwind-protect
+        (progn
+          (setq packed-lock (ngit-lock (expand-file-name "packed-refs" (ngit-repo-commondir repo))))
+          (setq input (ngit-ref-prepare repo (list (list nil nil name)) t
+                                        (list lock packed-lock)))
+          (when (file-exists-p file) (delete-file file))
+          (ngit-unlock lock)
+          (ngit-unlock packed-lock)
+          (ngit-ref-finish repo input))
+      (ngit-unlock lock)
+      (when packed-lock (ngit-unlock packed-lock)))))
 
 ;;;; Ref listing
 

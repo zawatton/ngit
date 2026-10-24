@@ -1,0 +1,56 @@
+#+TITLE: ngit takeover audit fixes
+
+This ledger tracks the three focused audit findings from the Claude
+session takeover. It supplements the unchanged stage 7-11 completion
+ledger. Tests must reproduce an actual difference from Git before the
+implementation changes, and all existing suites remain intact.
+
+Git accepts a complete ls-remote advertisement and an up-to-date fetch
+despite a later SSH exit 42; S2 records those compatibility controls rather
+than requiring an unproven failure. Hook comparisons set GIT_EDITOR=true
+so Git's noninteractive editor choice matches the recorded ngit hook
+environment. These corrections preserve all nine criteria.
+
+* S1 Checked reference updates
+
+** S1.1 A pre-commit hook moving HEAD cannot be overwritten by a stale commit
+#+TIMEOUT: 180
+cmd: sh test/takeover-audit.sh stale-head
+
+** S1.2 A checked reference write rejects a stale old value
+#+TIMEOUT: 180
+cmd: sh test/takeover-audit.sh stale-ref
+
+** S1.3 Existing hook transaction workflows still match Git end to end
+#+TIMEOUT: 600
+cmd: GIT_EDITOR=true sh test/compare.sh hooks
+cmd: sh test/compare.sh branch-modify
+cmd: sh test/compare.sh remote
+
+* S2 Transport subprocess status
+
+** S2.1 A complete SSH advertisement preserves Git's successful ls-remote status
+#+TIMEOUT: 180
+cmd: sh test/takeover-audit.sh ssh-exit
+
+** S2.2 Clone, object-fetch and push reject subprocess failure; no-op fetch matches Git
+#+TIMEOUT: 300
+cmd: sh test/takeover-audit.sh ssh-write-exit
+
+** S2.3 Existing SSH clone, fetch and push workflows still match Git end to end
+#+TIMEOUT: 600
+cmd: sh test/compare.sh ssh
+
+* S3 Push report validation
+
+** S3.1 A receiver omitting per-ref results cannot produce a successful push
+#+TIMEOUT: 180
+cmd: sh test/takeover-audit.sh push-missing-report
+
+** S3.2 Incomplete or invalid reports cannot publish local tracking updates
+#+TIMEOUT: 180
+cmd: sh test/takeover-audit.sh push-invalid-report
+
+** S3.3 Existing push workflows still match Git end to end
+#+TIMEOUT: 600
+cmd: sh test/compare.sh push

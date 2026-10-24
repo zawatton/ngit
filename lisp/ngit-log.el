@@ -1227,9 +1227,19 @@ oneline) for commit C, as git's pretty_print_commit."
   (setq ngit--rv-repo repo)
   (ngit--parse one)
   (dolist (c twos) (ngit--parse c))
-  (if (memq one twos)
-      (list one)
-    (let* ((list (ngit--paint-down-to-common one twos))
+  (cond
+   ((or (null twos) (memq one twos)) (list one))
+   ;; A direct parent or a shared sole parent is already the unique best
+   ;; base, even when commit timestamps run backwards.  Date queues would
+   ;; otherwise visit a large older history before processing the other tip.
+   ((and (null (cdr twos)) (memq one (ngit--c-parents (car twos)))) (list one))
+   ((and (null (cdr twos)) (memq (car twos) (ngit--c-parents one))) (list (car twos)))
+   ((and (null (cdr twos)) (ngit--c-parents one)
+         (null (cdr (ngit--c-parents one)))
+         (null (cdr (ngit--c-parents (car twos))))
+         (eq (car (ngit--c-parents one)) (car (ngit--c-parents (car twos)))))
+    (list (ngit--parse (car (ngit--c-parents one)))))
+   (t (let* ((list (ngit--paint-down-to-common one twos))
            (result nil))
       (dolist (c list)
         (unless (ngit--has c ngit-stale)
@@ -1241,7 +1251,7 @@ oneline) for commit C, as git's pretty_print_commit."
         (let ((out nil))
           (dolist (c (ngit--remove-redundant result))
             (setq out (ngit--insert-by-date c out)))
-          out)))))
+          out))))))
 
 ;;;; Revision arguments
 

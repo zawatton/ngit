@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; git commit with -m/-F messages (no editor, no hooks, no signing).
+;; git commit with -m/-F messages (no editor and no signing).
 ;; The sequence follows builtin/commit.c: refresh the index (and stage
 ;; tracked changes for -a), update the cache tree, write the index
 ;; (through index.lock for -a, committed only on success), write
@@ -19,6 +19,71 @@
 (require 'ngit-status)
 (require 'ngit-xdiff)
 (require 'ngit-diff)
+
+(defun ngit-commit-author-env (author)
+  "Return the GIT_AUTHOR_* environment represented by AUTHOR."
+  (let (env)
+    (when author
+      (let* ((open (string-search " <" author))
+             (close (and open (string-search "> " author (+ open 2)))))
+        (when close
+          (setq env (list (concat "GIT_AUTHOR_NAME=" (substring author 0 open))
+                          (concat "GIT_AUTHOR_EMAIL=" (substring author (+ open 2) close))
+                          (concat "GIT_AUTHOR_DATE=@" (substring author (+ close 2))))))))
+    env))
+
+(defun ngit-commit-hook-env (index-file author &optional reflog-action)
+  "Return Git's commit-hook environment for INDEX-FILE and AUTHOR."
+  (let ((env (append (list (concat "GIT_INDEX_FILE=" index-file) "GIT_EDITOR=:")
+                     (ngit-commit-author-env author))))
+    (when reflog-action
+      (setq env (append env (list (concat "GIT_REFLOG_ACTION=" reflog-action)))))
+    env))
+
+(defun ngit-hook-path-arg (repo path)
+  "Return PATH in the form Git passes to hooks from REPO's hook cwd."
+  (let* ((root (ngit-repo-toplevel repo))
+         (gitdir (directory-file-name (expand-file-name (ngit-repo-gitdir repo))))
+         (ordinary (and root
+                        (equal gitdir (directory-file-name
+                                       (expand-file-name ".git" root))))))
+    (if (and ordinary (file-name-absolute-p path))
+        (ngit--hook-relative-path path root)
+      path)))
+
+(defun ngit-commit-run-hook (repo name index-file author &optional args input reflog-action)
+  "Run commit hook NAME with Git's index, author and editor environment."
+  (if (not (ngit-hook-exists-p repo name)) 0
+    (when (and args (member name '("prepare-commit-msg" "commit-msg")))
+      (setq args (cons (ngit-hook-path-arg repo (car args)) (cdr args))))
+    (ngit-hook--run repo name args input
+                    (ngit-commit-hook-env
+                     (if (string-suffix-p ".lock" index-file)
+                         index-file
+                       (ngit-hook-path-arg repo index-file))
+                     author reflog-action))))
+
+(defun ngit-commit-read-hook-index (repo index-file)
+  "Read INDEX-FILE after a hook, without retaining it in REPO's cache."
+  (let ((saved (getenv "GIT_INDEX_FILE")) index)
+    (unwind-protect
+        (progn
+          (setenv "GIT_INDEX_FILE" index-file)
+          (aset repo 6 nil)
+          (setq index (ngit-read-index repo)))
+      (setenv "GIT_INDEX_FILE" saved)
+      (aset repo 6 nil))
+    index))
+
+(defun ngit-commit-clean-hook-message (repo data comments)
+  "Clean hook-written message DATA, removing comment lines when COMMENTS."
+  (ngit-stripspace
+   (if (not comments) data
+     (let ((prefix (or (ngit-config-get repo "core.commentchar") "#")))
+       (mapconcat #'identity
+                  (seq-remove (lambda (line) (string-prefix-p prefix line))
+                              (split-string data "\n"))
+                  "\n")))))
 
 ;;;; Time zones
 
@@ -270,16 +335,48 @@ ISO 8601 (\"YYYY-MM-DD[T ]HH:MM[:SS][ ][TZ]\")."
                     (ngit--reflog-message msg) "\n")
        nil t))))
 
-(defun ngit-update-head (repo new old ident msg)
-  "Point HEAD (or the branch it names) at NEW, logging MSG."
+(defun ngit-update-head (repo new old ident msg &optional check-unborn)
+  "Point HEAD (or the branch it names) at NEW, logging MSG.
+Check a non-nil OLD under lock.  CHECK-UNBORN also checks that a nil OLD
+still denotes an absent ref; otherwise a nil OLD is an unchecked update."
   (let* ((head (ngit-read-ref repo "HEAD"))
          (ref (if (and head (string-prefix-p "ref: " head)) (substring head 5) "HEAD"))
          (file (ngit--ref-file repo ref))
-         (lock (progn (ngit-make-directory (file-name-directory file) t) (ngit-lock file))))
-    (ngit-commit-lock lock (concat new "\n"))
-    (ngit--append-reflog repo ref old new ident msg)
-    (unless (string= ref "HEAD")
-      (ngit--append-reflog repo "HEAD" old new ident msg))
+         (lock (progn (ngit-make-directory (file-name-directory file) t) (ngit-lock file)))
+         input head-lock)
+    (unwind-protect
+        (progn
+          (unless (string= ref "HEAD")
+            (setq head-lock (ngit-lock (ngit--ref-file repo "HEAD"))))
+          ;; Check the expected value while both files are locked, before
+          ;; invoking the prepared transaction hook.  A prior hook may have
+          ;; moved the ref (including its packed value) since commit began.
+          (aset repo 4 nil)
+          (when (or old check-unborn)
+            (let ((current (ngit-resolve-ref repo ref)))
+              (unless (equal current old)
+                (ngit--die "fatal: cannot lock ref '%s': is at %s but expected %s"
+                           ref (or current (make-string 40 ?0))
+                           (or old (make-string 40 ?0))))))
+          (setq input
+                (ngit-ref-prepare
+                 repo (if (string= ref "HEAD") (list (list old new "HEAD"))
+                        (list (list nil new "HEAD") (list old new ref)))
+                 nil (delq nil (list lock head-lock))))
+          ;; The files backend neither rewrites nor logs a ref that
+          ;; already has the value; a symbolic HEAD still logs below.
+          (if (equal (ngit-read-ref repo ref) new)
+              (ngit-unlock lock)
+            (ngit-commit-lock lock (concat new "\n")))
+          (setq lock nil)
+          (unless (equal old new)
+            (ngit--append-reflog repo ref old new ident msg))
+          (unless (string= ref "HEAD")
+            (ngit--append-reflog repo "HEAD" old new ident msg))
+          (when head-lock (ngit-unlock head-lock) (setq head-lock nil))
+          (ngit-ref-finish repo input))
+      (when lock (ngit-unlock lock))
+      (when head-lock (ngit-unlock head-lock)))
     ref))
 
 ;;;; Summary
@@ -455,9 +552,66 @@ an entry was replaced."
 (defun ngit--commit-tree-of (repo hex)
   (ngit-unhex (ngit-peel repo hex 'tree)))
 
+(defun ngit--commit-check-unmerged (repo entries)
+  "Refuse a commit of unmerged ENTRIES with git's refresh diagnostics."
+  (let ((i 0) (n (length entries)) (unmerged nil))
+    (while (< i n)
+      (let ((e (aref entries i)))
+        (if (= (aref e 3) 0)
+            (setq i (1+ i))
+          (setq unmerged t)
+          (ngit--emit "U\t" (aref e 0) "\n")
+          (setq i (car (ngit-index-group entries i))))))
+    (when unmerged
+      (ngit--die
+       (concat "error: Committing is not possible because you have unmerged files.\n"
+               (if (ngit-config-bool repo "advice.resolveConflict" t)
+                   "hint: Fix them up in the work tree, and then use 'git add/rm <file>'\nhint: as appropriate to mark resolution and make a commit.\n"
+                 "")
+               "fatal: Exiting because of an unresolved conflict.")))))
+
+(defun ngit-commit-clear-merge-state (repo)
+  "Remove state files consumed by a completed or aborted merge."
+  (dolist (name '("CHERRY_PICK_HEAD" "REVERT_HEAD"))
+    (when (ngit-read-ref repo name) (ngit-ref-delete-state repo name)))
+  (ngit-ref-delete-state repo "AUTO_MERGE")
+  (dolist (name '("MERGE_HEAD" "MERGE_MSG" "MERGE_MODE" "MERGE_RR"
+                  "SQUASH_MSG"))
+    (let ((path (expand-file-name name (ngit-repo-gitdir repo))))
+      (when (file-exists-p path) (delete-file path)))))
+
+(defun ngit--commit-merge-editor (repo message)
+  "Return (CLEANED . TEMPLATE) for a merge using an unchanged editor."
+  (let* ((comment (or (ngit-config-get repo "core.commentchar") "#"))
+         (clean nil) (ngit--out nil) (status nil))
+    (dolist (line (split-string message "\n"))
+      (unless (string-prefix-p comment line) (push line clean)))
+    (ngit--status-long repo (ngit-status-collect repo))
+    (dolist (line (split-string (apply #'concat (nreverse ngit--out)) "\n"))
+      (unless (or (string-prefix-p "  (" line)
+                  (string-prefix-p "no changes added" line))
+        (push (concat comment
+                      (if (or (string= line "") (= (aref line 0) ?\t)) "" " ")
+                      line "\n") status)))
+    ;; status has one empty split element after its final blank line.
+    (setq status (nreverse status))
+    (when (and status (equal (car (last status)) (concat comment "\n")))
+      (setq status (butlast status)))
+    (cons
+     (ngit-stripspace (mapconcat #'identity (nreverse clean) "\n"))
+     (concat message comment "\n"
+             comment " It looks like you may be committing a merge.\n"
+             comment " If this is not correct, please run\n"
+             comment "\tgit update-ref -d MERGE_HEAD\n"
+             comment " and try again.\n\n\n"
+             comment " Please enter the commit message for your changes. Lines starting\n"
+             comment " with '" comment "' will be ignored, and an empty message aborts the commit.\n"
+             comment "\n" (apply #'concat status)))))
+
 (defun ngit-cmd-commit (repo args)
   (let ((messages nil) (file nil) (all nil) (quiet nil) (allow-empty nil)
-        (allow-empty-message nil) (amend nil) (no-edit nil))
+        (allow-empty-message nil) (amend nil) (no-edit nil)
+        (no-verify nil) (no-post-rewrite nil) (reuse nil))
     (while args
       (let ((a (pop args)))
         (cond ((string= a "-m") (push (or (pop args) (ngit--die "error: switch `m' requires a value")) messages))
@@ -465,49 +619,95 @@ an entry was replaced."
               ((and (string-prefix-p "-m" a) (> (length a) 2)) (push (substring a 2) messages))
               ((string= a "-F") (setq file (pop args)))
               ((string-prefix-p "--file=" a) (setq file (substring a 7)))
+              ((string= a "-C") (setq reuse (or (pop args) (ngit--die "error: switch `C' requires a value"))))
+              ((string-prefix-p "--reuse-message=" a) (setq reuse (substring a 16)))
               ((member a '("-a" "--all")) (setq all t))
               ((member a '("-q" "--quiet")) (setq quiet t))
               ((string= a "--allow-empty") (setq allow-empty t))
               ((string= a "--allow-empty-message") (setq allow-empty-message t))
               ((string= a "--amend") (setq amend t))
               ((string= a "--no-edit") (setq no-edit t))
+              ((member a '("-n" "--no-verify")) (setq no-verify t))
+              ((string= a "--no-post-rewrite") (setq no-post-rewrite t))
               ((string-prefix-p "-am" a) (setq all t) (push (substring a 3) messages))
               (t (ngit--die "ngit: commit: unsupported argument %s" a)))))
-    (when (and messages file)
-      (ngit--die "fatal: options '-m' and '-F' cannot be used together"))
+    (when (> (+ (if messages 1 0) (if file 1 0) (if reuse 1 0)) 1)
+      (ngit--die "fatal: options '-m', '-F', and '-C' cannot be used together"))
+    (unless all
+      (when (aref (ngit-read-index repo) 9)
+        (ngit--commit-check-unmerged repo (ngit-index-entries repo))))
     (let* ((head (ngit-resolve-ref repo "HEAD"))
+           (pick-head (ngit-resolve-ref repo "CHERRY_PICK_HEAD"))
+           (revert-head (ngit-resolve-ref repo "REVERT_HEAD"))
+           (pick-parsed (and pick-head (ngit-parse-commit (cdr (ngit-read-object repo (ngit-unhex pick-head))))))
+           (reuse-hex (and reuse (ngit-peel repo (ngit-rev-parse repo reuse) 'commit)))
+           (reuse-data (and reuse-hex (cdr (ngit-read-object repo (ngit-unhex reuse-hex)))))
+           (reuse-parsed (and reuse-data (ngit-parse-commit reuse-data)))
+           (ngit-commit-replay-action (and pick-head "commit (cherry-pick)"))
+           (ngit-commit-replay-date (or pick-head reuse-parsed))
+           (merge-head (let ((path (expand-file-name "MERGE_HEAD" (ngit-repo-gitdir repo))))
+                         (and (file-exists-p path) (ngit--read-file path))))
            (head-data (and head (cdr (ngit-read-object repo (ngit-unhex head)))))
            (parsed (and head-data (ngit-parse-commit head-data)))
            (parents (cond ((not head) nil)
                           (amend (ngit-header-all parsed "parent"))
-                          (t (list head))))
+                          (t (cons head (and merge-head (split-string merge-head "\n" t))))))
            (message (cond (messages
                            (mapconcat (lambda (m) (if (string-suffix-p "\n" m) m (concat m "\n")))
                                       (reverse messages) "\n"))
                           (file (ngit--read-file (expand-file-name file)))
+                          (reuse-data (ngit--message-body reuse-data))
                           ((and amend head) (ngit--message-body head-data))
+                          ((or merge-head pick-head revert-head)
+                           (or (ngit--read-file (expand-file-name "MERGE_MSG" (ngit-repo-gitdir repo))) ""))
+                          (no-edit
+                           (let ((path (expand-file-name "SQUASH_MSG" (ngit-repo-gitdir repo))))
+                             (if (file-exists-p path) (ngit--read-file path)
+                               (ngit--die "ngit: no editor support; use -m or -F"))))
                           (t (ngit--die "ngit: no editor support; use -m or -F"))))
+           (edit-message nil)
+           (message-source (cond ((or messages file) "message")
+                                 (reuse-data "commit")
+                                 ((and amend head) "commit")
+                                 ((file-exists-p (expand-file-name "SQUASH_MSG" (ngit-repo-gitdir repo))) "squash")
+                                 ((or merge-head
+                                      (file-exists-p (expand-file-name "MERGE_MSG" (ngit-repo-gitdir repo)))) "merge")
+                                 ((or pick-head revert-head) "commit")
+                                 (t nil)))
+           (message-source-id (and (equal message-source "commit")
+                                   (cond (reuse reuse)
+                                         ((and amend head) "HEAD")
+                                         (pick-head "CHERRY_PICK_HEAD")
+                                         (revert-head "REVERT_HEAD"))))
            (message (ngit-stripspace (if (multibyte-string-p message)
                                          (encode-coding-string message 'utf-8)
                                        message))))
       (when (and amend (not head))
         (ngit--die "fatal: You have nothing to amend."))
+      (when (and amend merge-head)
+        (ngit--die "fatal: You are in the middle of a merge -- cannot amend."))
+      (when (and merge-head (not no-edit) (not messages) (not file))
+        (let ((edited (ngit--commit-merge-editor repo message)))
+          (setq message (car edited) edit-message (cdr edited))))
       (ignore no-edit)
       (let* ((index (ngit-read-index repo))
              (entries (copy-sequence (aref index 0)))
              (root (or (ngit-ct-root index) (ngit-ct-new)))
              (checked (make-hash-table :test 'eql))
              (index-file (ngit-index-file repo))
+             (message-file (expand-file-name "COMMIT_EDITMSG" (ngit-repo-gitdir repo)))
              (committer nil) (author nil)
              (lock nil))
         (when all
           (ngit-add-tracked repo index entries '("") root checked #'ignore nil)
-          (setq entries (vconcat (delq nil (append entries nil)))))
+          (setq entries (vconcat (delq nil (append entries nil))))
+          (ngit--commit-check-unmerged repo entries))
         (let* ((refreshed (ngit-refresh-entries repo index entries checked))
                (valid (ngit-ct-fully-valid-p root))
-               (tree (ngit-ct-update repo root entries))
                (bytes (and (or all refreshed (not valid))
-                           (ngit-index-bytes repo index entries root checked))))
+                           (progn
+                             (ngit-ct-update repo root entries)
+                             (ngit-index-bytes repo index entries root checked)))))
           (when bytes
             (setq lock (ngit-lock index-file))
             (ngit-write-file lock bytes)
@@ -515,18 +715,42 @@ an entry was replaced."
               (rename-file lock index-file t)
               (setq lock nil)))
           (aset repo 6 nil)
-          (ngit-write-file (expand-file-name "COMMIT_EDITMSG" (ngit-repo-gitdir repo)) message)
-          ;; git checks the identities here, after writing the tree and
-          ;; COMMIT_EDITMSG; a failure must not leave index.lock behind.
-          (setq committer (condition-case err (ngit-ident repo "COMMITTER")
-                            (error (when lock (ngit-unlock lock)) (signal (car err) (cdr err))))
-                author (if amend (ngit-header parsed "author")
+          ;; Git establishes the author environment before pre-commit.
+          (setq author (cond (amend (ngit-header parsed "author"))
+                             (reuse-parsed (ngit-header reuse-parsed "author"))
+                             (pick-parsed (ngit-header pick-parsed "author"))
+                             (t
                          (condition-case err (ngit-ident repo "AUTHOR")
-                           (error (when lock (ngit-unlock lock)) (signal (car err) (cdr err))))))
-          (let ((committable
-                 (if (null parents)
+                           (error (when lock (ngit-unlock lock)) (signal (car err) (cdr err)))))))
+          ;; determine_author_info exports these for every later hook, including
+          ;; reference-transaction hooks reached through the ref update.  Avoid
+          ;; rebuilding the process environment when no hook directory exists.
+          (when (aref (ngit--hook-root-info repo) 0)
+            (dolist (entry (ngit-commit-author-env author))
+              (let ((eq (string-search "=" entry)))
+                (ngit-hook-setenv (substring entry 0 eq) (substring entry (1+ eq))))))
+          (let* ((hook-index (or lock index-file))
+                 (pre-ran (and (not no-verify)
+                               (ngit-hook-exists-p repo "pre-commit"))))
+            (when (and pre-ran
+                       (/= (ngit-commit-run-hook repo "pre-commit" hook-index author) 0))
+              (when lock (ngit-unlock lock))
+              (ngit--die-with 1 ""))
+            (when pre-ran
+              (setq index (ngit-commit-read-hook-index repo hook-index)
+                    entries (aref index 0)
+                    root (or (ngit-ct-root index) (ngit-ct-new))
+                    checked (make-hash-table :test 'eql))))
+          (ngit-write-file message-file (or edit-message message))
+          ;; The strict committer check follows the message file.
+          (setq committer (condition-case err (ngit-ident repo "COMMITTER")
+                            (error (when lock (ngit-unlock lock)) (signal (car err) (cdr err)))))
+          (let* ((tree (ngit-ct-update repo root entries))
+                 (committable
+                 (if (cdr parents) t
+                  (if (null parents)
                      (seq-some (lambda (e) (not (memq 'ita (aref e 5)))) entries)
-                   (not (equal tree (ngit--commit-tree-of repo (car parents)))))))
+                   (not (equal tree (ngit--commit-tree-of repo (car parents))))))))
             (if (and (not committable) (not allow-empty))
                 (let ((saved (getenv "GIT_INDEX_FILE")))
                   (unwind-protect
@@ -536,6 +760,20 @@ an entry was replaced."
                     (setenv "GIT_INDEX_FILE" saved)
                     (when lock (ngit-unlock lock)))
                   1)
+              (progn
+                (when (/= (ngit-commit-run-hook
+                           repo "prepare-commit-msg" (or lock index-file) author
+                           (delq nil (list message-file message-source message-source-id))) 0)
+                  (when lock (ngit-unlock lock))
+                  (ngit--die-with 1 ""))
+                (when (and (not no-verify)
+                           (/= (ngit-commit-run-hook repo "commit-msg" (or lock index-file)
+                                                    author (list message-file)) 0))
+                  (when lock (ngit-unlock lock))
+                  (ngit--die-with 1 ""))
+                (setq message
+                      (ngit-commit-clean-hook-message
+                       repo (ngit--read-file message-file) (and edit-message t)))
               (if (and (string= message "") (not allow-empty-message))
                   (progn
                     (when lock (ngit-unlock lock))
@@ -543,12 +781,16 @@ an entry was replaced."
                     1)
                 (condition-case err
                     (ngit--finish-commit repo head parents tree message amend quiet lock
-                                         index-file committer author)
+                                         index-file committer author no-post-rewrite)
                   (error (when lock (ngit-unlock lock))
-                         (signal (car err) (cdr err))))))))))))
+                         (signal (car err) (cdr err)))))))))))))
+
+(defvar ngit-commit-replay-action nil)
+(defvar ngit-commit-replay-date nil)
 
 (defun ngit--finish-commit (repo head parents tree message amend quiet lock index-file
-                                   committer author)
+                                   committer author &optional no-post-rewrite no-post-commit
+                                   no-hook-author no-state-cleanup)
   (let* ((body (concat "tree " (ngit-hex tree) "\n"
                        (mapconcat (lambda (p) (concat "parent " p "\n")) parents "")
                        "author " author "\n"
@@ -557,11 +799,21 @@ an entry was replaced."
          (hex (ngit-hex (ngit-write-object repo "commit" body)))
          (first-line (substring message 0 (or (ngit--byte-pos message ?\n 0) (length message))))
          (ref (ngit-update-head repo hex head committer
-                                (concat (cond (amend "commit (amend)")
+                                (concat (or ngit-commit-replay-action
+                                            (cond (amend "commit (amend)")
                                               ((null head) "commit (initial)")
-                                              (t "commit"))
-                                        ": " first-line))))
+                                              ((cdr parents) "commit (merge)")
+                                              (t "commit")))
+                                        ": " first-line) t)))
     (when lock (rename-file lock index-file t))
+    (unless no-state-cleanup (ngit-commit-clear-merge-state repo))
+    (unless no-post-commit
+      (ngit-commit-run-hook repo "post-commit" index-file
+                            (unless no-hook-author author)))
+    (when (and amend (not no-post-rewrite))
+      (ngit-hook-run repo "post-rewrite" '("amend")
+                     (concat head " " hex "\n")
+                     (ngit-commit-author-env author)))
     (unless quiet
       (let ((a (ngit--split-ident author)) (c (ngit--split-ident committer)))
         (ngit--emit "[" (if (string-prefix-p "refs/heads/" ref) (substring ref 11)
@@ -571,9 +823,10 @@ an entry was replaced."
                     (decode-coding-string (ngit--subject message) 'utf-8) "\n")
         (unless (string= (car a) (car c))
           (ngit--emit " Author: " (decode-coding-string (car a) 'utf-8) "\n"))
-        (when amend
+        (when (or amend ngit-commit-replay-date)
           (ngit--emit " Date: " (ngit-format-date (nth 1 a) (nth 2 a)) "\n")))
-      (ngit--commit-diffstat repo (and parents (ngit--commit-tree-of repo (car parents))) tree))
+      (unless (cdr parents)
+        (ngit--commit-diffstat repo (and parents (ngit--commit-tree-of repo (car parents))) tree)))
     0))
 
 (provide 'ngit-commit)

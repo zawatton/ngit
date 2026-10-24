@@ -7,20 +7,32 @@
 #        log-walk, log-diff, log-path, log-graph, branch-list, branch-filter,
 #        branch-create, branch-modify, branch-upstream, reset-index, tag-list,
 #        tag-write, reset-hard, checkout, switch, worktree-overlay, show, modes,
-#        rm, mv, restore, stash-push, stash-apply)
+#        rm, mv, restore, stash-push, stash-apply, unmerged, merge-file,
+#        merge, cherry-pick, rebase, stash-merge, blame, grep, describe, pack-write,
+#        gc, fsck, patch, misc, bisect, hooks, hooks-extra, clone, fetch, push,
+#        remote, ssh)
 # Fixtures are rebuilt into $NGIT_FIXTURE_DIR (default: $TMPDIR/ngit-fixtures)
 # when missing.  The `real` and `real-diff` suites run against
 # $NGIT_REAL_REPO.  git must not refresh the index while comparing, or
 # stat-dirty entries would look clean to ngit afterwards.
+# NGIT_TEST_MATCH selects cases by a literal substring of setup/arguments;
+# no matching comparisons is a failure.  NGIT_TEST_TRACE shows case names,
+# and NGIT_TEST_KEEP_OUTPUT retains the comparison artifacts.
 set -u
+case $1 in
+  clone|fetch|push|remote|ssh) exec sh "$(dirname "$0")/transport.sh" "$1" ;;
+esac
 root=$(cd "$(dirname "$0")/.." && pwd)
 ngit="$root/bin/ngit"
+# Byte code makes ngit several times faster; without Emacs, sources run.
+sh "$root/tools/build-elc.sh" || :
 fx=${NGIT_FIXTURE_DIR:-${TMPDIR:-/tmp}/ngit-fixtures}
 # Rebuild every fixture when a builder script changes; each builder only
 # removes the repositories it creates.
 stamp=$(cat "$root"/test/make-fixture.sh "$root"/test/make-wt-fixture.sh \
-  "$root"/test/make-log-fixture.sh | cksum)
-if [ "$(cat "$fx/.ngit-stamp" 2>/dev/null)" != "$stamp" ]; then
+  "$root"/test/make-log-fixture.sh "$root"/test/make-unmerged-fixture.sh \
+  "$root"/test/make-merge-fixture.sh "$root"/test/make-inspect-fixture.sh | cksum)
+if [ "$1" != "merge-file" ] && [ "$(cat "$fx/.ngit-stamp" 2>/dev/null)" != "$stamp" ]; then
   mkdir -p "$fx"
   sh "$root/test/make-fixture.sh" "$fx" >/dev/null 2>&1 || {
     echo "fixture build failed"; exit 2; }
@@ -28,15 +40,37 @@ if [ "$(cat "$fx/.ngit-stamp" 2>/dev/null)" != "$stamp" ]; then
     echo "work tree fixture build failed"; exit 2; }
   sh "$root/test/make-log-fixture.sh" "$fx" >/dev/null 2>&1 || {
     echo "log fixture build failed"; exit 2; }
+  sh "$root/test/make-unmerged-fixture.sh" "$fx" >/dev/null 2>&1 || {
+    echo "unmerged fixture build failed"; exit 2; }
+  sh "$root/test/make-merge-fixture.sh" "$fx" >/dev/null 2>&1 || {
+    echo "merge fixture build failed"; exit 2; }
+  sh "$root/test/make-inspect-fixture.sh" "$fx" >/dev/null 2>&1 || {
+    echo "inspection fixture build failed"; exit 2; }
   echo "$stamp" >"$fx/.ngit-stamp"
 fi
 export GIT_OPTIONAL_LOCKS=0
 fail=0
+checks=0
 out=$(mktemp -d)
-trap 'rm -rf "$out"' EXIT
+cleanup() {
+  if [ -n "${NGIT_TEST_KEEP_OUTPUT:-}" ]; then
+    echo "Comparison artifacts: $out"
+  else
+    rm -rf "$out"
+  fi
+}
+trap cleanup EXIT
+
+selected() {
+  [ -n "${NGIT_TEST_MATCH:-}" ] || return 0
+  case "$*" in *"$NGIT_TEST_MATCH"*) return 0 ;; *) return 1 ;; esac
+}
 
 check() { # check REPO ARGS...
   repo=$1; shift
+  selected "$repo $*" || return 0
+  checks=$((checks + 1))
+  [ -z "${NGIT_TEST_TRACE:-}" ] || printf 'CHECK %s: %s\n' "$checks" "$*"
   git -C "$repo" "$@" >"$out/git" 2>/dev/null; gs=$?
   "$ngit" -C "$repo" "$@" >"$out/ngit" 2>"$out/err"; ns=$?
   if [ $gs -ne $ns ] || ! cmp -s "$out/git" "$out/ngit"; then
@@ -54,7 +88,7 @@ check() { # check REPO ARGS...
 export GIT_AUTHOR_NAME="Test Author" GIT_AUTHOR_EMAIL=test@example.com
 export GIT_COMMITTER_NAME="Test Author" GIT_COMMITTER_EMAIL=test@example.com
 export GIT_AUTHOR_DATE="1700600000 +0900" GIT_COMMITTER_DATE="1700600000 +0900"
-WENV= WREFS= WSTDERR= WTREE= WMODES= WAFTER_REFRESH=
+WENV= WREFS= WSTDERR= WTREE= WMODES= WAFTER_REFRESH= WSEQUENCE= WHOOKS=
 
 wstate() { # wstate DIR TAG
   d=$1 t=$2
@@ -137,17 +171,71 @@ PY
     fi
     if [ -n "$WREFS" ]; then
       for f in "$d/.git/config" "$d/.git/packed-refs" "$d/.git/ORIG_HEAD" \
-               "$d/.git/MERGE_HEAD" "$d/.git/MERGE_MSG" "$d/.git/CHERRY_PICK_HEAD"; do
+               "$d/.git/MERGE_HEAD" "$d/.git/MERGE_MSG" "$d/.git/MERGE_MODE" \
+               "$d/.git/SQUASH_MSG" "$d/.git/AUTO_MERGE" "$d/.git/CHERRY_PICK_HEAD" \
+               "$d/.git/REVERT_HEAD" "$d/.git/REBASE_HEAD"; do
         [ -f "$f" ] && { echo "== $f"; cat "$f"; }
+      done
+      for f in "$d"/.git/BISECT_*; do
+        [ ! -f "$f" ] || { echo "== $f"; cat "$f"; }
+      done
+      (cd "$d/.git" && find worktrees -print 2>/dev/null | sort)
+      (cd "$d/.git" && find sequencer rebase-merge rebase-apply worktrees -type f ! -name index 2>/dev/null | sort |
+        while IFS= read -r f; do echo "== $f"; cat "$f"; done)
+      for f in "$d"/.git/worktrees/*/index; do
+        if [ -f "$f" ]; then
+          echo "== ${f%/index}/index entries"
+          GIT_INDEX_FILE="$f" git -C "$d" ls-files -s
+        fi
       done
       (cd "$d/.git" && find refs -type f | sort)
       git -C "$d" for-each-ref
     fi
+    if [ -n "$WHOOKS" ]; then
+      echo '== hook log'
+      cat "$d/.git/hooks.log" 2>/dev/null || :
+      if [ -d "$d/.git/receiver.git" ]; then
+        echo '== receiver HEAD'
+        cat "$d/.git/receiver.git/HEAD" 2>/dev/null || :
+        echo '== receiver refs'
+        git --git-dir="$d/.git/receiver.git" for-each-ref \
+          --format='%(refname) %(objectname) %(symref)' | LC_ALL=C sort
+      fi
+    fi
   } >"$out/$t.state"
+}
+
+wcommand() {
+  hook_env=
+  if [ -n "$WHOOKS" ]; then
+    hook_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || hook_dir="$PWD/.git"
+    hook_env="NGIT_HOOK_LOG=$hook_dir/hooks.log"
+  fi
+  if [ -n "$WSEQUENCE" ]; then
+    # A sequence runs each command through the implementation under test.
+    # shellcheck disable=SC2086
+    env $WENV $hook_env NGIT_TEST_COMMAND="$1" sh -c \
+      'set -e; g() { "$NGIT_TEST_COMMAND" "$@"; }; '"$WSEQUENCE"
+  else
+    # shellcheck disable=SC2086
+    env $WENV $hook_env "$@"
+  fi
+}
+
+wgit() {
+  # Command-line config overrides are themselves visible to config --list.
+  if [ "${1:-}" = config ] || { [ -n "$WHOOKS" ] && [ "${1:-}" = gc ]; }; then
+    wcommand git "$@"
+  else
+    wcommand git -c gc.auto=0 "$@"
+  fi
 }
 
 wrun() { # wrun SRC SETUP ARGS...
   src=$1 setup=$2; shift 2
+  selected "$src $setup $*" || return 0
+  checks=$((checks + 1))
+  [ -z "${NGIT_TEST_TRACE:-}" ] || printf 'WRITE %s: %s\n' "$checks" "$*"
   w="$out/w"; rm -rf "$w"; cp -a "$src" "$w"
   (cd "$w" && eval "$setup") >/dev/null 2>&1 || { echo "SETUP FAILED: $setup"; fail=1; return; }
   rm -rf "$out/snap"
@@ -169,7 +257,7 @@ wrun() { # wrun SRC SETUP ARGS...
   # shellcheck disable=SC2086
   if [ -n "$WSTDERR" ]; then
     # shellcheck disable=SC2086
-    (cd "$w" && env $WENV git -c gc.auto=0 "$@") >"$out/git.stdout" 2>"$out/git.stderr"
+    (cd "$w" && wgit "$@") >"$out/git.stdout" 2>"$out/git.stderr"
     gs=$?
     {
       echo '== stdout'; cat "$out/git.stdout"
@@ -178,7 +266,7 @@ wrun() { # wrun SRC SETUP ARGS...
     } >"$out/git.out"
   else
     # shellcheck disable=SC2086
-    (cd "$w" && env $WENV git -c gc.auto=0 "$@") >"$out/git.out" 2>/dev/null
+    (cd "$w" && wgit "$@") >"$out/git.out" 2>/dev/null
     echo "exit $?" >>"$out/git.out"
   fi
   wstate "$w" git
@@ -194,7 +282,7 @@ wrun() { # wrun SRC SETUP ARGS...
   # shellcheck disable=SC2086
   if [ -n "$WSTDERR" ]; then
     # shellcheck disable=SC2086
-    (cd "$w" && env $WENV "$ngit" "$@") >"$out/ngit.stdout" 2>"$out/ngit.stderr"
+    (cd "$w" && wcommand "$ngit" "$@") >"$out/ngit.stdout" 2>"$out/ngit.stderr"
     ns=$?
     {
       echo '== stdout'; cat "$out/ngit.stdout"
@@ -203,7 +291,7 @@ wrun() { # wrun SRC SETUP ARGS...
     } >"$out/ngit.out"
   else
     # shellcheck disable=SC2086
-    (cd "$w" && env $WENV "$ngit" "$@") >"$out/ngit.out" 2>"$out/err"
+    (cd "$w" && wcommand "$ngit" "$@") >"$out/ngit.out" 2>"$out/err"
     echo "exit $?" >>"$out/ngit.out"
   fi
   wstate "$w" ngit
@@ -220,6 +308,12 @@ wrun() { # wrun SRC SETUP ARGS...
     fi
     [ ! -f "$out/err" ] || head -3 "$out/err"; fail=1
   fi
+}
+
+wsteps() { # wsteps SRC SETUP LABEL SCRIPT
+  WSEQUENCE=$4
+  wrun "$1" "$2" "$3"
+  WSEQUENCE=
 }
 
 checkout_fixture() {
@@ -276,6 +370,214 @@ batch_cat() { # cat every object of REPO with -t and -p in one ngit process
 }
 
 case $1 in
+  hooks|hooks-extra) . "$root/test/hooks-suite.sh" ;;
+  patch) . "$root/test/patch-suite.sh" ;;
+  misc) . "$root/test/misc-suite.sh"; . "$root/test/misc-audit-suite.sh" ;;
+  bisect) . "$root/test/bisect-suite.sh" ;;
+  pack-write|gc|fsck)
+    sh "$root/test/maintenance.sh" "$1" || fail=1 ;;
+  merge-file)
+    python3 "$root/test/merge-file-check.py" || fail=1
+    sh "$root/test/merge-fuzz.sh" 30 || fail=1 ;;
+  cherry-pick)
+    WTREE=1 WREFS=1 WSTDERR=1
+    export GIT_EDITOR=true
+    sh "$root/test/make-sequencer-fixture.sh" "$fx" sequencer-cherry-pick || exit 2
+    r=$fx/sequencer-cherry-pick
+    for options in '' '-x' '-n' '--no-commit'; do
+      wrun "$r" '' cherry-pick $options first
+      wrun "$r" '' cherry-pick $options base..side
+      if [ "$options" != '-x' ]; then wrun "$r" '' revert $options HEAD; fi
+    done
+    wrun "$r" '' cherry-pick first side
+    wrun "$r" 'git switch -q symlink-base' cherry-pick symlink-next
+    WAFTER_REFRESH='touch -d @1700000000 keep.txt'
+    wrun "$r" '' cherry-pick first
+    wrun "$r" '' revert HEAD
+    WAFTER_REFRESH=
+    wrun "$r" '' cherry-pick -m 1 merged
+    wrun "$r" '' cherry-pick -m 2 merged
+    wrun "$r" '' cherry-pick merged
+    wrun "$r" '' revert -m 1 merged
+    wrun "$r" 'git switch -q merged' revert -m 1 HEAD
+    wrun "$r" 'git switch -q merged' revert -m 2 HEAD
+    wrun "$r" 'git switch -q side' revert base..side
+    wrun "$r" 'git switch -q side' revert -n base..side
+    for action in cherry-pick revert; do
+      for control in --abort --skip --quit --continue; do
+        wrun "$r" '' "$action" "$control"
+        wsteps "$r" '' "$action range $control" \
+          "g $action base..side || [ \$? -eq 1 ]; g $action $control"
+      done
+    done
+    for prefix in '' '-x' '-n'; do
+      for control in --abort --skip --quit; do
+        wsteps "$r" '' "cherry-pick $prefix range $control" \
+          "g cherry-pick $prefix base..side || [ \$? -eq 1 ]; g cherry-pick $control"
+      done
+    done
+    wsteps "$r" '' 'resolved single pick' \
+      'g cherry-pick second || [ $? -eq 1 ]; printf "resolved\n" >text.txt; g add text.txt; g cherry-pick --continue'
+    wsteps "$r" '' 'resolved range pick' \
+      'g cherry-pick -x base..side || [ $? -eq 1 ]; printf "resolved\n" >text.txt; g add text.txt; g cherry-pick --continue'
+    wsteps "$r" '' 'single pick abort preserves unrelated changes' \
+      'printf "dirty\n" >>keep.txt; g cherry-pick second || [ $? -eq 1 ]; g cherry-pick --abort'
+    wsteps "$r" '' 'range abort preserves unrelated changes' \
+      'printf "dirty\n" >>keep.txt; g cherry-pick base..side || [ $? -eq 1 ]; g cherry-pick --abort'
+    wsteps "$r" '' 'manual commit and continue range' \
+      'g cherry-pick base..side || [ $? -eq 1 ]; printf "resolved\n" >text.txt; g add text.txt; g commit -m resolved; g cherry-pick --continue'
+    wsteps "$r" '' 'empty resolved pick' \
+      'g cherry-pick second || [ $? -eq 1 ]; g checkout HEAD -- text.txt; g cherry-pick --continue'
+    for action in cherry-pick revert; do
+      for control in --abort --skip --quit --continue; do
+        wsteps "$r" '' "$action single conflict $control" \
+          "g $action second || [ \$? -eq 1 ]; g $action $control"
+      done
+    done
+    revert_setup='git switch -q side; printf "later\n" >text.txt; git add text.txt; git commit -qm later'
+    for control in --abort --skip --quit; do
+      wsteps "$r" "$revert_setup" "revert range conflict $control" \
+        "g revert base..side || [ \$? -eq 1 ]; g revert $control"
+    done
+    wsteps "$r" "$revert_setup" 'resolved revert range' \
+      'g revert base..side || [ $? -eq 1 ]; printf "resolved\n" >text.txt; g add text.txt; g revert --continue'
+    ;;
+  rebase)
+    WTREE=1 WREFS=1 WSTDERR=1
+    export GIT_EDITOR=true
+    sh "$root/test/make-sequencer-fixture.sh" "$fx" sequencer-rebase || exit 2
+    r=$fx/sequencer-rebase
+    wrun "$r" '' rebase base
+    wrun "$r" '' rebase clean
+    wrun "$r" '' rebase side
+    wrun "$r" 'git switch -q topic' rebase clean
+    wrun "$r" '' rebase --onto clean base topic
+    wrun "$r" 'git switch -q topic' rebase applied
+    wrun "$r" 'git switch -qc behind base' rebase main
+    wrun "$r" 'git switch -q --detach topic' rebase clean
+    for control in --abort --skip --continue; do
+      wrun "$r" '' rebase "$control"
+      wsteps "$r" '' "rebase conflict $control" \
+        "g rebase side || [ \$? -eq 1 ]; g rebase $control"
+    done
+    wsteps "$r" '' 'resolved rebase' \
+      'g rebase side || [ $? -eq 1 ]; printf "resolved\n" >text.txt; g add text.txt; g rebase --continue'
+    wsteps "$r" 'git switch -q side' 'resolved rebase range' \
+      'g rebase main || [ $? -eq 1 ]; printf "resolved\n" >text.txt; g add text.txt; g rebase --continue'
+    wrun "$r" '' rebase --onto clean base side
+    wrun "$r" '' rebase --onto side base
+    wsteps "$r" '' 'abort rebase after branch moved' \
+      'g rebase side || [ $? -eq 1 ]; git branch -f main clean; g rebase --abort'
+    ;;
+  merge)
+    WTREE=1 WREFS=1 WSTDERR=1
+    WENV='GIT_MERGE_AUTOEDIT=no GIT_EDITOR=:'
+    ff=$fx/merge-ff clean=$fx/merge-clean conflicts=$fx/merge-conflicts
+    for options in '' '-q' '--ff' '--ff-only' '--stat' '-n' '--log' '--no-commit'; do
+      # shellcheck disable=SC2086
+      wrun "$ff" "" merge $options side
+    done
+    wrun "$ff" "" merge --no-ff side
+    wrun "$ff" "" merge --no-ff -m 'merge subject' -m 'merge body' side
+    wrun "$ff" "" merge --squash side
+    wrun "$ff" "" merge --squash --no-commit side
+    wrun "$ff" "" merge main
+    wrun "$clean" "" merge base
+    wrun "$clean" "" merge --ff-only side
+    for options in '' '-q' '--ff' '--no-ff' '--stat' '-n' '--log'; do
+      # shellcheck disable=SC2086
+      wrun "$clean" "" merge $options side
+    done
+    wrun "$clean" "" merge -m 'custom subject' -m 'custom body' side
+    wrun "$clean" "git branch -m topic" merge side
+    side=$(git -C "$clean" rev-parse side)
+    wrun "$clean" "" merge "$side"
+    wrun "$clean" "" merge "$(printf '%s' "$side" | cut -c1-9)"
+    wrun "$clean" "" merge --no-commit side
+    wrun "$clean" "" merge --squash side
+    wrun "$clean" "" merge --squash --no-ff side
+    wrun "$clean" "" merge --squash --commit side
+    wrun "$clean" "" merge --commit --squash side
+    wrun "$clean" "" merge --squash --ff-only side
+    wrun "$ff" "printf 'dirty\n' >> text.txt" merge side
+    wrun "$ff" "printf 'staged\n' >> text.txt; git add text.txt" merge side
+    wrun "$ff" "printf 'intent\n' > intent.txt; git add -N intent.txt" merge --no-ff side
+    wrun "$ff" "mkdir new-dir; printf 'untracked\n' > new-dir/leaf.txt" merge side
+    wrun "$ff" "mkdir new-dir; printf 'unrelated\n' > new-dir/unrelated.txt" merge side
+    wrun "$ff" "printf 'untracked file\n' > new-dir" merge side
+    wrun "$ff" "printf 'unrelated\n' >> keep.txt" merge side
+    wrun "$clean" "printf 'dirty\n' >> text.txt" merge side
+    wrun "$clean" "printf 'staged\n' >> keep.txt; git add keep.txt" merge side
+    wrun "$clean" "printf 'unrelated\n' >> keep.txt" merge side
+    wrun "$clean" "mkdir new-dir; printf 'untracked\n' > new-dir/leaf.txt" merge side
+    wrun "$clean" "mkdir new-dir; printf 'unrelated\n' > new-dir/unrelated.txt" merge side
+    wrun "$conflicts" "" merge side
+    wrun "$conflicts" "" merge -q side
+    wrun "$conflicts" "" merge --squash side
+    wrun "$fx/merge-mode" "" merge side
+    wrun "$fx/merge-df" "" merge side
+    wrun "$fx/merge-df" "mkdir collision~HEAD; printf 'keep\n' > collision~HEAD/keep; git add collision~HEAD; git commit -qm occupied-directory" merge side
+    wrun "$fx/merge-df-reverse" "" merge main
+    wrun "$fx/merge-criss-cross" "" merge side
+    wrun "$fx/merge-criss-cross" "" merge --no-commit side
+    wrun "$clean" "" merge --abort
+    wrun "$clean" "" merge --continue
+    wsteps "$conflicts" "" 'merge and abort' \
+      'g merge side || [ $? -eq 1 ]; g merge --abort'
+    wsteps "$conflicts" "printf 'unrelated\n' >> keep.txt" 'dirty merge and abort' \
+      'g merge side || [ $? -eq 1 ]; g merge --abort'
+    wsteps "$conflicts" "git switch -q side; git rm -q keep.txt; git commit -qm delete-keep; git switch -q main" 'abort protects recreated untracked file' \
+      'g merge side || [ $? -eq 1 ]; printf "precious\n" > keep.txt; g merge --abort'
+    wsteps "$clean" "" 'no-commit merge and abort' \
+      'g merge --no-commit side; g merge --abort'
+    wsteps "$conflicts" "" 'continue unresolved merge' \
+      'g merge side || [ $? -eq 1 ]; g merge --continue'
+    wsteps "$conflicts" "" 'resolve merge and commit' \
+      'g merge side || [ $? -eq 1 ]; printf "resolved\n" > content.txt; g add -A; g status; g commit -m resolved'
+    wsteps "$conflicts" "" 'resolve merge and commit --no-edit' \
+      'g merge side || [ $? -eq 1 ]; g add -A; g commit --no-edit'
+    wsteps "$conflicts" "" 'resolve merge and continue' \
+      'g merge side || [ $? -eq 1 ]; g add -A; g merge --continue'
+    wsteps "$clean" "" 'no-commit merge and commit' \
+      'g merge --no-commit side; g status; g commit --no-edit'
+    wsteps "$clean" "" 'squash merge and commit' \
+      'g merge --squash side; g commit --no-edit'
+    WTREE= WREFS= WSTDERR= WENV= ;;
+  stash-merge)
+    WTREE=1 WREFS=1 WSTDERR=1
+    r=$fx/stash-merge
+    saved="sed 's/^two$/saved two/' text.txt > tmp; mv tmp text.txt; git stash push -qm saved"
+    clean="$saved; sed 's/^eleven$/upstream eleven/' text.txt > tmp; mv tmp text.txt; git add text.txt; git commit -qm upstream"
+    conflict="$saved; sed 's/^two$/upstream two/' text.txt > tmp; mv tmp text.txt; git add text.txt; git commit -qm upstream"
+    for command in apply pop; do
+      wrun "$r" "$clean" stash "$command"
+      wrun "$r" "$clean" stash "$command" --index
+      wrun "$r" "$clean" stash "$command" -q
+      wrun "$r" "$conflict" stash "$command"
+      wrun "$r" "$conflict" stash "$command" --index
+      wrun "$r" "$conflict" stash "$command" -q
+    done
+    # A staged saved change and a disjoint upstream change exercise restoring
+    # the saved index separately from merging the work tree.
+    staged="sed 's/^two$/saved two/' text.txt > tmp; mv tmp text.txt; git add text.txt; sed 's/^four$/saved four/' text.txt > tmp; mv tmp text.txt; git stash push -qm saved; sed 's/^eleven$/upstream eleven/' text.txt > tmp; mv tmp text.txt; git add text.txt; git commit -qm upstream"
+    wrun "$r" "$staged" stash apply
+    wrun "$r" "$staged" stash apply --index
+    repeated="printf 'a\nb\nc\nX\nd\ne\nf\na\nb\nc\nX\nd\ne\nf\ntail\n' > text.txt; git add text.txt; git commit -qm repeated; sed '11s/^X$/Y/' text.txt > tmp; mv tmp text.txt; git add text.txt; git stash push -qm repeated; sed 's/^tail$/new tail/' text.txt > tmp; mv tmp text.txt; git add text.txt; git commit -qm upstream"
+    wrun "$r" "$repeated" stash apply --index
+    wrun "$r" "$repeated" stash pop --index
+    wrun "$r" "$saved; printf 'unrelated\n' >> keep.txt" stash apply
+    wrun "$r" "$clean; printf 'dirty\n' >> text.txt" stash apply
+    wrun "$r" "printf 'saved\000binary\n' > binary.bin; git stash push -qm saved; printf 'upstream\000binary\n' > binary.bin; git add binary.bin; git commit -qm upstream" stash apply
+    wrun "$r" "printf 'saved\r\ncommon\r\nlast\r\n' > crlf.txt; git stash push -qm saved; printf 'upstream\r\ncommon\r\nlast\r\n' > crlf.txt; git add crlf.txt; git commit -qm upstream" stash apply
+    wrun "$r" "printf 'saved\n' > delete.txt; git stash push -qm saved; git rm -q delete.txt; git commit -qm upstream" stash apply
+    wrun "$r" "git rm -q delete.txt; git stash push -qm saved; printf 'upstream\n' > delete.txt; git add delete.txt; git commit -qm upstream" stash apply
+    wrun "$r" "printf 'saved\n' > mode.txt; git stash push -qm saved; chmod +x mode.txt; git add mode.txt; git commit -qm executable" stash apply
+    wrun "$r" "printf 'saved\n' > mode.txt; git stash push -qm saved; rm mode.txt; ln -s target mode.txt; git add mode.txt; git commit -qm symlink" stash apply
+    wrun "$r" "printf 'saved file\n' > collision; git add collision; git stash push -qm saved; mkdir collision; printf 'upstream leaf\n' > collision/leaf; git add collision; git commit -qm directory" stash apply
+    wrun "$r" "mkdir collision; printf 'saved leaf\n' > collision/leaf; git add collision; git stash push -qm saved; printf 'upstream file\n' > collision; git add collision; git commit -qm file" stash apply
+    wsteps "$r" "$conflict" 'stash pop retains conflicts' \
+      'g stash pop || [ $? -eq 1 ]; g stash list; g ls-files -u; g status -s'
+    WTREE= WREFS= WSTDERR= ;;
   modes)
     for mask in 002 022; do
       (
@@ -370,6 +672,56 @@ case $1 in
       check "$r" ls-files
       check "$r" ls-files -s
     done ;;
+  unmerged)
+    WREFS=1 WSTDERR=1 WTREE=1
+    for r in "$fx/unmerged-v2" "$fx/unmerged-resolved"; do
+      check "$r" ls-files
+      check "$r" ls-files -s
+      check "$r" ls-files -u
+      check "$r" ls-files --unmerged
+      check "$r" status
+      check "$r" status -s
+      check "$r" status --porcelain
+      check "$r" diff
+      check "$r" diff --cached
+      check "$r" diff HEAD
+      check "$r" diff --name-status
+      check "$r" diff --cached --name-status
+      check "$r" diff --name-only
+      check "$r" diff --cached --name-only
+      check "$r" diff -U0
+      check "$r" diff -U1
+      check "$r" diff --cached -U0
+      check "$r" diff --cached -U1
+    done
+    # Exercise the other index encodings without multiplying the expensive
+    # combined-diff matrix.
+    check "$fx/unmerged-v3" ls-files -s
+    check "$fx/unmerged-v4" ls-files -s
+    # Outside a merge, long status uses the generic conflict-resolution hint.
+    check "$fx/unmerged-no-merge" status
+    # Keep MERGE_HEAD after resolving every path: long status must report that
+    # the merge is still in progress even though no unmerged entries remain.
+    wrun "$fx/unmerged-v2" "git add -A" status
+
+    # The normalized WTREE comparison covers rejection without being sensitive
+    # to index encoding or stat data.
+    wrun "$fx/unmerged-v2" "" commit -m unresolved
+    wrun "$fx/unmerged-resolved" "" commit -m unresolved
+    wrun "$fx/unmerged-v2" "" write-tree
+    wrun "$fx/unmerged-resolved" "" write-tree
+
+    # Rewrites and a one-path resolution must preserve the actual index bytes,
+    # including versions 2, 3 and 4.  Disable WTREE normalization temporarily.
+    WTREE=
+    for r in "$fx/unmerged-v2" "$fx/unmerged-v3" "$fx/unmerged-v4"; do
+      wrun "$r" "" update-index --force-write-index
+      wrun "$r" "" add -v nested/uu.txt
+      wrun "$r" "" add -N nested/uu.txt
+      wrun "$r" "" add nested/reuc.txt
+    done
+    WTREE=1
+    WREFS= WSTDERR= WTREE= ;;
   attr-config)
     r=$fx/dirty
     for k in core.autocrlf core.filemode remote.origin.url branch.main.merge \
@@ -995,6 +1347,97 @@ case $1 in
     check "$h" log --pretty=fuller --date=iso -4
     check "$h" log --pretty=bogus
     check "$h" log --date=bogus ;;
+  blame)
+    h="$fx/hist" r="$fx/ren" i="$fx/inspect" c="$fx/show"
+    for p in src/main.c README.md doc/one.txt data.bin; do
+      check "$h" blame HEAD -- "$p"
+      check "$h" blame --porcelain HEAD -- "$p"
+    done
+    check "$h" blame README.md
+    check "$h" blame -s HEAD -- src/main.c
+    check "$h" blame -e HEAD -- src/main.c
+    check "$h" blame -L 5,15 -L 20,+3 HEAD -- src/main.c
+    check "$h" blame --porcelain -L 7,7 HEAD -- src/main.c
+    check "$h" blame v1.0 -- src/main.c
+    for p in b/numbers2.txt deep/dir/text.txt b/crlf.txt b/other.txt b/long.txt; do
+      check "$r" blame HEAD -- "$p"
+    done
+    check "$r" blame --porcelain HEAD -- deep/dir/text.txt
+    check "$i" blame HEAD -- renamed
+    check "$i" blame --porcelain HEAD -- renamed
+    check "$i" blame -w HEAD -- renamed
+    check "$i" blame -w --porcelain HEAD -- renamed
+    check "$i" blame -s -- dir/text
+    check "$i" blame -L '/beta/,+2' HEAD -- renamed
+    check "$i" blame -L 4,-2 HEAD -- renamed
+    check "$i" blame --abbrev=12 -e HEAD -- renamed
+    check "$c" blame cc-merge -- conflict.txt
+    check "$c" blame --porcelain cc-merge -- coalesce.txt
+    check "$c" blame cc-octopus -- conflict.txt
+    check "$h" blame HEAD -- missing ;;
+  grep)
+    h="$fx/hist" i="$fx/inspect"
+    check "$i" grep alpha
+    check "$i" grep -n -i alpha
+    check "$i" grep -w alpha
+    check "$i" grep -v alpha
+    check "$i" grep -l alpha
+    check "$i" grep -c alpha
+    check "$i" grep -n --cached alpha
+    check "$i" grep -n alpha HEAD
+    check "$i" grep -n alpha v1 HEAD
+    check "$i" grep -n alpha -- dir
+    check "$i" grep alpha HEAD -- 'dir/*'
+    check "$i" grep -e alpha --and -e beta
+    check "$i" grep -e alpha --or -e beta
+    check "$i" grep -e alpha --and --not -e beta
+    check "$i" grep '(' -e alpha --or -e beta ')' --and -e two
+    check "$i" grep -E '(alpha|beta) (one|two)'
+    check "$i" grep -F '(foo|bar)'
+    check "$i" grep 'foo+bar'
+    check "$i" grep 'foo\+bar'
+    check "$i" grep 'alpha\|beta'
+    check "$i" grep -E '[()]'
+    check "$i" grep -n '^$'
+    check "$i" grep -n 'last$'
+    check "$i" grep -n 'alpha[[:space:]]beta'
+    check "$i" grep -e alpha HEAD -- dir
+    check "$i" grep -n ''
+    check "$i" grep no-such-pattern
+    check "$i" grep alpha -- untracked
+    check "$h" grep -n '^[1-9][0-9]*$' HEAD -- src
+    check "$fx/loose" grep 日本語
+    check "$fx/loose" grep -ni 日本語
+    check "$fx/loose" grep -E '日本.*内容'
+    check "$fx/loose" grep 日本語 -- '日本語ディレクトリ' ;;
+  describe)
+    h="$fx/hist" t="$fx/tags" i="$fx/inspect"
+    for rev in HEAD HEAD~1 HEAD~6 topic docs c1 c2 old; do
+      check "$h" describe --always "$rev"
+      check "$h" describe --tags --long "$rev"
+      check "$h" name-rev "$rev"
+      check "$h" name-rev --name-only --tags "$rev"
+    done
+    check "$h" describe --long --abbrev=12 HEAD
+    check "$h" describe --tags --abbrev=0 HEAD~2
+    check "$h" describe --dirty
+    check "$i" describe --dirty
+    check "$i" describe --dirty=+changed
+    check "$t" describe --tags HEAD
+    check "$t" name-rev HEAD HEAD~1 v1.0 v1.0^0
+    check "$t" rev-list --objects --all
+    check "$h" shortlog HEAD
+    check "$h" shortlog -w HEAD
+    check "$h" shortlog -sne --all
+    check "$h" shortlog -sn
+    check "$h" rev-list --count
+    check "$h" shortlog -n v1.0..HEAD
+    check "$i" shortlog -e HEAD
+    for opts in '--count --all' '--all' '--parents HEAD' '--reverse --max-count=5 HEAD' \
+                '--count v1.0..HEAD' '--count c1...c2' '--objects HEAD' \
+                '--objects v1.0..HEAD' '--objects --all' '--objects --max-count=1 v1.0'; do
+      check "$h" rev-list $opts
+    done ;;
   log-walk)
     h="$fx/hist" w="$fx/work"
     for r in main topic c1 c2 v1.0 v2.0 light old mid docs tie; do
@@ -1391,4 +1834,19 @@ case $1 in
     WREFS= WSTDERR= ;;
   *) echo "unknown suite $1"; exit 2 ;;
 esac
+if [ "$checks" -eq 0 ]; then
+  if [ -n "${NGIT_TEST_MATCH:-}" ]; then
+    echo "No comparisons matched: $NGIT_TEST_MATCH"
+    fail=1
+  else
+    case $1 in
+      hooks|hooks-extra) echo "No comparisons selected for $1"; fail=1 ;;
+    esac
+  fi
+fi
+if [ "$fail" -eq 0 ]; then
+  echo "PASS $1: $checks comparisons"
+else
+  echo "FAIL $1: $checks comparisons"
+fi
 exit $fail

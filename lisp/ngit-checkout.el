@@ -507,7 +507,10 @@ On success, leave `ngit-wt--stat' holding ENTRY's lstat result."
            (format "Updated %d %s from %s\n" count
                    (if (= count 1) "path" "paths")
                    (if tree (ngit-abbrev repo source) "the index"))))
-        0))))
+        (let ((head (ngit-resolve-ref repo "HEAD")))
+          (ngit-hook-run repo "post-checkout"
+                         (list (or head (make-string 40 ?0))
+                               (or head (make-string 40 ?0)) "0")))))))
 
 (defun ngit-cmd-checkout (repo args)
   "Run checkout, loading branch switching only when this command needs it."

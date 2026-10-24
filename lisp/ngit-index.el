@@ -75,14 +75,15 @@ root) to (ENTRY-COUNT . BIN-OR-NIL)."
 
 (defun ngit-read-index (repo)
   "Return REPO's index as [ENTRIES RAW VERSION CACHE-TREE MTIME-S MTIME-NS
-NATIVE-ADDRESS TREE-RANGE], or an empty index when the file does not
-exist.  Cached in the repo.  TREE-RANGE is (POS . LEN) of the TREE
-extension data in RAW, or nil."
+NATIVE-ADDRESS TREE-RANGE RESOLVE-UNDO UNMERGED], or an empty index when
+the file does not exist.  Cached in the repo.  TREE-RANGE is (POS . LEN)
+of the TREE extension data in RAW, or nil.  RESOLVE-UNDO holds raw REUC
+data; UNMERGED lists the original stage 1-3 entries in index order."
   (or (aref repo 6)
       (aset repo 6
             (let ((file (ngit-index-file repo)))
               (if (not (file-exists-p file))
-                  (vector [] "" 2 nil 0 0 nil nil)
+                  (vector [] "" 2 nil 0 0 nil nil nil nil)
                 (let* ((size (file-attribute-size (file-attributes file)))
                        ;; The index stays in native memory too: its NUL-padded
                        ;; names serve directly as C paths for fstatat(2).
@@ -96,7 +97,7 @@ extension data in RAW, or nil."
                   (let* ((version (ngit--be32 raw 4))
                          (count (ngit--be32 raw 8))
                          (entries (make-vector count nil))
-                         (pos 12) (k 0) (prev "") (tree nil)
+                         (pos 12) (k 0) (prev "") (tree nil) (undo nil) (unmerged nil)
                          (end (- (length raw) 20)))
                     (unless (memq version '(2 3 4))
                       (error "fatal: index file has unsupported version %d" version))
@@ -123,6 +124,8 @@ extension data in RAW, or nil."
                                       (logior (ash (aref raw (+ pos 26)) 8) (aref raw (+ pos 27)))
                                       (logand (ash flags -12) 3)
                                       pos eflags))
+                        (when (/= 0 (logand flags #x3000))
+                          (push (aref entries k) unmerged))
                         (setq prev name pos next k (1+ k))))
                     (while (< (+ pos 8) end)
                       (let ((sig (substring raw pos (+ pos 4)))
@@ -130,23 +133,50 @@ extension data in RAW, or nil."
                         ;; Parsed on demand by `ngit-index-cache-tree'.
                         (when (string= sig "TREE")
                           (setq tree (cons (+ pos 8) len)))
+                        (when (string= sig "REUC")
+                          (setq undo (substring raw (+ pos 8) (+ pos 8 len))))
                         (setq pos (+ pos 8 len))))
                     (vector entries raw version tree (car mtime) (cdr mtime)
-                            (nl-ffi-memory-address native) tree))))))))
+                            (nl-ffi-memory-address native) tree undo
+                            (nreverse unmerged)))))))))
 
 (defun ngit-index-entries (repo) (aref (ngit-read-index repo) 0))
 
 (defun ngit-index-cache-tree (index)
   "Return INDEX's cache-tree table (see `ngit--parse-cache-tree'), or nil."
   (let ((tree (aref index 3)))
-    (if (consp tree)
+    ;; NeLisp hash tables also satisfy consp; only raw ranges need parsing.
+    (if (and (consp tree) (not (hash-table-p tree)))
         (aset index 3
               (let ((table (make-hash-table :test 'equal)))
                 (when (> (cdr tree) 0)
                   (ngit--parse-cache-tree (aref index 1) (car tree)
                                           (+ (car tree) (cdr tree)) table ""))
+                ;; Never trust a cache-tree node covering unmerged entries.
+                ;; Other subtrees retain their fast path.
+                (dolist (e (aref index 9))
+                  (let ((name (aref e 0)) (pos 0) (slash nil))
+                    (remhash "" table)
+                    (while (setq slash (ngit--byte-pos name ?/ pos))
+                      (remhash (substring name 0 (1+ slash)) table)
+                      (setq pos (1+ slash)))))
                 table))
       tree)))
+
+(defun ngit-index-group (entries pos)
+  "Return (NEXT . STAGES) for the unmerged path at POS in ENTRIES.
+STAGES is a four-slot vector indexed by stage, with nil for absent sides."
+  (let* ((name (aref (aref entries pos) 0))
+         (stages (make-vector 4 nil)) (n (length entries)))
+    (while (and (< pos n) (string= name (aref (aref entries pos) 0)))
+      (let ((e (aref entries pos))) (aset stages (aref e 3) e))
+      (setq pos (1+ pos)))
+    (cons pos stages)))
+
+(defun ngit-index-stage-mask (stages)
+  "Return git's three-bit presence mask for STAGES."
+  (logior (if (aref stages 1) 1 0) (if (aref stages 2) 2 0)
+          (if (aref stages 3) 4 0)))
 
 (defun ngit-index-stat (index entry)
   "Return the cached stat data of ENTRY as [CTIME MTIME MTIME-NS INO SIZE]."

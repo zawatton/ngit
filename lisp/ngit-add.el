@@ -59,7 +59,13 @@
            (bin (ngit-write-object repo "blob" (ngit-wt-content repo path st) dry-run)))
       (ngit-make-entry path bin mode block))))
 
-(defun ngit-add-tracked (repo index entries items root checked log dry-run)
+(defun ngit--intent-entry (repo path mode dry-run)
+  "Return an intent-to-add entry, creating the empty blob as git does."
+  (ngit-make-entry path (ngit-write-object repo "blob" "" dry-run) mode
+                   (concat (make-string 24 0) (ngit--be32-bytes mode) (make-string 12 0))
+                   '(ita)))
+
+(defun ngit-add-tracked (repo index entries items root checked log dry-run &optional intent)
   "Stage changes to the tracked ENTRIES (a vector, updated in place)
 covered by ITEMS: removed paths become nil, changed ones new entries.
 Invalidate ROOT along changed paths and put clean entries in CHECKED.
@@ -74,6 +80,14 @@ Return the list of items that matched an entry."
              (name (aref e 0))
              (covering (or all (ngit--matching-items items name))))
         (when (and covering (not (memq 'skip-worktree (aref e 5))))
+          (when (> (aref e 3) 0)
+            (let* ((group (ngit-index-group entries k)) (j (1+ k))
+                   (ours (aref (cdr group) 2)))
+              ;; Git prefers stage 2's mode, then 1, then 3.
+              (when ours (setq e ours))
+              (while (< j (car group))
+                (aset entries j nil)
+                (setq j (1+ j)))))
           (unless all
             (dolist (item covering)
               (unless (member item matched) (push item matched))))
@@ -91,11 +105,24 @@ Return the list of items that matched an entry."
               (aset entries k nil)
               (when root (ngit-ct-invalidate root name))
               (funcall log "remove" name))
+             ((and (> (aref e 3) 0) (= mode ngit-mode-gitlink)
+                   (= fmt ngit-s-ifdir) (null (ngit--gitlink-head repo name)))
+              (ngit--die "error: '%s' does not have a commit checked out\nfatal: updating files failed"
+                         name))
+             ((and intent (> (aref e 3) 0))
+              (let ((wmode (if (= fmt ngit-s-ifdir) ngit-mode-gitlink (ngit-wt-mode st))))
+                (when (and (not filemode) (= (logand wmode #o170000) #o100000)
+                           (= (logand mode #o170000) #o100000))
+                  (setq wmode mode))
+                (aset entries k (ngit--intent-entry repo name wmode dry-run)))
+              (when root (ngit-ct-invalidate root name))
+              (funcall log "add" name))
              ((and (= mode ngit-mode-gitlink) (= fmt ngit-s-ifdir))
               (let ((head (ngit--gitlink-head repo name)))
-                (if (or (null head) (equal head (aref e 1)))
+                (if (and (= (aref e 3) 0) (or (null head) (equal head (aref e 1))))
                     (puthash (aref e 4) t checked)
-                  (aset entries k (ngit-make-entry name head mode (ngit-wt-stat-block mode)))
+                  (aset entries k (ngit-make-entry name (or head (aref e 1)) mode
+                                                 (ngit-wt-stat-block mode)))
                   (when root (ngit-ct-invalidate root name))
                   (funcall log "add" name))))
              ((and (not (memq 'ita (aref e 5))) (= (aref e 3) 0)
@@ -111,9 +138,10 @@ Return the list of items that matched an entry."
                 (aset entries k new)
                 (when root (ngit-ct-invalidate root name))
                 (unless (and (equal (aref new 1) (aref e 1)) (= (aref new 2) mode)
-                             (not (memq 'ita (aref e 5))))
+                             (= (aref e 3) 0) (not (memq 'ita (aref e 5))))
                   (funcall log "add" name))))))))
-      (setq k (1+ k)))
+      (setq k (1+ k))
+      (while (and (< k n) (null (aref entries k))) (setq k (1+ k))))
     (if (and all (> n 0)) '("") matched)))
 
 (defun ngit--ignore-context (repo dir)
@@ -225,7 +253,7 @@ tree path nor an index entry, as git does."
                       (ngit--emit what " '" (ngit-quote-path path) "'\n"))))
              (ngit--no-excludes force)
              (_ (ngit--check-pathspecs repo items))
-             (matched (ngit-add-tracked repo index entries items root checked log dry-run))
+             (matched (ngit-add-tracked repo index entries items root checked log dry-run ita))
              (new-entries nil) (ignored nil))
         (unless update
           (let ((r (ngit-add-untracked repo items (ngit--tracked-set (aref index 0)))))
@@ -247,11 +275,7 @@ tree path nor an index entry, as git does."
                             new-entries))
                   ;; Intent-to-add entries carry no stat data but the mode.
                   (push (if ita
-                            (ngit-make-entry name (ngit-unhex "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391")
-                                             (ngit-wt-mode st)
-                                             (concat (make-string 24 0) (ngit--be32-bytes (ngit-wt-mode st))
-                                                     (make-string 12 0))
-                                             '(ita))
+                            (ngit--intent-entry repo name (ngit-wt-mode st) dry-run)
                           (ngit--new-entry repo name st filemode nil dry-run))
                         new-entries))
                 (when root (ngit-ct-invalidate root name))

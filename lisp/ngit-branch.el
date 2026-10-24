@@ -417,17 +417,54 @@ copy it with COPY; return the number of sections matched."
     (ignore ngit-native-write-stderr-orig)
     (ngit-ident repo "COMMITTER")))
 
-(defun ngit--write-ref (repo ref new old msg)
-  "Point REF at NEW (hex), logging MSG with OLD as the previous value."
+(defun ngit--write-worktree-head-symref (repo gitdir newref)
+  "Point the HEAD in GITDIR at NEWREF through a reference transaction."
+  (let ((view (copy-sequence repo)) lock input)
+    (aset view 0 (file-name-as-directory gitdir))
+    (setq lock (ngit-lock (ngit--ref-file view "HEAD")))
+    (unwind-protect
+        (progn
+          ;; Use the invoking repository for hook cwd/environment while the
+          ;; cloned view selects the linked worktree's private HEAD file.
+          (setq input
+                (ngit-ref-prepare repo
+                                  (list (list nil (concat "ref:" newref) "HEAD"))
+                                  nil (list lock)))
+          (ngit-commit-lock lock (concat "ref: " newref "\n"))
+          (setq lock nil)
+          (ngit-ref-finish repo input))
+      (when lock (ngit-unlock lock)))))
+
+(defun ngit--write-ref (repo ref new old msg &optional unchecked)
+  "Point REF at NEW (hex), logging MSG with OLD as the previous value.
+UNCHECKED corresponds to a NULL old OID in Git's reference transaction."
   (let* ((file (ngit--ref-file repo ref)))
     (ngit-make-directory (file-name-directory file) t)
-    (let ((lock (ngit-lock file)))
-      (ngit-commit-lock lock (concat new "\n")))
-    (when msg
-      (ngit--append-reflog repo ref old new (ngit--branch-ident repo) msg))
-    (aset repo 4 nil)))
+    (let ((lock (ngit-lock file)) input)
+      (unwind-protect
+          (progn
+            (unless unchecked
+              (aset repo 4 nil)
+              (let ((current (ngit-resolve-ref repo ref)))
+                (unless (equal current old)
+                  (ngit--die "fatal: cannot lock ref '%s': is at %s but expected %s"
+                             ref (or current (make-string 40 ?0))
+                             (or old (make-string 40 ?0))))))
+            (setq input (ngit-ref-prepare repo (list (list (unless unchecked old) new ref)) nil (list lock)))
+            ;; A ref that already has the value is not rewritten, so a
+            ;; packed ref stays packed.
+            (if (equal (ngit-read-ref repo ref) new)
+                (ngit-unlock lock)
+              (ngit-commit-lock lock (concat new "\n")))
+            (setq lock nil)
+            (when msg
+              (ngit--append-reflog repo ref old new (ngit--branch-ident repo) msg))
+            (aset repo 4 nil)
+            (ngit-ref-finish repo input))
+        (when lock (ngit-unlock lock))))
+    nil))
 
-(defun ngit--rewrite-packed-refs (repo drop)
+(defun ngit--rewrite-packed-refs (repo drop &optional held-lock)
   "Remove the refs in DROP from packed-refs (with their peeled lines)."
   (let ((file (expand-file-name "packed-refs" (ngit-repo-commondir repo))))
     (when (file-exists-p file)
@@ -442,7 +479,7 @@ copy it with COPY; return the number of sections matched."
             (setq skip-peel t changed t))
            (t (setq skip-peel nil) (push line out))))
         (when changed
-          (let ((lock (ngit-lock file)))
+          (let ((lock (or held-lock (ngit-lock file))))
             (ngit-commit-lock lock (mapconcat (lambda (l) (concat l "\n")) (nreverse out) ""))))
         (aset repo 4 nil)))))
 
@@ -455,19 +492,53 @@ copy it with COPY; return the number of sections matched."
       (delete-directory d)
       (setq d (directory-file-name (file-name-directory d))))))
 
-(defun ngit--delete-ref (repo ref)
-  "Delete REF: its loose file, packed entry and reflog."
+(defun ngit--delete-ref (repo ref &optional held-lock old-value head-old-value)
+  "Delete REF: its loose file, packed entry and reflog.
+HELD-LOCK, when non-nil, is an already-acquired lock for REF and is consumed.
+OLD-VALUE is reported to reference-transaction for rename-style deletion.
+HEAD-OLD-VALUE adds the dereferenced current HEAD deletion to that transaction."
   (let* ((common (ngit-repo-commondir repo))
          (file (ngit--ref-file repo ref))
-         (log (expand-file-name (concat "logs/" ref) common)))
-    (when (file-exists-p file)
-      (delete-file file)
-      (ngit--remove-empty-dirs (file-name-directory file) (expand-file-name "refs" common)))
-    (ngit--rewrite-packed-refs repo (list ref))
-    (when (file-exists-p log)
-      (delete-file log)
-      (ngit--remove-empty-dirs (file-name-directory log) (expand-file-name "logs/refs" common)))
-    (aset repo 4 nil)))
+         (log (expand-file-name (concat "logs/" ref) common))
+         (updates (append (list (list old-value nil ref))
+                          (and head-old-value
+                               (list (list head-old-value nil "HEAD")))))
+         (packed-updates (list (list nil nil ref)))
+         (packed (cdr (assoc ref (ngit--packed-refs repo))))
+         lock head-lock packed-lock packed-input input)
+    (ngit-make-directory (file-name-directory file) t)
+    (setq lock (or held-lock (ngit-lock file)))
+    (unwind-protect
+        (progn
+          (when head-old-value
+            (setq head-lock (ngit-lock (ngit--ref-file repo "HEAD"))))
+          (setq packed-lock (ngit-lock (expand-file-name "packed-refs" common)))
+          (let* ((outer-locks (append (list lock)
+                                      (and head-lock (list head-lock))))
+                 (all-locks (append outer-locks (list packed-lock))))
+            (when packed
+              (setq packed-input
+                    (ngit-ref-prepare repo packed-updates nil all-locks)))
+            (setq input (ngit-ref-prepare repo updates (not packed)
+                                          (if packed outer-locks all-locks)
+                                          (and packed-input (list packed-input))
+                                          packed-updates
+                                          (and packed (list packed-lock)))))
+          (ngit--rewrite-packed-refs repo (list ref) packed-lock)
+          (ngit-ref-finish repo packed-input)
+          (when (file-exists-p file) (delete-file file))
+          (when (file-exists-p log)
+            (delete-file log)
+            (ngit--remove-empty-dirs (file-name-directory log) (expand-file-name "logs/refs" common)))
+          (ngit-unlock lock)
+          (when head-lock (ngit-unlock head-lock))
+          (ngit-unlock packed-lock)
+          (ngit--remove-empty-dirs (file-name-directory file) (expand-file-name "refs" common))
+          (aset repo 4 nil)
+          (ngit-ref-finish repo input))
+      (ngit-unlock lock)
+      (when head-lock (ngit-unlock head-lock))
+      (when packed-lock (ngit-unlock packed-lock)))))
 
 ;;;; Reachability helpers
 
@@ -777,7 +848,7 @@ copy it with COPY; return the number of sections matched."
            (r (ngit--dwim-start repo start track)))
       (ngit--write-ref repo ref (car r) (and forcing exists)
                        (if forcing (concat "branch: Reset to " start)
-                         (concat "branch: Created from " start)))
+                         (concat "branch: Created from " start)) t)
       (when (and (cdr r) track (not (eq track 'none)))
         (ngit--setup-tracking repo name (cdr r) track quiet)))))
 
@@ -859,7 +930,9 @@ copy it with COPY; return the number of sections matched."
                  (newlog (expand-file-name (concat "logs/" newref) common))
                  (log-data (and (file-exists-p oldlog) (ngit--read-file oldlog)))
                  (log-mode (and log-data (not copy) (file-modes oldlog))))
-            (unless copy (ngit--delete-ref repo oldref))
+            (unless copy
+              (ngit--delete-ref repo oldref nil hex
+                                (and (equal head-ref oldref) hex)))
             ;; A rename deletes an existing target; a copy writes over it
             ;; (leaving any packed entry, as git does).
             (when (and (not copy) (not (string= old new)) (ngit-read-ref repo newref))
@@ -867,7 +940,9 @@ copy it with COPY; return the number of sections matched."
             (when log-data
               (ngit-make-directory (file-name-directory newlog) t)
               (ngit-write-file newlog log-data nil nil log-mode))
-            (ngit--write-ref repo newref hex hex msg)))
+            ;; The files backend copies the new ref without a transaction.
+            (let ((ngit-ref-inhibit-hooks t))
+              (ngit--write-ref repo newref hex hex msg t))))
         (when (and (not copy) is-head)
           ;; replace_each_worktree_head_symref
           (dolist (wt (ngit--worktrees repo))
@@ -876,18 +951,21 @@ copy it with COPY; return the number of sections matched."
                                           (file-name-as-directory (directory-file-name (file-name-directory (directory-file-name common)))))
                                  common
                                (ngit--worktree-gitdir repo (nth 0 wt))))
-                     (headfile (expand-file-name "HEAD" gitdir))
                      (hex (ngit-resolve-ref repo newref)))
-                (ngit-commit-lock (ngit-lock headfile) (concat "ref: " newref "\n"))
-                ;; Deleting the old ref logs HEAD going to zero; pointing
-                ;; HEAD at a different ref logs it coming back.
+                (ngit--write-worktree-head-symref repo gitdir newref)
+                ;; Deleting the old ref logs the current worktree's HEAD
+                ;; going to zero; pointing HEAD at a different ref logs it
+                ;; coming back in every worktree.
                 (when hex
                   (let ((log (expand-file-name "logs/HEAD" gitdir))
                         (ident (ngit--branch-ident repo))
                         (zero (make-string 40 ?0)))
                     (ngit-make-directory (file-name-directory log) t)
                     (ngit-write-file
-                     log (concat hex " " zero " " ident "\t" msg "\n"
+                     log (concat (if (string= (file-name-as-directory gitdir)
+                                              (file-name-as-directory (ngit-repo-gitdir repo)))
+                                     (concat hex " " zero " " ident "\t" msg "\n")
+                                   "")
                                  ;; Rewriting the ref HEAD names logs
                                  ;; HEAD as well; a new target logs
                                  ;; HEAD's switch from nothing.

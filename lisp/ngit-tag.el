@@ -271,7 +271,7 @@
           (when (or annotate given file)
             (ngit-native-write-stderr "The tag message has been left in .git/TAG_EDITMSG\n"))
           (ngit--die "fatal: cannot lock ref '%s': '%s' exists; cannot create '%s'" ref other ref))))
-    (unless (equal old hex) (ngit--write-ref repo ref hex old nil))
+    (ngit--write-ref repo ref hex old nil)
     (when (and old force (not (string= old hex)))
       (ngit--emit (format "Updated tag '%s' (was %s)\n" name
                           (ngit-abbrev repo old (ngit-default-abbrev repo)))))

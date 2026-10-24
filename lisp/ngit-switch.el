@@ -11,6 +11,9 @@
 
 (require 'ngit-checkout)
 (require 'ngit-reset)
+
+(defun ngit--switch-hook-oid (hex)
+  (or hex (make-string 40 ?0)))
 (require 'ngit-branch)
 (require 'ngit-commit)
 
@@ -39,22 +42,31 @@
 (defun ngit--switch-error-paths (command local untracked &optional removed dirs)
   (when local
     (ngit-native-write-stderr
-     (concat "error: Your local changes to the following files would be overwritten by checkout:\n"
+     (concat "error: Your local changes to the following files would be overwritten by "
+             (if (string= command "merge") "merge" "checkout") ":\n"
              (mapconcat (lambda (p) (concat "\t" p "\n"))
                         (sort (delete-dups local) #'string<) "")
-             "Please commit your changes or stash them before you switch branches.\n")))
+             (if (string= command "merge")
+                 "Please commit your changes or stash them before you merge.\n"
+               "Please commit your changes or stash them before you switch branches.\n"))))
   (when untracked
     (ngit-native-write-stderr
-     (concat "error: The following untracked working tree files would be overwritten by checkout:\n"
+     (concat "error: The following untracked working tree files would be overwritten by "
+             (if (string= command "merge") "merge" "checkout") ":\n"
              (mapconcat (lambda (p) (concat "\t" p "\n"))
                         (sort (delete-dups untracked) #'string<) "")
-             "Please move or remove them before you switch branches.\n")))
+             (if (string= command "merge")
+                 "Please move or remove them before you merge.\n"
+               "Please move or remove them before you switch branches.\n"))))
   (when removed
     (ngit-native-write-stderr
-     (concat "error: The following untracked working tree files would be removed by checkout:\n"
+     (concat "error: The following untracked working tree files would be removed by "
+             (if (string= command "merge") "merge" "checkout") ":\n"
              (mapconcat (lambda (p) (concat "\t" p "\n"))
                         (sort (delete-dups removed) #'string<) "")
-             "Please move or remove them before you switch branches.\n")))
+             (if (string= command "merge")
+                 "Please move or remove them before you merge.\n"
+               "Please move or remove them before you switch branches.\n"))))
   (when dirs
     (ngit-native-write-stderr
      (concat "error: Updating the following directories would lose untracked files in them:\n"
@@ -171,7 +183,9 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
           (removed nil)
           (all-untracked (and need-untracked
                               (if known-untracked (car known-untracked)
-                                (ngit-untracked repo)))))
+                                (if (string= command "merge")
+                                    (car (ngit-add-untracked repo '("") (ngit--tracked-set old)))
+                                  (ngit-untracked repo))))))
       (setq collisions (append df-blockers collisions))
       (dolist (one planned)
         (when (and all-untracked (eq (car one) 'write))
@@ -302,7 +316,7 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
 
 (defun ngit--switch-show-local (repo tree quiet &optional candidates)
   (unless quiet
-    (dolist (c (ngit--compose-tree-wt
+    (dolist (c (ngit--compose-tree-wt repo
                 (ngit-diff-tree-index repo tree)
                 (ngit-wt-changes
                  repo t nil
@@ -516,17 +530,22 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
                (or detach (and (plist-get opts :checkout) (null ref) (null new)
                                (not (string= start "HEAD"))))))))))
 
-(defun ngit--switch-write-head (repo ref hex old-hex msg)
+(defun ngit--switch-write-head (repo ref hex old-hex msg &optional expected)
   (let* ((file (ngit--ref-file repo "HEAD"))
-         (lock (ngit-lock file)))
-    (ngit-commit-lock lock (if ref (concat "ref: " ref "\n") (concat hex "\n")))
-    (ngit--append-reflog repo "HEAD" old-hex hex (ngit-ident repo "COMMITTER") msg)))
+         (lock (ngit-lock file)) input)
+    (unwind-protect
+        (progn
+          (setq input (ngit-ref-prepare repo (list (list expected (if ref (concat "ref:" ref) hex)
+                                                           "HEAD")) nil (list lock)))
+          (ngit-commit-lock lock (if ref (concat "ref: " ref "\n") (concat hex "\n")))
+          (setq lock nil)
+          (ngit--append-reflog repo "HEAD" old-hex hex (ngit-ident repo "COMMITTER") msg)
+          (ngit-ref-finish repo input))
+      (when lock (ngit-unlock lock)))))
 
 (defun ngit--switch-write-orphan-head (repo ref)
   "Point HEAD symbolically at unborn REF without adding a reflog record."
-  (let* ((file (ngit--ref-file repo "HEAD"))
-         (lock (ngit-lock file)))
-    (ngit-commit-lock lock (concat "ref: " ref "\n"))))
+  (ngit-ref-write repo "HEAD" (concat "ref: " ref)))
 
 (defun ngit--switch-detach-advice (name)
   (ngit-native-write-stderr
@@ -619,7 +638,7 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
         (let ((r (ngit--dwim-start repo start track))
               (previous (ngit-resolve-ref repo ref)))
           (ngit--write-ref repo ref (car r) previous
-                           (concat "branch: Reset to " start))
+                           (concat "branch: Reset to " start) t)
           (ngit--append-reflog repo "HEAD" previous (car r)
                                (ngit-ident repo "COMMITTER")
                                (concat "branch: Reset to " start))
@@ -650,7 +669,12 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
         (ngit--switch-write-orphan-head repo (concat "refs/heads/" name))
         (unless quiet
           (ngit-native-write-stderr (format "Switched to a new branch '%s'\n" name)))
-        (throw 'ngit-switch-done 0)))
+        (throw 'ngit-switch-done
+               (if (= (ngit-hook-run repo "post-checkout"
+                                     (list (ngit--switch-hook-oid old-hex)
+                                           (make-string 40 ?0) "1"))
+                      0)
+                   0 1))))
     (when (and (not checkout) (null (plist-get opts :pos))
                (null (plist-get opts :create))
                (null (plist-get opts :force-create))
@@ -730,7 +754,13 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
           (let ((info (ngit--switch-tracking-info
                        repo (if noop-head old-name display))))
             (when info (ngit--emit info)))))
-      0))))
+      (ngit-commit-clear-merge-state repo)
+      (ngit-ref-delete-state repo "AUTO_MERGE")
+      (if (= (ngit-hook-run repo "post-checkout"
+                            (list (ngit--switch-hook-oid old-hex)
+                                  (ngit--switch-hook-oid hex) "1"))
+             0)
+          0 1)))))
 
 (defun ngit-cmd-switch (repo args)
   (ngit--switch-run repo args nil))

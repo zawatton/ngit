@@ -4,11 +4,12 @@
 
 ;; The comparisons behind status and diff.  A change is a vector
 ;; [PATH STATUS OLD-MODE OLD-BIN NEW-MODE NEW-BIN EXTRA DATA OLD-PATH]:
-;; STATUS is one of ?A ?D ?M ?T ?R, modes are integers (0 when absent),
+;; STATUS is one of ?A ?D ?M ?T ?R ?U, modes are integers (0 when absent),
 ;; BIN 20-byte names (nil for an absent side), EXTRA a list of submodule
 ;; flags (`new-commits' `modified' `untracked') or `ita', DATA the new
 ;; side's content when it came from the work tree, OLD-PATH the rename
 ;; source.  Lists of changes are in git's path order.
+;; For ?U, EXTRA is the four-slot stage vector from `ngit-index-group'.
 ;;
 ;; HEAD versus index uses the index's cache-tree to skip unchanged
 ;; subtrees, as git's unpack_trees does; tree versus tree skips equal
@@ -115,6 +116,15 @@
   (when (ngit--index-live-p e)
     (funcall emit (ngit-change (aref e 0) ?A 0 nil (aref e 2) (aref e 1)))))
 
+(defun ngit--emit-index-next (entries i emit &optional old-mode old-bin)
+  "Emit the added or unmerged path at I; return the next entry position."
+  (let ((e (aref entries i)))
+    (if (= (aref e 3) 0)
+        (progn (ngit--emit-index-added e emit) (1+ i))
+      (let ((group (ngit-index-group entries i)))
+        (funcall emit (ngit-change (aref e 0) ?U (or old-mode 0) old-bin 0 nil (cdr group)))
+        (car group)))))
+
 (defun ngit--diff-tree-index (repo tree prefix entries lo hi cache-tree emit)
   (let ((ct (and cache-tree tree (gethash prefix cache-tree))))
     (unless (and ct (cdr ct) (= (car ct) (- hi lo)) (equal (cdr ct) tree))
@@ -125,8 +135,7 @@
                  (name (concat prefix (nth 1 te)))
                  (key (if isdir (concat name "/") name)))
             (while (and (< i hi) (string< (aref (aref entries i) 0) key))
-              (ngit--emit-index-added (aref entries i) emit)
-              (setq i (1+ i)))
+              (setq i (ngit--emit-index-next entries i emit)))
             (if isdir
                 (let ((sub-hi (min hi (ngit-index-find entries (concat name "0")))))
                   (if (> sub-hi i)
@@ -135,15 +144,18 @@
                     (ngit--emit-side repo te prefix ?D emit))
                   (setq i (max i sub-hi)))
               (let ((e (and (< i hi) (aref entries i))))
-                (if (and e (string= (aref e 0) key) (ngit--index-live-p e))
+                (cond
+                 ((and e (string= (aref e 0) key) (> (aref e 3) 0))
+                  (setq i (ngit--emit-index-next entries i emit (nth 0 te) (nth 2 te))))
+                 ((and e (string= (aref e 0) key) (ngit--index-live-p e))
                     (let ((c (ngit--pair key (nth 0 te) (nth 2 te) (aref e 2) (aref e 1))))
                       (when c (funcall emit c))
-                      (setq i (1+ i)))
+                      (setq i (1+ i))))
+                 (t
                   (when (and e (string= (aref e 0) key)) (setq i (1+ i)))
-                  (ngit--emit-side repo te prefix ?D emit))))))
+                  (ngit--emit-side repo te prefix ?D emit)))))))
         (while (< i hi)
-          (ngit--emit-index-added (aref entries i) emit)
-          (setq i (1+ i)))))))
+          (setq i (ngit--emit-index-next entries i emit)))))))
 
 ;;;; Index versus work tree
 
@@ -203,7 +215,20 @@ is a vector of entries still requiring comparison after a refresh."
       (let* ((e (aref entries k))
              (name (aref e 0))
              (mode (aref e 2)))
-        (when (and (= (aref e 3) 0) (not (memq 'skip-worktree (aref e 5))))
+        (if (> (aref e 3) 0)
+            (let* ((group (ngit-index-group entries k))
+                   (st (ngit-wt-lstat name))
+                   (wmode (if st (ngit-wt-mode st) 0))
+                   (data (and want-data st (/= wmode ngit-mode-tree)
+                              (/= wmode ngit-mode-gitlink) (ngit-wt-content repo name st))))
+              (when (= wmode ngit-mode-tree)
+                (setq wmode (if (= mode ngit-mode-gitlink) ngit-mode-gitlink 0)))
+              (when (and (not filemode) (= (logand wmode #o170000) #o100000)
+                         (= (logand mode #o170000) #o100000))
+                (setq wmode mode))
+              (push (ngit-change name ?U 0 nil wmode nil (cdr group) data) out)
+              (setq k (1- (car group))))
+          (when (not (memq 'skip-worktree (aref e 5)))
           (let ((st (if native
                         (let ((pos (aref e 4)))
                           (ngit-wt-lstat-at
@@ -243,7 +268,7 @@ is a vector of entries still requiring comparison after a refresh."
                       (push (ngit-change name
                                          (if (eq (ngit--type-class wmode) (ngit--type-class mode)) ?M ?T)
                                          mode (aref e 1) wmode bin nil (and want-data data))
-                            out)))))))))))
+                            out))))))))))))
       (setq k (1+ k)))
     (nreverse out)))
 
