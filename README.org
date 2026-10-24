@@ -51,8 +51,8 @@ bin/ngit [-C DIR] stash [push [-m MSG] [-k] [-u] [-q] [-- PATH...]]
 bin/ngit [-C DIR] stash (list | show [-p | --stat] | apply [--index] | pop | drop | clear) [STASH]
 bin/ngit [-C DIR] stash branch NAME [STASH]
 bin/ngit [-C DIR] ls-files [-s]
-bin/ngit [-C DIR] status [-s | --porcelain]
-bin/ngit [-C DIR] diff [--cached] [-U N] [--name-only | --name-status] [--no-renames] [REV [REV] | A..B]
+bin/ngit [-C DIR] status [-s | --porcelain] [--] [PATH...]
+bin/ngit [-C DIR] diff [--cached] [-U N] [--name-only | --name-status] [--no-renames] [REV [REV] | A..B] [-- PATH...]
 bin/ngit [-C DIR] config --get KEY
 bin/ngit [-C DIR] check-attr ATTR... -- PATH...
 bin/ngit [-C DIR] add [-v] [-n] [-f] [-N] [-A | -u] [--] [PATH...]
@@ -77,7 +77,7 @@ bin/ngit init [--bare] [-b BRANCH] [DIR]
 bin/ngit clone [--bare] [-b BRANCH] [--no-checkout] [--origin NAME] URL [DIR]
 bin/ngit [-C DIR] fetch [--prune] [--tags] [REMOTE [REFSPEC...]]
 bin/ngit [-C DIR] pull [--rebase] [REMOTE [REFSPEC]]
-bin/ngit [-C DIR] push [--delete] [--force] [--tags] [-u] [REMOTE [REFSPEC...]]
+bin/ngit [-C DIR] push [--delete] [--force | --force-with-lease[=REF[:EXPECT]]] [--atomic] [--tags] [-u] [REMOTE [REFSPEC...]]
 bin/ngit [-C DIR] remote [-v] | add | remove | rename | set-url | get-url
 bin/ngit ls-remote URL
 bin/ngit [-C DIR] blame [-L RANGE] [-s] [-e] [-w] [--porcelain] [REV] [--] FILE
@@ -102,6 +102,27 @@ runtime drops =-q=, =-Q=, =--batch= and =--no-init-file= even after =--=.
 =NGIT_NELISP_ROOT= the NeLisp checkout providing =packages/nl-ffi=
 (default: =../nelisp= next to this repository).
 
+Status, diff, add and restore accept literal paths relative to the invocation
+directory, including repeated =-C=. Human status paths follow
+=status.relativePaths=; porcelain status and default diff paths remain
+relative to the work-tree root. Diff path arguments require =--=.
+
+Push supports explicit and tracking-based =--force-with-lease= expectations
+and receive-pack =--atomic= negotiation over the existing local/file/SSH
+transports. As in the Git 2.47.3 comparison oracle, explicit =--force= or a
+forced refspec overrides a lease. =--atomic= fails if the peer does not
+advertise the capability.
+
+Clone, fetch and pull use a Linux/Python 3 process supervisor with an
+8192 MiB aggregate memory budget. Set =NGIT_MEMORY_BUDGET_MIB= to a positive
+integer to change it; setting it also enables supervision for other commands.
+The supervisor samples the process tree and its own PSS every 50 ms, using
+summed RSS as a conservative upper bound when PSS is unavailable. Exceeding
+the budget terminates the owned tree. Sampling permits allocation overshoot;
+this is not a hard allocation ceiling. Worker counts and received-pack caches
+also adapt to the budget. Ordinary commands keep their direct startup path
+when the variable is unset.
+
 * Design
 
 - =lisp/ngit-native.el= — file reads via =syscall-direct= into reusable
@@ -113,6 +134,8 @@ runtime drops =-q=, =-Q=, =--batch= and =--no-init-file= even after =--=.
 - =lisp/ngit-rev.el= — loose/packed/symbolic refs and gitrevisions subset.
 - =lisp/ngit-cli.el= — commands and git-compatible formatting (C-style path
   quoting, default date format, automatic abbreviation length).
+- =lisp/ngit-paths.el= — invocation-relative literal path selection and
+  human status display, keeping index/tree paths relative to the root.
 - =lisp/ngit-config.el= — system/global/repository config, last one wins.
 - =lisp/ngit-hook.el= — runs hooks from core.hooksPath or =$GIT_DIR/hooks=
   (loaded only when the hook exists): commit, merge, sequencer, checkout,
@@ -173,8 +196,9 @@ runtime drops =-q=, =-Q=, =--batch= and =--no-init-file= even after =--=.
   commit object, ref and reflog updates, the summary (shortstat, create/
   delete/rename/mode lines), local time zone from TZif files.
 - =lisp/ngit-merge-file.el= — byte-exact port of xdiff/xmerge.c and the
-  merge-file command.  =lisp/ngit-merge-tree.el= merges three trees (no
-  rename detection); =lisp/ngit-merge.el= runs merge and its state files;
+  merge-file command.  =lisp/ngit-merge-tree.el= merges three trees with
+  file rename reconciliation from =lisp/ngit-merge-rename.el=;
+  =lisp/ngit-merge.el= runs merge and its state files;
   =lisp/ngit-sequencer.el= replays commits for cherry-pick, revert and the
   merge backend of rebase.
 - =lisp/ngit-objects.el=, =lisp/ngit-pack.el=, =lisp/ngit-maint.el=,
@@ -187,6 +211,9 @@ runtime drops =-q=, =-Q=, =--batch= and =--no-init-file= even after =--=.
   =ngit-transport-delta.el= and =ngit-transport-kernel.el= (delta
   application compiled to native code once per process) and
   =ngit-transport-checkout.el= (parallel initial checkout).
+  =ngit-transport-memory.el= plans worker/cache allowances and
+  =tools/transport-memory.py= supervises owned descendants using Linux
+  subreaping and pidfd signals.
 - =lisp/ngit-blame.el=, =lisp/ngit-grep.el=, =lisp/ngit-describe.el= (with
   name-rev, shortlog and rev-list), =lisp/ngit-lines.el= (line scans).
 - =lisp/ngit-patch.el= (format-patch, apply, am), =lisp/ngit-clean.el=,
@@ -260,9 +287,10 @@ bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Note
 * Not supported yet
 
 HTTP(S) and git:// transports, shallow/partial/single-branch clones,
-template copying, atomic and force-with-lease pushes,
+template copying, =--force-if-includes= pushes,
 push.default=matching/nothing, multi-head pulls, submodules (beyond
-gitlink entries), rename detection in merges, octopus merges, custom merge
+gitlink entries), directory rename inference in merges, strategy-specific
+rename thresholds, octopus merges, custom merge
 drivers, interactive rebase (and its hooks), rerere, =--fix-thin=, git's delta search depth
 (new deltas are limited to 4 KiB targets and 32 KiB per run; pack
 compression defaults to level 1), blame -M/-C, grep -P, name-rev --all,
@@ -270,15 +298,15 @@ mailmap, binary patches and general MIME mail in am/apply.
 
 Alternates, multi-pack-index, reftable, split or sparse
 indexes, SHA-256 repositories, magic pathspecs (log takes literal and glob pathspecs), copy detection
-and inexact renames outside log (status, diff and commit summaries
+and inexact renames outside log and merge (status, diff and commit summaries
 detect exact renames only), commit
 signing, an editor for commit messages (use -m or -F), commit with
 paths, guessed identities (user.name and user.email or the GIT_*
 variables must be set), date formats other than raw and ISO 8601 in
 GIT_*_DATE, index.version for new indexes, =-uall=/ignored listings, include/includeIf in config,
-custom attribute macros and diff drivers, running from a subdirectory
-(paths are always printed relative to the top, not to the current
-directory), log's --follow, -L, -m/--cc (show has the default --cc), --simplify-merges,
+custom attribute macros and diff drivers, =diff --relative= and comprehensive
+subdirectory path handling outside status/diff/add/restore,
+log's --follow, -L, -m/--cc (show has the default --cc), --simplify-merges,
 --ancestry-path, --boundary, --left-right, notes, mailmap, %(trailers),
 %w(), padding and color placeholders, --date=relative/human and
 approximate dates (--since takes timestamps and ISO dates with a time),

@@ -804,11 +804,65 @@ An ordinary one-commit push need not traverse every historical tree twice."
                 (push link pending)))))))
     (nreverse out)))
 
+(defun ngit-tr--lease-ref-p (name ref)
+  "Match a lease NAME using Git's refname disambiguation rules."
+  (or (equal name ref) (equal (concat "refs/" name) ref)
+      (equal (concat "refs/tags/" name) ref)
+      (equal (concat "refs/heads/" name) ref)
+      (equal (concat "refs/remotes/" name) ref)
+      (equal (concat "refs/remotes/" name "/HEAD") ref)))
+
+(defun ngit-tr--lease-tracking (repo remote ref)
+  "Resolve REF through REMOTE's fetch mappings, or expect an absent ref.
+Missing tracking information must never authorize overwriting an existing ref."
+  (let (tracking)
+    (dolist (spec (ngit-tr--config-all repo (concat "remote." remote ".fetch")))
+      (let* ((p (ngit-tr--refspec spec)) (capture (ngit-tr--match (car p) ref)))
+        (when (and (not tracking) capture (nth 1 p))
+          (setq tracking (ngit-tr--expand (nth 1 p) capture)))))
+    (or (and tracking (ngit-resolve-ref repo tracking)) ngit-tr--zero)))
+
+(defun ngit-tr--push-validate (repo remote updates force leases lease-all)
+  "Validate all UPDATES before constructing or sending any commands.
+LEASES are ordered (REF . EXPECT) entries; `tracking' requests a fetch mapping.
+The first matching named lease wins, and explicit force overrides leases."
+  (dolist (update updates)
+    (let* ((new (aref update 2)) (old (aref update 3)) (dst (aref update 1))
+           (forced (or force (aref update 4)))
+           (lease (seq-find (lambda (entry) (ngit-tr--lease-ref-p (car entry) dst)) leases))
+           (leased (or lease lease-all))
+           (expect (if lease (cdr lease) 'tracking)))
+      (cond
+       ((equal old new) (aset update 5 'uptodate))
+       (forced nil)
+       (leased
+        (when (eq expect 'tracking) (setq expect (ngit-tr--lease-tracking repo remote dst)))
+        (unless (equal old expect) (aset update 5 "stale info")))
+       ((or (equal old ngit-tr--zero) (equal new ngit-tr--zero)) nil)
+       ((string-prefix-p "refs/tags/" dst) (aset update 5 "already exists"))
+       ((not (ngit-object-exists-p repo (ngit-unhex old))) (aset update 5 "fetch first"))
+       ((not (ngit-tr--ff-p repo old new)) (aset update 5 "non-fast-forward"))))))
+
 (defun ngit-cmd-push (repo args)
-  (let (remote specs force tags all delete upstream quiet verbose no-verify push-options)
+  (let (remote specs force tags all delete upstream quiet verbose no-verify push-options
+                atomic leases lease-all)
     (while args
       (let ((a (pop args)))
         (cond ((member a '("-f" "--force")) (setq force t))
+              ((equal a "--no-force") (setq force nil))
+              ((equal a "--atomic") (setq atomic t))
+              ((equal a "--no-atomic") (setq atomic nil))
+              ((equal a "--force-with-lease") (setq lease-all t))
+              ((equal a "--no-force-with-lease") (setq leases nil lease-all nil))
+              ((string-prefix-p "--force-with-lease=" a)
+               (let* ((value (substring a 19)) (colon (string-search ":" value))
+                      (name (if colon (substring value 0 colon) value))
+                      (expect (if colon (substring value (1+ colon)) 'tracking)))
+                 (when (stringp expect)
+                   (setq expect (if (equal expect "") ngit-tr--zero
+                                  (condition-case nil (ngit-rev-parse repo expect)
+                                    (error (ngit--die-with 129 "error: cannot parse expected object name '%s'" expect))))))
+                 (push (cons name expect) leases)))
               ((equal a "--tags") (setq tags t))
               ((equal a "--all") (setq all t))
               ((member a '("--delete" "-d")) (setq delete t))
@@ -848,40 +902,25 @@ An ordinary one-commit push need not traverse every historical tree twice."
                  (sideband (member "side-band-64k" caps))
                  (first t) wants haves (parts nil))
             (setq push-options (nreverse push-options))
+            (when (and atomic (not (member "atomic" caps)))
+              (ngit--die "fatal: the receiving end does not support --atomic push\nfatal: the remote end hung up unexpectedly"))
             (when (and push-options (not (member "push-options" caps)))
               (ngit--die "fatal: the receiving end does not support push options"))
             (setq updates (ngit-tr--push-map repo refs specs all tags delete))
             (dolist (update updates)
-              (let ((new (aref update 2)) (old (aref update 3))
-                    (dst (aref update 1)))
-                (cond
-                 ((and delete (equal old ngit-tr--zero))
+              (let ((old (aref update 3)) (dst (aref update 1)))
+                (when (and delete (equal old ngit-tr--zero))
                   (ngit--die-with 1 "error: unable to delete '%s': remote ref does not exist\nerror: failed to push some refs to '%s'"
-                                  (ngit-tr--short dst) url))
-                 ((equal old new) (aset update 5 'uptodate))
-                 ((or force (aref update 4) (equal old ngit-tr--zero) (equal new ngit-tr--zero)) nil)
-                 ((string-prefix-p "refs/tags/" dst) (aset update 5 "already exists"))
-                 ((not (ngit-object-exists-p repo (ngit-unhex old))) (aset update 5 "fetch first"))
-                 ((not (ngit-tr--ff-p repo old new)) (aset update 5 "non-fast-forward")))
-                (when (stringp (aref update 5)) (setq failed (or failed (aref update 5))))
-              (unless (aref update 5)
-                (setq sent t)
-                (push (ngit-tr--pkt
-                       (concat (aref update 3) " " (aref update 2) " " (aref update 1)
-                               (if first
-                                   (concat "\0report-status"
-                                           (if sideband " side-band-64k" "")
-                                           (if push-options " push-options" "")
-                                           (if (member "ofs-delta" caps) " ofs-delta" ""))
-                                 "") "\n")) parts)
-                (setq first nil)
-                (unless (equal (aref update 2) ngit-tr--zero) (push (aref update 2) wants)))))
+                                  (ngit-tr--short dst) url))))
+            (ngit-tr--push-validate repo remote updates force (nreverse leases) lease-all)
+            (dolist (update updates)
+              (when (stringp (aref update 5)) (setq failed (or failed (aref update 5)))))
             (when (and (not no-verify)
                        (ngit-hook-exists-p repo "pre-push"))
               (let (hook-lines)
                 (dolist (update updates)
                   (unless (or (eq (aref update 5) 'uptodate)
-                              (equal (aref update 5) "non-fast-forward"))
+                              (member (aref update 5) '("non-fast-forward" "stale info")))
                     (push (concat (if (equal (aref update 2) ngit-tr--zero)
                                       "(delete)" (aref update 0))
                                   " " (aref update 2) " " (aref update 1)
@@ -891,6 +930,30 @@ An ordinary one-commit push need not traverse every historical tree twice."
                                           (apply #'concat (nreverse hook-lines)) nil)
                            0)
                   (ngit--die-with 1 "error: failed to push some refs to '%s'" url))))
+            (when (and atomic failed)
+              (let* ((rejected (seq-find (lambda (u) (stringp (aref u 5))) updates))
+                     (status (cdr (assoc (aref rejected 5)
+                                         '(("non-fast-forward" . 2) ("already exists" . 3)
+                                           ("fetch first" . 5) ("stale info" . 7))))))
+                (ngit-native-write-stderr
+                 (format "error: atomic push failed for ref %s. status: %d\nfatal: the remote end hung up unexpectedly\n"
+                         (aref rejected 1) status)))
+              (dolist (update updates)
+                (unless (aref update 5) (aset update 5 "atomic push failed"))))
+            (dolist (update updates)
+              (unless (aref update 5)
+                (setq sent t)
+                (push (ngit-tr--pkt
+                       (concat (aref update 3) " " (aref update 2) " " (aref update 1)
+                               (if first
+                                   (concat "\0report-status"
+                                           (if sideband " side-band-64k" "")
+                                           (if atomic " atomic" "")
+                                           (if push-options " push-options" "")
+                                           (if (member "ofs-delta" caps) " ofs-delta" ""))
+                                 "") "\n")) parts)
+                (setq first nil)
+                (unless (equal (aref update 2) ngit-tr--zero) (push (aref update 2) wants))))
             (push "0000" parts)
             (when (and sent push-options)
               (dolist (option push-options)
@@ -961,7 +1024,8 @@ An ordinary one-commit push need not traverse every historical tree twice."
                  ((eq reason 'uptodate) (when verbose (setq code "=" summary "[up to date]")))
                  ((consp reason)
                   (setq code "!" summary "[remote rejected]" suffix (cdr reason)))
-                 (reason (setq code "!" summary "[rejected]" suffix reason))
+                 (reason (setq code "!" summary "[rejected]" suffix reason)
+                         (when (equal new ngit-tr--zero) (setq src "(delete)")))
                  ((equal new ngit-tr--zero) (setq code "-" summary "[deleted]" src ""))
                  ((equal old ngit-tr--zero) (setq code "*" summary (if (string-prefix-p "refs/tags/" (aref u 1)) "[new tag]" "[new branch]")))
                  ((ngit-tr--ff-p repo old new) (setq code " " summary (concat (ngit-abbrev repo old) ".." (ngit-abbrev repo new))))
@@ -979,7 +1043,7 @@ An ordinary one-commit push need not traverse every historical tree twice."
                              (string-prefix-p "refs/heads/" (aref u 0))
                              (string-prefix-p "refs/heads/" (aref u 1)))
                     (ngit--install-tracking repo (substring (aref u 0) 11) remote (aref u 1) quiet)))))
-            (unless quiet
+            (when (or (not quiet) failed)
               (if rows
                   (progn
                     (ngit-native-write-stderr (concat "To " url "\n"))
@@ -991,7 +1055,13 @@ An ordinary one-commit push need not traverse every historical tree twice."
                                           (length (ngit-abbrev repo (aref update 2)))
                                           (length (ngit-abbrev repo (aref update 3))))))
                       (setq width (+ (* 2 abbrev) 3))
-                      (dolist (row (nreverse rows))
+                      ;; Git prints up-to-date refs, successful updates, then
+                      ;; rejected updates, preserving ref order within each.
+                      (setq rows (nreverse rows))
+                      (dolist (row (append
+                                    (seq-filter (lambda (r) (equal (car r) "=")) rows)
+                                    (seq-filter (lambda (r) (not (member (car r) '("=" "!")))) rows)
+                                    (seq-filter (lambda (r) (equal (car r) "!")) rows)))
                         (ngit-native-write-stderr
                          (concat " " (car row) " " (ngit--pad-to (nth 1 row) width) " "
                                  (if (equal (car row) "-") (nth 3 row)
@@ -1000,7 +1070,7 @@ An ordinary one-commit push need not traverse every historical tree twice."
                 (ngit-native-write-stderr "Everything up-to-date\n")))
             (when failed
               (ngit-native-write-stderr (concat "error: failed to push some refs to '" url "'\n"))
-              (when (and (stringp failed)
+              (when (and (member failed '("fetch first" "already exists" "non-fast-forward"))
                          (ngit-config-bool repo "advice.pushUpdateRejected" t))
                 (ngit-native-write-stderr (ngit-tr--push-hint failed))))
             (if failed 1 0))

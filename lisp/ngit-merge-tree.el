@@ -1,4 +1,4 @@
-;;; ngit-merge-tree.el --- Three-tree merges without rename detection -*- lexical-binding: t; -*-
+;;; ngit-merge-tree.el --- Three-tree merges with file renames -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -11,8 +11,10 @@
 
 (require 'ngit-switch)
 (require 'ngit-merge-file)
+(require 'ngit-merge-rename)
 
 (defvar ngit-merge-ancestor-label "merged common ancestors")
+(defvar ngit-merge-marker-extra 0)
 
 (defun ngit-merge-tree-entries (repo tree)
   "Return sorted stage-zero entries of binary TREE, or an empty vector."
@@ -91,7 +93,7 @@
                  :marker-size (+ (if (and (stringp marker)
                                           (> (string-to-number marker) 0))
                                      (string-to-number marker) 7)
-                                 (* depth 2))))
+                                 (* depth 2) ngit-merge-marker-extra)))
           (setq bin (ngit-write-object repo "blob" (car merged)))
           (when (> (cdr merged) 0) (setq clean nil)))
         (push (concat "Auto-merging " path) messages)))
@@ -108,7 +110,11 @@ repository merely to replay a few unrelated paths."
   (let* ((left (ngit-diff-trees repo base-tree ours-tree))
          (right (ngit-diff-trees repo base-tree theirs-tree))
          (index (ngit-read-index repo))
-         (root (ngit-ct-root index)) (overlap nil))
+         (root (ngit-ct-root index))
+         ;; Filename nonoverlap does not prove independence: a deleted file
+         ;; on either side can acquire its new name on an unrelated path.
+         (overlap (and (ngit-merge-renames-p repo)
+                       (seq-some (lambda (c) (= (aref c 1) ?D)) (append left right)))))
     (when (and root (not (aref index 9))
                (not (seq-some (lambda (e) (memq 'ita (aref e 5))) (aref index 0)))
                (<= (length left) 64) (<= (length right) 64)
@@ -138,7 +144,7 @@ repository merely to replay a few unrelated paths."
 
 (defun ngit-merge--full (repo base-tree ours-tree theirs-tree ours-label theirs-label
                             &optional virtual)
-  "Merge three binary trees, without renames, returning a result plist.
+  "Merge three binary trees with file renames, returning a result plist.
 The :entries vector is a complete index, including stages 1-3 on conflicts.
 The :worktree vector contains stage-zero entries with conflict marker blobs.
 The :tree is the materialized tree, :conflicts is a sorted list of paths,
@@ -158,8 +164,8 @@ VIRTUAL is a positive recursive-ancestor depth, or nil for the real merge."
           (while (< i (length vector))
             (let* ((e (aref vector i)) (path (aref e 0)) (rec (gethash path table)))
               (unless rec
-                ;; [PATH BASE OURS THEIRS RESULT CONFLICT MESSAGES]
-                (setq rec (vector path nil nil nil nil nil nil))
+                ;; [PATH BASE OURS THEIRS RESULT CONFLICT MESSAGES DONE LABELS]
+                (setq rec (vector path nil nil nil nil nil nil nil nil))
                 (puthash path rec table)
                 (puthash path t names)
                 (let ((start 0) slash)
@@ -171,10 +177,15 @@ VIRTUAL is a positive recursive-ancestor depth, or nil for the real merge."
             (setq i (1+ i))))
         (setq side (1+ side))))
     (setq paths (sort paths #'string<))
+    (when (ngit-merge-renames-p repo)
+      (ngit-merge-rename-reconcile
+       repo table (ngit-merge-rename-map repo base-tree ours-tree)
+       (ngit-merge-rename-map repo base-tree theirs-tree) ours-label theirs-label depth))
     (dolist (path paths)
       (let* ((rec (gethash path table))
              (b (aref rec 1)) (o (aref rec 2)) (th (aref rec 3)))
         (cond
+         ((eq (aref rec 7) t) nil)
          ((ngit-merge--same o th) (aset rec 4 o))
          ((ngit-merge--same b o) (aset rec 4 th))
          ((ngit-merge--same b th) (aset rec 4 o))
@@ -203,9 +214,14 @@ VIRTUAL is a positive recursive-ancestor depth, or nil for the real merge."
                                        " so each can be recorded somewhere.")))
               (push other records))))
          ((and o th)
-          (let* ((content (ngit-merge--content repo path b o th ours-label theirs-label depth))
+          (let* ((labels (aref rec 8))
+                 (ngit-merge-ancestor-label (if labels (car labels) ngit-merge-ancestor-label))
+                 (content (ngit-merge--content repo path b o th
+                                             (if labels (nth 1 labels) ours-label)
+                                             (if labels (nth 2 labels) theirs-label) depth))
                  (clean (nth 1 content)))
-            (aset rec 4 (car content)) (aset rec 5 (not clean))
+            (aset rec 4 (car content))
+            (aset rec 5 (or (eq (aref rec 7) 'path-conflict) (not clean)))
             (aset rec 6 (nth 2 content))
             (unless clean
               (aset rec 6 (append (aref rec 6)
@@ -343,7 +359,8 @@ With LABELLED, return (TREE . ANCESTOR-LABEL) for an internal content merge."
 (defun ngit-merge-apply (repo result ours-tree &optional quiet)
   "Safely install RESULT relative to OURS-TREE and return RESULT.
 Refuse dirty and untracked paths before changing any work-tree path or the
-index.  QUIET is accepted for command callers; ort diagnostics remain visible."
+index.  QUIET does not hide ort diagnostics for merge -q.  The symbol
+`rebase' hides clean replay messages, matching the sequencer backend."
   (let* ((index (ngit-read-index repo)) (old (aref index 0))
          (image (plist-get result :worktree))
          (merged (plist-get result :entries))
@@ -417,7 +434,8 @@ index.  QUIET is accepted for command callers; ort diagnostics remain visible."
             (aset repo 6 nil) (aset repo 7 nil))
         (when lock (ngit-unlock lock))))
     (ngit-ref-write repo "AUTO_MERGE" (ngit-hex (plist-get result :tree)))
-    (dolist (msg (plist-get result :messages)) (ngit--emit msg "\n"))
+    (unless (and (eq quiet 'rebase) (not (plist-get result :conflicts)))
+      (dolist (msg (plist-get result :messages)) (ngit--emit msg "\n")))
     result))
 
 (provide 'ngit-merge-tree)

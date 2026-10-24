@@ -10,6 +10,12 @@
 ;;; Code:
 
 (require 'ngit-reset)
+(require 'ngit-transport-memory
+         (expand-file-name "ngit-transport-memory.el"
+                           (file-name-directory
+                            (or (and (boundp 'byte-compile-current-file)
+                                     byte-compile-current-file)
+                                load-file-name buffer-file-name))))
 
 (defvar ngit-transport-checkout-threshold 4096
   "Minimum initial-checkout entry count for parallel workers.
@@ -138,6 +144,8 @@ Tests may bind this to 1 to force the parallel path.")
 Use the ordinary hard-reset path unless the empty initial checkout is large
 enough and the runtime is safe to fork."
   (let* ((index (ngit-read-index repo))
+         (ngit-transport-checkout-workers
+          (ngit-transport-memory-workers ngit-transport-checkout-workers))
          (old (aref index 0))
          (changes (ngit-diff-tree-index repo tree))
          (count (length changes)))

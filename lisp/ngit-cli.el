@@ -10,6 +10,12 @@
 ;;; Code:
 
 (require 'ngit-rev)
+(require 'ngit-paths
+         (expand-file-name "ngit-paths.el"
+                           (file-name-directory
+                            (or (and (boundp 'byte-compile-current-file)
+                                     byte-compile-current-file)
+                                load-file-name buffer-file-name))))
 
 (defvar ngit--out nil "Reversed list of pending output strings.")
 
@@ -324,9 +330,12 @@ Each object is also verified against its SHA-1 before it is printed."
                                                       "\0" (cdr obj))))
         (ngit--die "SHA-1 mismatch for %s" hex))
       (ngit--emit type "\n")
+      ;; Keep text headers separate from raw, unibyte object bodies.
+      (ngit--flush)
       (if (eq (car obj) 'tree)
           (ngit--emit-tree repo hex "" nil nil nil)
-        (ngit--emit (cdr obj)))))
+        (ngit--emit (cdr obj)))
+      (ngit--flush)))
   0)
 
 ;;;; Dispatch
@@ -396,11 +405,13 @@ Each object is also verified against its SHA-1 before it is printed."
 (defun ngit-main (args)
   "Run the git-style command line ARGS; return the exit status."
   (let ((default-directory default-directory)
+        (ngit--invocation-directory nil)
         (ngit--out nil))
     (while (and args (string= (car args) "-C"))
       (setq default-directory (file-name-as-directory
                                (expand-file-name (cadr args)))
             args (cddr args)))
+    (setq ngit--invocation-directory default-directory)
     (let ((cmd (assoc (car args) ngit--commands)))
       (if (null cmd)
           (progn (ngit-native-write-stderr (format "ngit: unsupported command: %s\n" (car args))) 1)

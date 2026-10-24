@@ -13,6 +13,12 @@
 
 (require 'ngit-pack)
 (require 'ngit-transport-delta)
+(require 'ngit-transport-memory
+         (expand-file-name "ngit-transport-memory.el"
+                           (file-name-directory
+                            (or (and (boundp 'byte-compile-current-file)
+                                     byte-compile-current-file)
+                                load-file-name buffer-file-name))))
 
 (defconst ngit-transport-index--cache-count 512)
 (defconst ngit-transport-index--cache-bytes (* 1024 1024 1024))
@@ -404,6 +410,14 @@ non-delta object, hash the native output in place and set
 (defun ngit-transport-index--scan (path)
   "Validate PATH and return compact resolved metadata records."
   (let* ((file-size (ngit-native-file-size path))
+         (ngit-transport-index--workers
+          (ngit-transport-memory-workers ngit-transport-index--workers))
+         (ngit-transport-index--cache-bytes
+          (ngit-transport-memory-cache-bytes
+           ngit-transport-index--workers ngit-transport-index--cache-bytes))
+         (ngit-transport-index--cache-object-limit
+          (min ngit-transport-index--cache-object-limit
+               ngit-transport-index--cache-bytes))
          (head (ngit-native-read-bytes path 0 12)))
     (unless (and (>= file-size 32) (= (length head) 12)
                  (string= (substring head 0 4) "PACK")

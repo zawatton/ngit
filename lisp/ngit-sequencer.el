@@ -296,7 +296,7 @@
       (ngit--die-with 128 "error: commit %s does not have parent %d\nfatal: %s failed" hex mainline action))
     (setq result (ngit-merge-trees repo base ours next "HEAD"
                                   (if revert (concat "parent of " label) label)))
-    (ngit-merge-apply repo result ours)
+    (ngit-merge-apply repo result ours (and rebase 'rebase))
     (when (plist-get result :conflicts)
       (setq message (concat message "\n# Conflicts:\n"
                             (mapconcat (lambda (p) (concat "#\t" p "\n"))

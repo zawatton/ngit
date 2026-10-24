@@ -1,8 +1,23 @@
 #!/bin/sh
 # Run ngit (git implemented in NeLisp) with git-style arguments.
 here=$(cd "$(dirname "$0")/.." && pwd)
+# Inspect the command without changing the argument vector.  Ordinary commands
+# keep the shell-to-runtime fast path and do not start Python.
+supervise=${NGIT_MEMORY_BUDGET_MIB+x}
+skip=
+for arg do
+  if [ -n "$skip" ]; then skip=; continue; fi
+  case $arg in
+    -C) skip=yes ;;
+    clone|fetch|pull) supervise=yes; break ;;
+    *) break ;;
+  esac
+done
 # The NeLisp runtime drops -q, -Q, --batch and --no-init-file even after
 # "--", so every argument travels with an "@" prefix behind a "--@" marker.
 n=$#
 while [ "$n" -gt 0 ]; do a=$1; shift; set -- "$@" "@$a"; n=$((n - 1)); done
+if [ -n "$supervise" ]; then
+  exec python3 "$here/tools/transport-memory.py" -- "${NGIT_NELISP:-nelisp}" --load "$here/lisp/ngit-main.el" -- --@ "$@"
+fi
 exec "${NGIT_NELISP:-nelisp}" --load "$here/lisp/ngit-main.el" -- --@ "$@"

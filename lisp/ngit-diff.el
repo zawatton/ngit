@@ -587,7 +587,7 @@
 
 (defun ngit-cmd-diff (repo args)
   (let ((cached nil) (ctx 3) (out 'patch) (renames (ngit-config-get repo "diff.renames"))
-        (revs nil) (expanded-unmerged nil))
+        (revs nil) (paths nil) (expanded-unmerged nil))
     (setq renames (if (null renames) t
                     (or (equal renames "copies") (equal renames "copy")
                         (ngit-config-bool repo "diff.renames" t))))
@@ -600,15 +600,18 @@
               ((string= a "--name-status") (setq out 'name-status))
               ((string= a "--no-renames") (setq renames nil))
               ((member a '("-M" "--find-renames")) (setq renames t))
-              ((string= a "--") nil)
+              ((string= a "--") (setq paths args args nil))
               ((string-prefix-p "-" a) (ngit--die "unsupported diff option %s" a))
               ((string-match "\\`\\(.*\\)\\.\\.\\(.*\\)\\'" a)
                (push (if (string= (match-string 1 a) "") "HEAD" (match-string 1 a)) revs)
                (push (if (string= (match-string 2 a) "") "HEAD" (match-string 2 a)) revs))
               (t (push a revs)))))
     (setq revs (nreverse revs))
-    (let ((changes
-           (cond
+    (let* ((items (ngit-paths-items repo paths))
+           (changes
+            (ngit-paths-filter-changes
+             items
+             (cond
             ((= (length revs) 2)
              (ngit-diff-trees repo (ngit--tree-of repo (car revs)) (ngit--tree-of repo (cadr revs))))
             (cached
@@ -618,7 +621,7 @@
             (revs
              (ngit--compose-tree-wt repo (ngit-diff-tree-index repo (ngit--tree-of repo (car revs)))
                                     (ngit-wt-changes repo t)))
-            (t (ngit-wt-changes repo t)))))
+              (t (ngit-wt-changes repo t))))))
       (cond
        ((memq out '(name-only name-status))
         (setq changes (ngit--unmerged-name-queue repo changes cached renames)

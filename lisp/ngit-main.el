@@ -14,7 +14,7 @@
     ("fetch" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-objects" "ngit-pack" "ngit-transport-kernel" "ngit-transport-delta" "ngit-transport-index" "ngit-transport-checkout" "ngit-remote" "ngit-transport-process" "ngit-transport")
     ("ls-remote" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-objects" "ngit-pack" "ngit-transport-kernel" "ngit-transport-delta" "ngit-transport-index" "ngit-transport-checkout" "ngit-remote" "ngit-transport-process" "ngit-transport")
     ("push" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-objects" "ngit-pack" "ngit-transport-kernel" "ngit-transport-delta" "ngit-transport-index" "ngit-transport-checkout" "ngit-remote" "ngit-transport-process" "ngit-transport")
-    ("pull" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-tree" "ngit-merge" "ngit-sequencer" "ngit-objects" "ngit-pack" "ngit-transport-kernel" "ngit-transport-delta" "ngit-transport-index" "ngit-transport-checkout" "ngit-remote" "ngit-transport-process" "ngit-transport")
+    ("pull" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-rename" "ngit-merge-tree" "ngit-merge" "ngit-sequencer" "ngit-objects" "ngit-pack" "ngit-transport-kernel" "ngit-transport-delta" "ngit-transport-index" "ngit-transport-checkout" "ngit-remote" "ngit-transport-process" "ngit-transport")
     ("pack-objects" "ngit-objects" "ngit-pack")
     ("index-pack" "ngit-objects" "ngit-pack")
     ("verify-pack" "ngit-objects" "ngit-pack")
@@ -33,14 +33,14 @@
     ("shortlog" "ngit-rename" "ngit-log" "ngit-describe")
     ("rev-list" "ngit-rename" "ngit-log" "ngit-describe")
     ("merge-file" "ngit-merge-file")
-    ("merge" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-tree" "ngit-merge")
-    ("cherry-pick" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-tree" "ngit-merge" "ngit-sequencer")
-    ("revert" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-tree" "ngit-merge" "ngit-sequencer")
-    ("rebase" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-tree" "ngit-merge" "ngit-sequencer")
+    ("merge" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-rename" "ngit-merge-tree" "ngit-merge")
+    ("cherry-pick" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-rename" "ngit-merge-tree" "ngit-merge" "ngit-sequencer")
+    ("revert" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-rename" "ngit-merge-tree" "ngit-merge" "ngit-sequencer")
+    ("rebase" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-rename" "ngit-merge-tree" "ngit-merge" "ngit-sequencer")
     ("show" "ngit-rename" "ngit-log" "ngit-show")
-    ("format-patch" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-tree" "ngit-merge" "ngit-sequencer" "ngit-patch")
-    ("apply" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-tree" "ngit-merge" "ngit-sequencer" "ngit-patch")
-    ("am" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-tree" "ngit-merge" "ngit-sequencer" "ngit-patch")
+    ("format-patch" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-rename" "ngit-merge-tree" "ngit-merge" "ngit-sequencer" "ngit-patch")
+    ("apply" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-rename" "ngit-merge-tree" "ngit-merge" "ngit-sequencer" "ngit-patch")
+    ("am" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-rename" "ngit-merge-tree" "ngit-merge" "ngit-sequencer" "ngit-patch")
     ("clean" "ngit-clean")
     ("worktree" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-worktree-cmd")
     ("config" "ngit-rename" "ngit-log" "ngit-branch" "ngit-config-cmd")
@@ -52,14 +52,14 @@
     ("rm" "ngit-rename" "ngit-log" "ngit-checkout" "ngit-rm")
     ("mv" "ngit-rename" "ngit-log" "ngit-checkout" "ngit-rm")
     ("restore" "ngit-rename" "ngit-log" "ngit-checkout" "ngit-restore")
-    ("stash" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-tree" "ngit-stash")
+    ("stash" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-merge-file" "ngit-merge-rename" "ngit-merge-tree" "ngit-stash")
     ("tag" "ngit-rename" "ngit-log" "ngit-branch" "ngit-tag"))
   "Commands whose large modules load only when an argument names them.
 A false hit (a path argument spelled like a command) only costs time.")
 
 (let ((dir (file-name-directory (or load-file-name buffer-file-name)))
       (args (cdr (member "--" command-line-args)))
-      (files (list "ngit-native" "ngit-store" "ngit-rev" "ngit-cli" "ngit-config"
+      (files (list "ngit-native" "ngit-store" "ngit-rev" "ngit-paths" "ngit-cli" "ngit-config"
                    "ngit-match" "ngit-index" "ngit-worktree" "ngit-changes"
                    "ngit-status" "ngit-xdiff" "ngit-diff" "ngit-write" "ngit-add"
                    "ngit-commit")))

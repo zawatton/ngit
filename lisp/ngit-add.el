@@ -295,7 +295,7 @@ tree path nor an index entry, as git does."
            (concat "The following paths are ignored by one of your .gitignore files:\n"
                    (mapconcat (lambda (p) (concat (decode-coding-string p 'utf-8) "\n")) ignored "")
                    "hint: Use -f if you really want to add them.\n"
-                   "hint: Disable this message with \"git config set advice.addIgnoredFile false\"\n"))
+                   "hint: Disable this message with \"git config advice.addIgnoredFile false\"\n"))
           1)))))
 
 (provide 'ngit-add)

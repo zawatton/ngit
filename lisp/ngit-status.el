@@ -249,16 +249,17 @@ one concatenation for each byte that needs quoting."
 
 ;;;; Collecting
 
-(defun ngit-status-collect (repo)
+(defun ngit-status-collect (repo &optional items)
   "Return branch, merge state and staged, unmerged, unstaged and untracked paths."
   (let* ((head-raw (ngit-read-ref repo "HEAD"))
          (branch (and head-raw (string-prefix-p "ref: refs/heads/" head-raw)
                       (substring head-raw 16)))
          (head (ngit-resolve-ref repo "HEAD"))
          (tree (and head (ngit-unhex (ngit-peel repo head 'tree))))
-         (staged (ngit-detect-renames (ngit-diff-tree-index repo tree)))
-         (unstaged (ngit-wt-changes repo nil t))
-         (untracked (ngit-untracked repo))
+         (staged (ngit-detect-renames
+                  (ngit-paths-filter-changes items (ngit-diff-tree-index repo tree))))
+         (unstaged (ngit-paths-filter-changes items (ngit-wt-changes repo nil t)))
+         (untracked (ngit--status-untracked repo items))
          (unmerged nil))
     (setq staged (delq nil (mapcar (lambda (c)
                                     (if (= (aref c 1) ?U)
@@ -268,6 +269,72 @@ one concatenation for each byte that needs quoting."
     (list :branch branch :head head :staged staged :unstaged unstaged
           :untracked untracked :unmerged (nreverse unmerged)
           :merging (file-exists-p (expand-file-name "MERGE_HEAD" (ngit-repo-gitdir repo))))))
+
+(defun ngit--status-directory-warning (repo items)
+  "Report an inaccessible common literal directory prefix as Git does."
+  (when items
+    (let ((prefix (car items)))
+      (dolist (item (cdr items))
+        (let ((n 0) (limit (min (length prefix) (length item))))
+          (while (and (< n limit) (= (aref prefix n) (aref item n)))
+            (setq n (1+ n)))
+          (setq prefix (substring prefix 0 n))))
+      (let ((slash (string-match "/[^/]*\\'" prefix)))
+        (when slash
+          (setq prefix (substring prefix 0 (1+ slash)))
+          (ngit-wt-setup (ngit-repo-toplevel repo))
+          (let ((path "") (reason nil))
+            (catch 'done
+              (dolist (part (split-string prefix "/" t))
+                (setq path (concat path part))
+                (let* ((st (ngit-wt-lstat path))
+                       (mode (and st (logand (aref st 0) ngit-s-ifmt))))
+                  ;; Git never traverses a symbolic link in the prefix.
+                  (when (eq mode ngit-s-iflnk) (throw 'done nil))
+                  (unless (eq mode ngit-s-ifdir)
+                    (setq reason (if st "Not a directory" "No such file or directory"))
+                    (throw 'done nil)))
+                (setq path (concat path "/"))))
+            (when reason
+              (ngit-native-write-stderr
+               (format "warning: could not open directory '%s': %s\n"
+                       (decode-coding-string prefix 'utf-8) reason)))))))))
+
+(defun ngit--status-untracked (repo items)
+  "Select untracked paths, expanding a collapsed ancestor of an ITEM."
+  (ngit--status-directory-warning repo items)
+  (let ((paths (ngit-untracked repo)) (expanded nil) (scanned nil) (out nil))
+    (dolist (path paths)
+      (let ((directory (string-suffix-p "/" path)))
+        (if (and directory
+                 (seq-some (lambda (item) (and (> (length item) (length path))
+                                               (string-prefix-p path item))) items))
+            (progn
+              (unless scanned
+                (let* ((top (file-name-as-directory (ngit-repo-toplevel repo)))
+                       (tracked (ngit--tracked-set (ngit-index-entries repo))))
+                  (ngit-wt-setup top)
+                  (ngit--walk-untracked repo top tracked "" (ngit-ignore-global-patterns repo)
+                                        (lambda (p) (push p expanded)) nil t))
+                (setq scanned t))
+              (dolist (p expanded)
+                (when (and (string-prefix-p path p) (ngit-paths-match-p items p))
+                  (let ((dir path))
+                    ;; An explicit descendant forces traversal even when
+                    ;; a second pathspec also selects its parent.
+                    (while (and dir (seq-some (lambda (item) (and (> (length item) (length dir))
+                                                                 (string-prefix-p dir item))) items))
+                      (let ((slash (string-search "/" p (length dir))))
+                        (setq dir (and slash (substring p 0 (1+ slash))))))
+                    (push (or dir p) out)))))
+          (when (ngit-paths-match-p items path) (push path out)))))
+    (sort (delete-dups out) #'string<)))
+
+(defvar ngit--status-prefix "" "Root-relative prefix for human status output.")
+
+(defun ngit--status-path (path)
+  "Convert PATH only for the current human status invocation."
+  (ngit-paths-relative ngit--status-prefix path))
 
 (defun ngit--status-quote (path)
   "quote_path with QUOTE_PATH_QUOTE_SP: paths with a space are quoted."
@@ -305,10 +372,10 @@ one concatenation for each byte that needs quoting."
     (dolist (p (sort paths #'string<))
       (let ((v (gethash p table)))
         (ngit--emit (string (aref v 0) (aref v 1)) " "
-                    (if (aref v 2) (concat (ngit--status-quote (aref v 2)) " -> ") "")
-                    (ngit--status-quote p) "\n")))
+                    (if (aref v 2) (concat (ngit--status-quote (ngit--status-path (aref v 2))) " -> ") "")
+                    (ngit--status-quote (ngit--status-path p)) "\n")))
     (dolist (u (plist-get st :untracked))
-      (ngit--emit "?? " (ngit--status-quote u) "\n"))))
+      (ngit--emit "?? " (ngit--status-quote (ngit--status-path u)) "\n"))))
 
 ;;;; Long format
 
@@ -319,8 +386,8 @@ one concatenation for each byte that needs quoting."
 (defun ngit--status-line (status path old extra)
   (let ((label (cdr (assq status ngit--status-labels))))
     (concat "\t" label (make-string (- 12 (length label)) ?\s)
-            (if old (concat (ngit-quote-path old) " -> ") "")
-            (ngit-quote-path path) extra "\n")))
+            (if old (concat (ngit-quote-path (ngit--status-path old)) " -> ") "")
+            (ngit-quote-path (ngit--status-path path)) extra "\n")))
 
 (defun ngit--submodule-extra (flags)
   (if (and (listp flags) flags)
@@ -403,7 +470,7 @@ one concatenation for each byte that needs quoting."
                                  "added by them:" "deleted by us:" "both added:" "both modified:"]
                              (ngit-index-stage-mask (aref c 6)))))
             (ngit--emit "\t" label (make-string (- 17 (length label)) ?\s)
-                        (ngit-quote-path (aref c 0)) "\n")))
+                        (ngit-quote-path (ngit--status-path (aref c 0))) "\n")))
         (ngit--emit "\n")))
     (when unstaged
       (let ((has-deleted nil) (dirty-sub nil))
@@ -427,7 +494,7 @@ one concatenation for each byte that needs quoting."
     (when untracked
       (ngit--emit "Untracked files:\n"
                   "  (use \"git add <file>...\" to include in what will be committed)\n")
-      (dolist (u untracked) (ngit--emit "\t" (ngit-quote-path u) "\n"))
+      (dolist (u untracked) (ngit--emit "\t" (ngit-quote-path (ngit--status-path u)) "\n"))
       (ngit--emit "\n"))
     (unless (or staged (and merging (null unmerged)))
       (ngit--emit
@@ -437,15 +504,21 @@ one concatenation for each byte that needs quoting."
              (t "nothing to commit, working tree clean\n"))))))
 
 (defun ngit-cmd-status (repo args)
-  (let ((fmt 'long))
-    (dolist (a args)
-      (cond ((member a '("-s" "--short")) (setq fmt 'short))
-            ((member a '("--porcelain" "--porcelain=v1")) (setq fmt 'porcelain))
-            ((member a '("--long")) (setq fmt 'long))
-            (t (ngit--die "unsupported status option %s" a))))
+  (let ((fmt 'long) (paths nil))
+    (while args
+      (let ((a (pop args)))
+        (cond ((string= a "--") (setq paths (append paths args) args nil))
+              ((member a '("-s" "--short")) (setq fmt 'short))
+              ((member a '("--porcelain" "--porcelain=v1")) (setq fmt 'porcelain))
+              ((string= a "--long") (setq fmt 'long))
+              ((string-prefix-p "-" a) (ngit--die "unsupported status option %s" a))
+              (t (setq paths (append paths (list a)))))))
     (unless (ngit-repo-toplevel repo)
       (ngit--die "fatal: this operation must be run in a work tree"))
-    (let ((st (ngit-status-collect repo)))
+    (let ((st (ngit-status-collect repo (ngit-paths-items repo paths)))
+          (ngit--status-prefix
+           (if (or (eq fmt 'porcelain) (not (ngit-config-bool repo "status.relativepaths" t)))
+               "" (ngit-paths-prefix repo))))
       (if (eq fmt 'long)
           (ngit--status-long repo st)
         (ngit--status-short st (eq fmt 'porcelain))))

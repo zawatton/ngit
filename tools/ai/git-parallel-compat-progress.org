@@ -1,0 +1,95 @@
+#+TITLE: ngit parallel daily-use compatibility
+
+Four isolated implementation lanes extend the file/SSH, noninteractive
+scope at baseline e38c3c0. The coordinator owns shared registration,
+documentation and this ledger. Every lane must preserve existing tests,
+establish a failing baseline for new behavior, and finish with actual
+Git/ngit end-to-end comparison. Directory rename inference, HTTPS,
+submodules, interactive commands and signing remain outside this slice.
+
+* S1 Subdirectory invocation
+
+** S1.1 status and diff use Git-compatible literal path selection and display from nested directories
+#+TIMEOUT: 300
+cmd: sh test/subdir-suite.sh read
+
+** S1.2 add and restore resolve paths from the invocation directory and preserve Git state
+#+TIMEOUT: 300
+cmd: sh test/subdir-suite.sh write
+
+** S1.3 Repeated -C, parent paths, ignores and worktree boundaries follow Git semantics
+#+TIMEOUT: 300
+cmd: sh test/subdir-suite.sh boundaries
+
+** S1.4 A nested-directory edit, stage, commit and restore workflow matches Git end to end
+#+TIMEOUT: 300
+cmd: sh test/subdir-suite.sh e2e
+
+* S2 Safe push
+
+** S2.1 Explicit force-with-lease expectations reject stale refs and allow matching or absent refs
+#+TIMEOUT: 300
+cmd: sh test/push-safety.sh explicit
+
+** S2.2 Implicit leases use tracking refs and option precedence matches Git
+#+TIMEOUT: 300
+cmd: sh test/push-safety.sh tracking
+
+** S2.3 Atomic push negotiates real remote atomicity and never partially updates rejected batches
+#+TIMEOUT: 300
+cmd: sh test/push-safety.sh atomic
+
+** S2.4 Lease and atomic workflows match Git over file and fake-SSH transports end to end
+#+TIMEOUT: 300
+cmd: sh test/push-safety.sh e2e
+
+* S3 File renames during merge
+
+** S3.1 Exact and similarity-based file renames merge modifications like Git
+#+TIMEOUT: 300
+cmd: sh test/merge-rename.sh clean
+
+** S3.2 Rename/delete and rename/rename conflicts match Git index stages, worktree and diagnostics
+#+TIMEOUT: 300
+cmd: sh test/merge-rename.sh conflicts
+
+** S3.3 Shared merge callers handle renames during cherry-pick, revert, rebase and stash operations
+#+TIMEOUT: 300
+cmd: sh test/merge-rename.sh sequencer
+
+** S3.4 Merge completion and conflict continue/abort workflows preserve Git state end to end
+#+TIMEOUT: 300
+cmd: sh test/merge-rename.sh e2e
+
+* S4 Aggregate transport memory
+
+** S4.1 Budget validation and bounded worker/cache selection preserve ordinary command startup
+#+TIMEOUT: 300
+cmd: sh test/transport-memory.sh policy
+
+** S4.2 A process-tree budget breach fails loudly and reaps only owned descendants
+#+TIMEOUT: 300
+cmd: sh test/transport-memory.sh cleanup
+
+** S4.3 Baseline and changed transport runs record aggregate memory and elapsed time with honest accounting
+#+TIMEOUT: 600
+cmd: sh test/transport-memory.sh measurement
+
+** S4.4 Real clone, fetch and push preserve Git state within the declared aggregate budget end to end
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_REAL_REPO
+cmd: sh test/transport-memory.sh e2e
+
+* S5 Integration and regression
+
+** S5.1 The 24 historical completion criteria were remeasured on the unchanged baseline
+#+TIMEOUT: 60
+cmd: python3 tools/parallel-verify.py baseline-check
+
+** S5.2 Existing ledgers pass on the integrated source with fresh provenance
+#+TIMEOUT: 60
+cmd: python3 tools/parallel-verify.py regression-check
+
+** S5.3 Nested edits, rename merge, safe atomic push and bounded clone work together end to end
+#+TIMEOUT: 600
+cmd: sh test/parallel-e2e.sh
