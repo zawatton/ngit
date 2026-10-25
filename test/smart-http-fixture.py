@@ -14,7 +14,9 @@ import urllib.parse
 
 class SmartHTTPServer(contextlib.AbstractContextManager):
     def __init__(self, root, tls=True, auth=None, headers=None, routes=None,
-                 chunked=False, hostname="localhost", before_rpc=None):
+                 chunked=False, hostname="localhost", before_rpc=None,
+                 forward_protocol=False, rewrite_response=None,
+                 backend_env=None, run_process=None):
         self.root = Path(root).resolve()
         self.tls, self.auth = tls, auth
         self.headers = headers or {}
@@ -23,6 +25,11 @@ class SmartHTTPServer(contextlib.AbstractContextManager):
         self.requests = []
         self.errors = []
         self.before_rpc = before_rpc
+        # Opt-in protocol support leaves existing v0 fixture users unchanged.
+        self.forward_protocol = forward_protocol
+        self.rewrite_response = rewrite_response
+        self.backend_env = backend_env
+        self.run_process = run_process or subprocess.run
 
     def __enter__(self):
         owner = self
@@ -37,7 +44,22 @@ class SmartHTTPServer(contextlib.AbstractContextManager):
                 self.respond()
 
             def respond(self):
-                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+                    chunks = []
+                    while True:
+                        size = int(self.rfile.readline().split(b";", 1)[0], 16)
+                        if not size:
+                            while self.rfile.readline() not in (b"\r\n", b"\n", b""):
+                                pass
+                            break
+                        chunk = self.rfile.read(size)
+                        if len(chunk) != size or self.rfile.read(2) != b"\r\n":
+                            raise ValueError("truncated chunked request")
+                        chunks.append(chunk)
+                    body = b"".join(chunks)
+                else:
+                    body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                self.request_body = body
                 owner.requests.append((self.command, self.path, dict(self.headers), body,
                                        list(self.headers.items())))
                 if owner.auth and self.headers.get("Authorization") != "Basic " + base64.b64encode(owner.auth.encode()).decode():
@@ -57,13 +79,24 @@ class SmartHTTPServer(contextlib.AbstractContextManager):
                         callback, owner.before_rpc = owner.before_rpc, None
                         callback()
                     path = urllib.parse.urlsplit(self.path)
-                    env = dict(os.environ, GIT_PROJECT_ROOT=str(owner.root),
+                    env = dict(os.environ if owner.backend_env is None else owner.backend_env,
+                               GIT_PROJECT_ROOT=str(owner.root),
                                GIT_HTTP_EXPORT_ALL="1", PATH_INFO=urllib.parse.unquote(path.path),
                                QUERY_STRING=path.query, REQUEST_METHOD=self.command,
                                CONTENT_TYPE=self.headers.get("Content-Type", ""),
                                CONTENT_LENGTH=str(len(body)), REMOTE_USER="fixture",
                                GIT_PROTOCOL="version=0")
-                    proc = subprocess.run(["git", "http-backend"], input=body, env=env,
+                    # remote-curl gzips larger negotiation requests. The CGI
+                    # backend inflates them only when this header is forwarded;
+                    # CONTENT_LENGTH still describes the compressed body above.
+                    env.pop("HTTP_CONTENT_ENCODING", None)
+                    if self.headers.get("Content-Encoding") is not None:
+                        env["HTTP_CONTENT_ENCODING"] = self.headers["Content-Encoding"]
+                    if owner.forward_protocol:
+                        env.pop("GIT_PROTOCOL", None)
+                        if self.headers.get("Git-Protocol") is not None:
+                            env["GIT_PROTOCOL"] = self.headers["Git-Protocol"]
+                    proc = owner.run_process(["git", "http-backend"], input=body, env=env,
                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
                     head, sep, response = proc.stdout.partition(b"\r\n\r\n")
                     if not sep:
@@ -75,6 +108,8 @@ class SmartHTTPServer(contextlib.AbstractContextManager):
                             code = int(v.strip().split()[0])
                         else:
                             headers[k] = v.strip()
+                if owner.rewrite_response:
+                    code, headers, response = owner.rewrite_response(self, code, headers, response)
                 self.send_response(code)
                 for k, v in headers.items():
                     self.send_header(k, v)
@@ -104,10 +139,11 @@ class SmartHTTPServer(contextlib.AbstractContextManager):
         self.ca_file = str(Path(self.temp.name) / "cert.pem")
         if self.tls:
             key = str(Path(self.temp.name) / "key.pem")
-            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            self.run_process(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
                             "-keyout", key, "-out", self.ca_file, "-days", "1",
                             "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"],
-                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           env=self.backend_env, timeout=20)
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(self.ca_file, key)
             self.server.socket = ctx.wrap_socket(self.server.socket, server_side=True)

@@ -1,0 +1,102 @@
+#+TITLE: ngit fetch-side Git protocol v2
+
+Baseline: 6a462c1.  Design: docs/protocol-v2-design.org (units 1-4).  The
+eighteen criteria were defined before implementation; S4.4 was added after
+the first independent review.  Every suite mode compares
+ngit with Git 2.47.3 on recorded wire transcripts (request bytes sent by
+the client over ssh and smart HTTP), command output, refs, FETCH_HEAD,
+object sets and git fsck.
+
+Each suite reports exact comparisons and intended differences separately.
+An intended difference is a named diagnostic or security divergence with a
+reason recorded in the suite; it never counts as an exact comparison.  The
+verifier enforces a floor of exact comparisons per mode, so a mode cannot
+pass by running fewer cases.
+
+* S0 Harness calibration
+
+** S0.1 Every transcript mode reports failures against the 6a462c1 baseline, and Git compared with itself reports none
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py controls
+
+* S1 Selection, capabilities and ls-refs on file/ssh (unit 1)
+
+** S1.1 protocol.version 0, 1, 2, unset and invalid select the same version, GIT_PROTOCOL value and diagnostics as Git for upload-pack and leave receive-pack on v0
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode select
+
+** S1.2 ls-refs requests (peel, symrefs, unborn, ref-prefix) for ls-remote with and without --heads/--tags/patterns, clone and fetch with default, explicit and negative refspecs and tag following equal Git's bytes
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode lsrefs
+
+** S1.3 End to end over ssh: clone, fetch and ls-remote of a repository with branches and tags produce Git's transcripts, output and state
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode e2e-ssh
+
+* S2 Smart HTTP v2 (unit 2)
+
+** S2.1 HTTP discovery sends Git-Protocol: version=2, detects a v2 answer without the service preamble, and each command is its own POST with Git's headers and body
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode http-discovery
+
+** S2.2 Single-round HTTP v2 clone and fetch (no local history) equal Git's requests, output and state
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode http-fetch
+
+** S2.3 End to end over verified HTTPS with the credential helper: clone, fetch and pull as Git
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode e2e-https
+
+* S3 Negotiation (unit 3)
+
+** S3.1 v2 negotiation over ssh: haves, their order, flush batches, ACK/ready handling and done equal Git's for histories with shallow, more than 16 and more than 256 common candidates
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode negotiate
+
+** S3.2 Stateless v2 negotiation over HTTP resends wants and common haves per round exactly as Git
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode negotiate-http
+
+** S3.3 protocol v0 fetch uses the same negotiator (multi_ack_detailed rounds) and equals Git's transcripts
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode negotiate-v0
+
+** S3.4 End to end: fetch and pull after divergent local and remote history over ssh and HTTPS send Git's rounds and reach Git's state
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode e2e-negotiate
+
+* S4 Errors, server options and fallback (unit 4)
+
+** S4.1 ERR packets, unknown or missing sections, malformed acknowledgments and unsupported object formats give Git's diagnostics and exit codes and leave the repository unchanged
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode errors
+
+** S4.2 -o/--server-option and remote.*.serverOption are sent as Git sends them (and rejected on v0 as Git does)
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode server-option
+
+** S4.3 A v0-only server (file/ssh and HTTP) makes the client continue in v0 exactly as Git
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode fallback
+
+** S4.4 Cases from the independent review: push report-status-v2 option lines, pkt-lines without a trailing LF, a control packet where a section header belongs, a value-less object-format, malformed ls-refs output, ls-refs not advertised, and invalid shallow-info/wanted-refs sections behave as Git
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode review
+
+* S5 Integration
+
+** S5.1 Every protocol-v2 mode meets its floor of exact comparisons with no failures, and every intended difference is named
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py differences
+
+** S5.2 Existing transport, pull, hooks, credential and smart-HTTP suites stay green
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py regression
+
+** S5.3 End to end with byte code and with sources: clone, fetch and pull over ssh and HTTPS from a repository with real history equal Git
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py e2e
+
+** S5.4 README no longer lists HTTP protocol v2 or v2 negotiation as unsupported, and the design doc is marked implemented
+#+TIMEOUT: 60
+cmd: sh -c '! grep -q "HTTP protocol v2" README.org && grep -q "^#+STATUS: IMPLEMENTED" docs/protocol-v2-design.org'

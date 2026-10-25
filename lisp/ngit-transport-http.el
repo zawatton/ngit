@@ -1,11 +1,12 @@
-;;; ngit-transport-http.el --- native smart HTTP v0 -*- lexical-binding: t; -*-
+;;; ngit-transport-http.el --- native smart HTTP -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 ;; libcurl owns HTTP framing and verified TLS.  Its default fread/fwrite
 ;; callbacks stream binary data through libc temporary FILEs.  No pack is
 ;; accumulated in Lisp.  A v0 connection has one discovery and at most one
 ;; RPC: the first read after writes commits the complete request, including
-;; raw PACK bytes after the command flush.  Cleanup never sends a request.
+;; raw PACK bytes after the command flush.  A v2 connection sends each
+;; command as a separate RPC.  Cleanup never sends a request.
 
 ;;; Code:
 (require 'ngit-native)
@@ -108,7 +109,67 @@
             (nreverse values))
         (nl-ffi-memory-release owner)))))
 
-(defun ngit-http--request (state url post)
+(defun ngit-http--gzip (file)
+  "Return (FILE . SIZE) for a streamed gzip copy of request FILE."
+  (let ((output (ngit-http--file)) (fd -1) stream buffer mode success)
+    (unwind-protect
+        (progn
+          (setq fd (ngit-http--call "dup" (ngit-http--fd output)))
+          (when (> fd #x7fffffff) (ngit-transport--fail "fatal: cannot duplicate HTTP spool"))
+          (setq mode (ngit-http--string "wb9")
+                stream (ngit-http--call "gzdopen" fd (nl-ffi-memory-address mode)))
+          (when (zerop stream) (ngit-transport--fail "fatal: cannot compress HTTP request"))
+          (setq fd -1 buffer (nl-ffi-memory-allocate 65536))
+          (ngit-http--seek file 0)
+          (let ((p (nl-ffi-memory-address buffer)) (got 0))
+            (while (> (setq got (ngit-http--call "fread" p 1 65536 file)) 0)
+              (unless (= got (ngit-http--call "gzwrite" stream p got))
+                (ngit-transport--fail "fatal: cannot compress HTTP request"))))
+          (unless (= 0 (ngit-http--call "ferror" file))
+            (ngit-transport--fail "fatal: cannot read HTTP request"))
+          (let ((z stream))
+            (setq stream nil)
+            (ngit-http--check (ngit-http--call "gzclose" z) "gzip close"))
+          (let ((size (ngit-http--call "ftell" output)))
+            (ngit-http--seek output 0)
+            (setq success t)
+            (cons output size)))
+      (when (and stream (not (zerop stream))) (ngit-http--call "gzclose" stream))
+      (when (>= fd 0) (ngit-http--call "close" fd))
+      (when buffer (nl-ffi-memory-release buffer))
+      (when mode (nl-ffi-memory-release mode))
+      (unless success (ngit-http--call "fclose" output)))))
+
+(defun ngit-http--payload (state)
+  "Return (FILE SIZE CHUNKED GZIP) using remote-curl's buffer rules."
+  (let* ((file (aref state 3)) (size (aref state 8))
+         (limit (max 65520 (ngit-config-int (aref state 0) "http.postBuffer" (* 16 65520))))
+         ;; v0 wraps the whole request in outer packets and needs room to
+         ;; read their final flush even after all payload bytes are buffered.
+         (chunked (> size (if (= (aref state 9) 2) limit (- limit 65520)))))
+    ;; remote-curl reserves a complete maximum packet before each read,
+    ;; including the final flush; a nearly full buffer also streams.
+    (when (and (= (aref state 9) 2) (not chunked) (> size (- limit 65524)))
+      (let ((owner (nl-ffi-memory-allocate 4)) (offset 0) done)
+        (unwind-protect
+            (while (not done)
+              (if (< (- limit offset 4) 65520)
+                  (setq chunked t done t)
+                (ngit-http--seek file offset)
+                (unless (= 4 (ngit-http--call "fread" (nl-ffi-memory-address owner) 1 4 file))
+                  (ngit-transport--fail "fatal: malformed HTTP request packet"))
+                (let* ((header (ptr-read-bytes (nl-ffi-memory-address owner) 4))
+                       (n (string-to-number header 16)))
+                  (unless (and (ngit-hex-p header 4) (or (memq n '(0 1)) (<= 4 n 65520)))
+                    (ngit-transport--fail "fatal: malformed HTTP request packet"))
+                  (setq offset (+ offset (max n 4)) done (= n 0)))))
+          (nl-ffi-memory-release owner))))
+    (if (and (not chunked) (> size 1024))
+        (let ((compressed (ngit-http--gzip file)))
+          (list (car compressed) (cdr compressed) nil t))
+      (list file size chunked nil))))
+
+(defun ngit-http--request (state url post &optional payload)
   "Perform one request, with bounded manual redirects only for discovery."
   (let ((redirects 0) (done nil) (challenged nil) result)
     (while (not done)
@@ -140,10 +201,14 @@
               (ngit-http--set handle 10001 body)
               (ngit-http--set handle 10029 head)
               (dolist (value (append (aref state 6)
-                                    (list "Expect:" "Pragma: no-cache"
-                                          (concat "Accept: application/x-" (aref state 2)
-                                                  (if post "-result" "-advertisement")))
-                                    (and post (list (concat "Content-Type: application/x-" (aref state 2) "-request")))))
+                                    (if post
+                                        (list (concat "Content-Type: application/x-" (aref state 2) "-request")
+                                              (concat "Accept: application/x-" (aref state 2) "-result")
+                                              "Expect:" "Pragma:")
+                                      (list "Accept: */*" "Pragma: no-cache"))
+                                    (when (and (not (eq post 'probe)) (> (aref state 9) 0))
+                                      (list (format "Git-Protocol: version=%d" (aref state 9))))
+                                    (when (nth 3 payload) (list "Content-Encoding: gzip"))))
                 (let* ((owner (ngit-http--string value))
                        (next (ngit-http--call "curl_slist_append" (or slist 0) (nl-ffi-memory-address owner))))
                   (push owner owners)
@@ -151,11 +216,11 @@
                   (setq slist next)))
               (ngit-http--set handle 10023 slist)
               (when post
-                (ngit-http--seek (aref state 3) 0)
+                (ngit-http--seek (or (car payload) (aref state 3)) 0)
                 (ngit-http--set handle 47 1)
                 (ngit-http--set handle 10015 0)
-                (ngit-http--set handle 10009 (aref state 3))
-                (ngit-http--set handle 30120 (aref state 8)))
+                (ngit-http--set handle 10009 (or (car payload) (aref state 3)))
+                (ngit-http--set handle 30120 (if (nth 2 payload) -1 (or (nth 1 payload) (aref state 8)))))
               (ngit-http--check (ngit-http--call "curl_easy_perform" handle) "transfer")
               (ngit-http--check (ngit-http--call "fflush" body) "body flush")
               (unless (= 0 (ngit-http--call "ferror" body))
@@ -216,13 +281,15 @@
                    (ngit-transport--fail "fatal: truncated HTTP packet")))))))
 
 (defun ngit-http-open (repo url service)
-  "Open smart HTTP SERVICE, validating the complete v0 advertisement."
+  "Open smart HTTP SERVICE, validating its discovery advertisement."
   (require 'ngit-credential)
   (let* ((parts (ngit-http--url url))
          (base (replace-regexp-in-string "/+\\'" "" (car parts)))
          ;; State: repo, base, service, request FILE, response FILE, posted,
-         ;; ordered custom headers, credentials, request bytes.
-         (state (vector repo base service nil nil nil (ngit-http--headers repo) (ngit-credential-create repo url) 0))
+         ;; ordered custom headers, credentials, request bytes, version
+         ;; (requested during discovery, negotiated thereafter).
+         (state (vector repo base service nil nil nil (ngit-http--headers repo) (ngit-credential-create repo url) 0
+                        (ngit-transport-protocol-version repo service)))
          (conn (vector ngit-transport--tag 0 -1 -1 nil nil state)) success)
     (unwind-protect
         (progn
@@ -234,36 +301,43 @@
               (ngit-transport--fail "fatal: unsupported HTTP discovery redirect"))
             (aset state 1 (substring effective 0 (- (length effective) (length suffix))))
             (aset conn 3 (ngit-http--fd (car response))))
-          (let* ((preamble (ngit-http--packet conn))
-                 (offset (+ 8 (if (stringp preamble) (length preamble) 0))))
-            (unless (and (member preamble (list (concat "# service=" service)
-                                                (concat "# service=" service "\n")))
-                         (eq (ngit-http--packet conn) 'flush))
-              (ngit-transport--fail "fatal: invalid smart HTTP service preamble"))
+          (let ((preamble (ngit-http--packet conn)) (offset 0) (version 0))
+            (cond
+             ((member preamble (list (concat "# service=" service)
+                                     (concat "# service=" service "\n")))
+              (unless (eq (ngit-http--packet conn) 'flush)
+                (ngit-transport--fail "fatal: invalid smart HTTP service preamble"))
+              (setq offset (+ 8 (length preamble))))
+             ((member preamble '("version 2" "version 2\n")) (setq version 2))
+             (t (ngit-transport--fail "fatal: invalid smart HTTP service preamble")))
             (let ((packet (ngit-http--packet conn)) (first t)
                   (seen (make-hash-table :test 'equal)))
+              (when (and (= version 0) (member packet '("version 1" "version 1\n")))
+                (setq version 1 packet (ngit-http--packet conn)))
               (while (stringp packet)
-                (unless (and (>= (length packet) 42) (ngit-hex-p (substring packet 0 40) 40)
-                             (= (aref packet 40) ?\s)
-                             (string-suffix-p "\n" packet)
-                             (or first (not (string-search "\0" packet))))
-                  (ngit-transport--fail "fatal: invalid HTTP advertised ref"))
-                (when (string-search "object-format=sha256" packet)
-                  (ngit-transport--fail "fatal: unsupported HTTP object format"))
-                (let* ((nul (string-search "\0" packet))
-                       (name (substring packet 41 (or nul (1- (length packet)))))
-                       (plain (if (string-suffix-p "^{}" name) (substring name 0 -3) name))
-                       (zero (equal (substring packet 0 40) (make-string 40 ?0))))
-                  (unless (and (not (gethash name seen))
-                               (if zero (and first (equal name "capabilities^{}"))
-                                 (or (equal name "HEAD")
-                                     (and (string-prefix-p "refs/" plain)
-                                          (ngit--valid-branch-name-p plain)))))
-                    (ngit-transport--fail "fatal: invalid HTTP advertised ref name"))
-                  (puthash name t seen))
+                (unless (= version 2)
+                  (unless (and (>= (length packet) 42) (ngit-hex-p (substring packet 0 40) 40)
+                               (= (aref packet 40) ?\s)
+                               (string-suffix-p "\n" packet)
+                               (or first (not (string-search "\0" packet))))
+                    (ngit-transport--fail "fatal: invalid HTTP advertised ref"))
+                  (when (string-search "object-format=sha256" packet)
+                    (ngit-transport--fail "fatal: unsupported HTTP object format"))
+                  (let* ((nul (string-search "\0" packet))
+                         (name (substring packet 41 (or nul (1- (length packet)))))
+                         (plain (if (string-suffix-p "^{}" name) (substring name 0 -3) name))
+                         (zero (equal (substring packet 0 40) (make-string 40 ?0))))
+                    (unless (and (not (gethash name seen))
+                                 (if zero (and first (equal name "capabilities^{}"))
+                                   (or (equal name "HEAD")
+                                       (and (string-prefix-p "refs/" plain)
+                                            (ngit--valid-branch-name-p plain)))))
+                      (ngit-transport--fail "fatal: invalid HTTP advertised ref name"))
+                    (puthash name t seen)))
                 (setq first nil packet (ngit-http--packet conn)))
               (unless (and (eq packet 'flush) (null (ngit-transport-read conn 1)))
                 (ngit-transport--fail "fatal: invalid HTTP advertisement termination")))
+            (aset state 9 version)
             (ngit-http--seek (aref state 4) offset)
             (aset conn 5 nil))
           (aset state 3 (ngit-http--file))
@@ -272,7 +346,58 @@
       (unless success (ngit-http-close conn)))))
 
 (defun ngit-http-p (conn)
-  (and (> (length conn) 6) (vectorp (aref conn 6)) (= (length (aref conn 6)) 9)))
+  (and (> (length conn) 6) (vectorp (aref conn 6)) (= (length (aref conn 6)) 10)))
+
+(defun ngit-http-before-write (conn bytes)
+  "Account for BYTES and start the next upload-pack RPC after a drained response."
+  (let ((state (aref conn 6)))
+    (when (aref state 5)
+      (unless (equal (aref state 2) "git-upload-pack")
+        (ngit-transport--fail "fatal: HTTP RPC already sent"))
+      ;; Packet readers normally stop at the final flush, without an EOF
+      ;; read.  Check the spool position instead of relying on CONN's EOF.
+      (let* ((fd (aref conn 3))
+             (position (ngit-http--call "lseek" fd 0 1))
+             (end (ngit-http--call "lseek" fd 0 2)))
+        (unless (= position (ngit-http--call "lseek" fd position 0))
+          (ngit-transport--fail "fatal: cannot seek HTTP response"))
+        (unless (and (>= position 0) (= position end))
+          (ngit-transport--fail "fatal: HTTP response not fully read")))
+      (let ((file (aref state 3)))
+        (aset state 3 nil)
+        (aset conn 2 -1)
+        (ngit-http--check (ngit-http--call "fclose" file) "request close"))
+      (aset state 3 (ngit-http--file))
+      (aset conn 2 (ngit-http--fd (aref state 3)))
+      (aset state 8 0)
+      (aset state 5 nil))
+    (aset state 8 (+ (aref state 8) (string-bytes bytes)))))
+
+(defun ngit-http--check-v2-response (file)
+  "Reject server response-end packets before forwarding a v2 RPC body.
+Like remote-curl's check_pktline, skip payloads by their packet lengths."
+  (let ((owner (nl-ffi-memory-allocate 4)) (offset 0) size)
+    (unwind-protect
+        (progn
+          (ngit-http--check (ngit-http--call "fseek" file 0 2) "response seek")
+          (setq size (ngit-http--call "ftell" file))
+          (catch 'checked
+            (while (<= (+ offset 4) size)
+              (ngit-http--seek file offset)
+              (unless (= 4 (ngit-http--call "fread" (nl-ffi-memory-address owner) 1 4 file))
+                (throw 'checked nil))
+              (let ((header (ptr-read-bytes (nl-ffi-memory-address owner) 4)))
+                (unless (ngit-hex-p header 4) (throw 'checked nil))
+                (let ((length (string-to-number header 16)))
+                  (when (= length 2)
+                    (ngit-native-write-stderr "fatal: remote-curl: unexpected response end packet\n")
+                    (ngit-transport--fail "fatal: the remote end hung up unexpectedly"))
+                  (setq offset (+ offset (max length 4))))))))
+      (ngit-http--seek file 0)
+      ;; fread may retain lookahead; transport reads use the raw descriptor.
+      (unless (= 0 (ngit-http--call "lseek" (ngit-http--fd file) 0 0))
+        (ngit-transport--fail "fatal: cannot seek HTTP response"))
+      (nl-ffi-memory-release owner))))
 
 (defun ngit-http-ready (conn)
   "Send a pending complete RPC once, before its first response read."
@@ -280,12 +405,34 @@
     (when (and (> (aref state 8) 0) (not (aref state 5)))
       ;; Mark before performing: errors and unwind cleanup must never retry push.
       (aset state 5 t)
-      (let ((response (ngit-http--request state (concat (aref state 1) "/" (aref state 2)) t)))
+      (let* ((url (concat (aref state 1) "/" (aref state 2)))
+             (payload (when (equal (aref state 2) "git-upload-pack")
+                        (ngit-http--payload state)))
+             response)
+        (unwind-protect
+            (progn
+              (when (nth 2 payload)
+                ;; Git probes large RPCs with a four-byte flush before
+                ;; committing to a non-replayable chunked upload.
+                (let ((file (ngit-http--file)) (owner (ngit-http--string "0000")))
+                  (unwind-protect
+                      (progn
+                        (unless (= 4 (ngit-http--call "fwrite" (nl-ffi-memory-address owner) 1 4 file))
+                          (ngit-transport--fail "fatal: cannot write HTTP probe"))
+                        (let ((probe (ngit-http--request state url 'probe (list file 4))))
+                          (ngit-http--check (ngit-http--call "fclose" (car probe)) "probe close")))
+                    (ngit-http--call "fclose" file)
+                    (nl-ffi-memory-release owner))))
+              (setq response (ngit-http--request state url t payload)))
+          (when (and payload (not (equal (car payload) (aref state 3))))
+            (ngit-http--check (ngit-http--call "fclose" (car payload)) "gzip spool close")))
         (when (aref state 4)
           (ngit-http--check (ngit-http--call "fclose" (aref state 4)) "discovery close"))
         (aset state 4 (car response))
         (aset conn 3 (ngit-http--fd (car response)))
-        (aset conn 5 nil)))))
+        (aset conn 5 nil)
+        (when (= (aref state 9) 2)
+          (ngit-http--check-v2-response (car response)))))))
 
 (defun ngit-http-close (conn)
   "Release FILE spools idempotently without ever sending an RPC."

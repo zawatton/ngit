@@ -42,6 +42,27 @@
   (let ((message (apply #'format format args)))
     (if (fboundp 'ngit--die) (ngit--die "%s" message) (error "%s" message))))
 
+(defun ngit-transport--parse-protocol-version (value)
+  (cdr (assoc value '(("0" . 0) ("1" . 1) ("2" . 2)))))
+
+(defun ngit-transport-protocol-version (repo service)
+  "Return the protocol version (0, 1 or 2) to request for SERVICE.
+Like protocol.c and connect.c: protocol.version, else
+GIT_TEST_PROTOCOL_VERSION, else 2; receive-pack never uses version 2."
+  (let* ((value (and (fboundp 'ngit-config-get) (ngit-config-get repo "protocol.version")))
+         (test (getenv "GIT_TEST_PROTOCOL_VERSION"))
+         (version
+          (cond (value
+                 (or (ngit-transport--parse-protocol-version value)
+                     (ngit-transport--fail
+                      "fatal: unknown value for config 'protocol.version': %s" value)))
+                ((and test (not (string= test "")))
+                 (or (ngit-transport--parse-protocol-version test)
+                     (ngit-transport--fail
+                      "fatal: unknown value for GIT_TEST_PROTOCOL_VERSION: %s" test)))
+                (t 2))))
+    (if (and (= version 2) (string= service "git-receive-pack")) 0 version)))
+
 (defun ngit-transport--hex (c)
   (cond ((and (>= c ?0) (<= c ?9)) (- c ?0))
         ((and (>= c ?a) (<= c ?f)) (+ 10 (- c ?a)))
@@ -109,7 +130,7 @@
       (executable-find name)
       (ngit-transport--fail "fatal: cannot run %s: No such file or directory" name)))
 
-(defun ngit-transport--ssh-command (repo fields service)
+(defun ngit-transport--ssh-command (repo fields service version)
   (let* ((user (nth 0 fields)) (host (nth 1 fields))
          (host (if (string-prefix-p "[" host) (substring host 1 -1) host))
          (port (nth 2 fields)) (path (nth 3 fields))
@@ -121,7 +142,7 @@
          (dest (if user (concat user "@" host) host))
          (remote (concat service " " (ngit-transport--shell-quote path)))
          (args (append (and port (list "-p" port))
-                       (and (string= service "git-upload-pack")
+                       (and (> version 0)
                             (list "-o" "SendEnv=GIT_PROTOCOL"))
                        (list dest remote))))
     (when (string-prefix-p "-" dest)
@@ -132,7 +153,7 @@
                       (mapconcat #'ngit-transport--shell-quote args " ")))
       (cons (ngit-transport--executable (or git-ssh "ssh")) args))))
 
-(defun ngit-transport--env (protocol-v2)
+(defun ngit-transport--env (version)
   ;; Match connect.c: preserve identities, dates and SSH configuration while
   ;; removing variables that would make the server use the client's repository.
   (let ((local '("GIT_ALTERNATE_OBJECT_DIRECTORIES" "GIT_CONFIG" "GIT_CONFIG_PARAMETERS"
@@ -145,7 +166,7 @@
       (let ((equal (string-search "=" entry)))
         (when (and equal (not (member (substring entry 0 equal) local)))
           (push entry env))))
-    (when protocol-v2 (push "GIT_PROTOCOL=version=2" env))
+    (when (> version 0) (push (format "GIT_PROTOCOL=version=%d" version) env))
     (nreverse env)))
 
 (defun ngit-transport--cstring-vector (strings)
@@ -339,25 +360,27 @@ INHERIT-STDOUT is non-nil it retains fd 1, as Git's pre-push runner does."
   "Open URL for SERVICE and return a binary transport connection."
   (unless (member service '("git-upload-pack" "git-receive-pack"))
     (ngit-transport--fail "fatal: unsupported Git service: %s" service))
-  (if (string-match-p "\\`https?://" url)
-      (progn (require 'ngit-transport-http) (ngit-http-open repo url service))
-    (let* ((parsed (ngit-transport--parse-url url))
-         (ssh (eq (car parsed) 'ssh))
-         (v2 (string= service "git-upload-pack"))
-         (argv (if ssh
-                   (ngit-transport--ssh-command repo (cdr parsed) service)
-                 (list (ngit-transport--executable service)
-                       (expand-file-name (car (cdr parsed)))))))
-    (setcar argv (ngit-transport--executable (car argv)))
-    (ngit-transport--spawn argv (ngit-transport--env v2)))))
+  (let ((conn
+         (if (string-match-p "\\`https?://" url)
+             (progn (require 'ngit-transport-http) (ngit-http-open repo url service))
+           (let* ((parsed (ngit-transport--parse-url url))
+                  (ssh (eq (car parsed) 'ssh))
+                  (version (ngit-transport-protocol-version repo service))
+                  (argv (if ssh
+                            (ngit-transport--ssh-command repo (cdr parsed) service version)
+                          (list (ngit-transport--executable service)
+                                (expand-file-name (car (cdr parsed)))))))
+             (setcar argv (ngit-transport--executable (car argv)))
+             (ngit-transport--spawn argv (ngit-transport--env version))))))
+    ;; Slots 6 and 7 belong to HTTP / subprocess status; 8 holds v2 caps.
+    (vconcat conn (make-vector (max 0 (- 9 (length conn))) nil))))
 
 (defun ngit-transport-write (conn bytes)
   "Write all of unibyte string BYTES to CONN."
   (unless (and (ngit-transport--conn-p conn) (stringp bytes))
     (signal 'wrong-type-argument (list 'ngit-transport-write conn bytes)))
   (when (and (fboundp 'ngit-http-p) (ngit-http-p conn))
-    (when (aref (aref conn 6) 5) (ngit-transport--fail "fatal: HTTP RPC already sent"))
-    (aset (aref conn 6) 8 (+ (aref (aref conn 6) 8) (string-bytes bytes))))
+    (ngit-http-before-write conn bytes))
   (let* ((n (string-bytes bytes))
          (owner (nl-ffi-memory-allocate (max 1 n)))
          (addr (nl-ffi-memory-address owner)) (done 0))

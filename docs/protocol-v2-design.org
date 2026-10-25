@@ -1,5 +1,5 @@
 #+TITLE: Protocol v2 for ngit: design
-#+STATUS: DESIGN (not implemented; separate objective and ledger)
+#+STATUS: IMPLEMENTED (ledger: tools/ai/git-protocol-v2-progress.org)
 
 * Goal
 

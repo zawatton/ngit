@@ -126,7 +126,12 @@ transports. As in the Git 2.47.3 comparison oracle, explicit =--force= or a
 forced refspec overrides a lease. =--atomic= fails if the peer does not
 advertise the capability.
 
-Smart HTTP(S) uses libcurl for streamed protocol-v0 discovery and RPCs.
+Fetch, clone, pull and ls-remote speak Git protocol v2 by default
+(=protocol.version= 0, 1 or 2, as Git), with =ref-prefix= ls-refs requests,
+Git's default negotiator (stateful over file/ssh, stateless over HTTP) and
+=-o=/=--server-option=; push stays on protocol v0, as in Git.
+Smart HTTP(S) uses libcurl for streamed discovery and RPCs, one POST per
+protocol-v2 command or negotiation round.
 HTTPS verifies the peer and hostname; =GIT_SSL_CAINFO= or =http.sslCAInfo=
 can supply a private CA. Explicit Basic URL credentials and =http.extraHeader=
 are supported. Discovery redirects are bounded and drop credentials and
@@ -260,6 +265,7 @@ when the variable is unset.
   protocol client, fetch/pull/push and clone) with
   =ngit-transport-process.el= (local and ssh subprocesses),
   =ngit-transport-http.el= (libcurl smart HTTP(S) discovery and RPCs),
+  =ngit-negotiate.el= (Git's default fetch negotiator),
   =ngit-transport-index.el= (received-pack indexing),
   =ngit-transport-delta.el= and =ngit-transport-kernel.el= (delta
   application compiled to native code once per process) and
@@ -345,6 +351,7 @@ sh test/subdir-commands.sh (inspect|mutate|boundaries|e2e)
 sh test/audit-config.sh (core|e2e); sh test/audit-paths.sh (core|e2e)
 sh test/audit-reaudit.sh (core|special|boundaries|e2e|pull|attrs|binary|objects|round4-paths|round4-pull|round4-unified|round5-autostash|round5-headers)
 sh test/round6.sh (headers|pull|mail_starts)
+sh test/protocol-v2.sh (select|lsrefs|e2e-ssh|http-discovery|http-fetch|e2e-https|negotiate|negotiate-http|negotiate-v0|e2e-negotiate|errors|server-option|fallback|review)
 sh test/audit-fixes.sh (core|e2e|prefix|prefix-boundary|prefix-untracked|prefix-rm|prefix-e2e)
 python3 tools/include-pathspec-verify.py (controls|differences [GROUP]|regression|e2e)
 python3 tools/usability-verify.py (controls|regression|e2e)
@@ -355,7 +362,8 @@ bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Note
 
 * Not supported yet
 
-Dumb HTTP, HTTP protocol v2 and v2 negotiation (design: docs/protocol-v2-design.org), interactive credential prompts, OAuth and git:// transports,
+Dumb HTTP, interactive credential prompts, OAuth and git:// transports,
+protocol-v2 shallow/partial fetch, packfile-uris, bundle-uri and object-info,
 shallow/partial/single-branch clones,
 template copying, =--force-if-includes= pushes,
 push.default=matching/nothing, multi-head pulls, submodules (beyond
