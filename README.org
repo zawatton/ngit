@@ -145,7 +145,9 @@ Configuration expands =include.path= and =includeIf= conditions for =gitdir:=,
 =gitdir/i:= and =onbranch:= at their source positions. Relative paths resolve
 against the including file. Selected =config --file=, =--local= and =--global=
 reads follow includes only with =--includes=; writes affect the selected
-primary file. Remote-URL-based include conditions remain unsupported.
+primary file. =hasconfig:remote.*.url:= conditions match against the
+remote URLs of the whole configuration, and a file they include may not
+define remote URLs itself (Git's fatal error).
 
 Status and diff detect modified renames with the shared similarity detector.
 Diff accepts fractional or percent =-M= / =--find-renames== thresholds and
@@ -184,6 +186,13 @@ when the variable is unset.
   (loaded only when the hook exists): commit, merge, sequencer, checkout,
   am, push/receive, gc --auto and reference-transaction hooks.
 - =lisp/ngit-match.el= — wildmatch port, .gitignore and .gitattributes.
+- =lisp/ngit-pathspec.el=, =lisp/ngit-pathspec-attr.el= — pathspec magic,
+  including =attr:= requirements; commands whose Git pathspec mask rejects
+  =attr= fail with Git's diagnostic.
+- =lisp/ngit-command-paths.el=, =lisp/ngit-ls-files.el=,
+  =lisp/ngit-diff-stat.el= — invocation-relative path selection for
+  clean/rm/mv/checkout/reset/stash, ls-files from subdirectories, and
+  =diff --relative=/=--stat=.
 - =lisp/ngit-index.el= — index v2/v3/v4 and the cache-tree extension.
 - =lisp/ngit-worktree.el= — lstat/open/readlink by syscall, end-of-line
   conversion (core.autocrlf, text/eol attributes, safer autocrlf).
@@ -330,6 +339,14 @@ python3 tools/network-compat-verify.py (controls|regression|e2e)
 sh test/config-includes.sh (read|conditional|boundaries|e2e)
 sh test/similarity-read.sh (status|diff|boundaries|e2e)
 sh test/credential-helpers.sh (helpers|auth|boundaries|e2e)
+sh test/include-hasconfig.sh (match|boundaries|e2e)
+sh test/pathspec-attr.sh (select|boundaries|e2e)
+sh test/subdir-commands.sh (inspect|mutate|boundaries|e2e)
+sh test/audit-config.sh (core|e2e); sh test/audit-paths.sh (core|e2e)
+sh test/audit-reaudit.sh (core|special|boundaries|e2e|pull|attrs|binary|objects|round4-paths|round4-pull|round4-unified|round5-autostash|round5-headers)
+sh test/round6.sh (headers|pull|mail_starts)
+sh test/audit-fixes.sh (core|e2e|prefix|prefix-boundary|prefix-untracked|prefix-rm|prefix-e2e)
+python3 tools/include-pathspec-verify.py (controls|differences [GROUP]|regression|e2e)
 python3 tools/usability-verify.py (controls|regression|e2e)
 nelisp --load test/hash-chars-check.el -- x  # span hash vs reference copy
 NGIT_REAL_REPO=/path/to/repo sh test/compare.sh real
@@ -338,26 +355,33 @@ bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Note
 
 * Not supported yet
 
-Dumb HTTP, HTTP protocol v2, interactive credential prompts, OAuth and git:// transports,
+Dumb HTTP, HTTP protocol v2 and v2 negotiation (design: docs/protocol-v2-design.org), interactive credential prompts, OAuth and git:// transports,
 shallow/partial/single-branch clones,
 template copying, =--force-if-includes= pushes,
 push.default=matching/nothing, multi-head pulls, submodules (beyond
 gitlink entries), strategy-specific
 rename thresholds, octopus merges, custom merge
-drivers, interactive rebase (and its hooks), rerere, =--fix-thin=, git's delta search depth
+drivers, interactive rebase (and its hooks) and
+merge-preserving rebase (pull refuses rebase=merges on diverged histories and
+rebase=interactive unless HEAD is up to date or fast-forwards, before
+installing fetched objects or updating any ref), rerere, =--fix-thin=, git's delta search depth
 (new deltas are limited to 4 KiB targets and 32 KiB per run; pack
 compression defaults to level 1), blame -M/-C, grep -P, name-rev --all,
-mailmap, binary patches and general MIME mail in am/apply.
+mailmap, general MIME mail in am/apply, traditional (non-git) patches
+whose body lines look like a =+++= header line,
+delta-encoded binary hunks in output (format-patch always writes
+=literal= binary bodies where Git picks the smaller of delta and literal;
+apply and am read both forms).
 
 Alternates, multi-pack-index, reftable, split or sparse
-indexes, SHA-256 repositories, attribute pathspec magic, copy detection, commit
+indexes, SHA-256 repositories, copy detection, commit
 signing, an editor for commit messages (use -m or -F), commit with
 paths, guessed identities (user.name and user.email or the GIT_*
 variables must be set), date formats other than raw and ISO 8601 in
 GIT_*_DATE, index.version for new indexes, =-uall=/ignored listings,
-remote-URL-based includeIf conditions,
-custom attribute macros and diff drivers, =diff --relative= and comprehensive
-subdirectory path handling outside status/diff/add/restore/log/show/grep/blame/ls-tree,
+custom attribute macros and diff drivers, subdirectory path handling
+outside status/diff/add/restore/log/show/grep/blame/ls-tree/ls-files/clean/
+rm/mv/checkout/reset/stash,
 log's --follow, -L, -m/--cc (show has the default --cc), --simplify-merges,
 --ancestry-path, --boundary, --left-right, notes, mailmap, %(trailers),
 %w(), padding and color placeholders, --date=relative/human and

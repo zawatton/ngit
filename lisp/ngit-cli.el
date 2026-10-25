@@ -409,7 +409,7 @@ Each object is also verified against its SHA-1 before it is printed."
     ("clean" . ngit-cmd-clean)
     ("worktree" . ngit-cmd-worktree)
     ("bisect" . ngit-cmd-bisect)
-    ("ls-files" . ngit-cmd-ls-files)
+    ("ls-files" . ngit-cli-list-files)
     ("config" . ngit-cmd-config-write)
     ("check-attr" . ngit-cmd-check-attr)
     ("status" . ngit-cmd-status)
@@ -443,6 +443,11 @@ Each object is also verified against its SHA-1 before it is printed."
     ("stash" . ngit-cmd-stash)
     ("branch" . ngit-cmd-branch)
     ("tag" . ngit-cmd-tag)))
+
+(defun ngit-cli-list-files (repo args)
+  "Load the index listing implementation only for ls-files."
+  (require 'ngit-ls-files)
+  (ngit-cmd-list-files repo args))
 
 (defun ngit-main (args)
   "Run the git-style command line ARGS; return the exit status."

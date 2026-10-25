@@ -142,8 +142,7 @@
 LIMIT defaults to diff.renameLimit; zero means unlimited.  MINIMUM uses
 the same 0..60000 scale as the returned scores and defaults to 50%."
   (let* ((limit (or limit
-                    (let ((v (ngit-config-get repo "diff.renameLimit")))
-                      (and v (string-to-number v)))
+                    (ngit-config-int repo "diff.renameLimit" nil)
                     1000))
          (minimum (if (or (null minimum) (= minimum 0)) ngit--default-rename-score minimum))
          (srcs nil) (dsts nil))

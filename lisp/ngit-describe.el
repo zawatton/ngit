@@ -8,6 +8,7 @@
 (require 'ngit-log)
 
 (defvar ngit-inspect--pending nil)
+(defvar ngit-inspect--object-directories nil)
 
 (defun ngit-inspect--walk (repo args &optional require-revision)
   "Return commits selected by revision ARGS, preserving revision.c order."
@@ -39,7 +40,7 @@
          ((string-match "\\`-\\([0-9]+\\)\\'" a)
           (setq ngit--rv-max-count (string-to-number (match-string 1 a))))
          ((string= a "--")
-          (setq ngit--rv-paths (mapcar #'ngit--ps-item args) args nil))
+          (setq ngit--rv-paths (ngit--log-pathspec repo args) args nil))
          (t
           (let ((r (ngit--handle-revision repo a flags pending)))
             (when (eq r 'not-a-rev) (ngit--bad-revision a))
@@ -54,6 +55,40 @@
     (while (setq c (ngit-walk-next)) (push c commits))
     (if ngit--rv-reverse commits (nreverse commits))))
 
+(defun ngit-inspect--directory-selected (path)
+  "Match PATH as a nonrecursive tree-walk entry, as in tree-walk.c.
+History simplification descends conservatively for wildcard matches;
+list-objects instead requires a matching tree name or a literal prefix."
+  (let ((selected nil) (excluded nil)
+        (items (if (eq (cdar ngit--rv-paths) 'magic)
+                   ngit-inspect--object-directories ngit--rv-paths)))
+    (dolist (item items)
+      (let* ((magic (vectorp item))
+             (pattern (cond (magic (aref item 0)) ((consp item) (car item)) (t item)))
+             (name path)
+             (fixed (and magic (substring pattern 0 (aref item 7))))
+             (prefix-ok (or (not fixed) (string-prefix-p fixed (concat path "/"))
+                            (string-prefix-p (concat path "/") fixed)))
+             (negative (and magic (aref item 4)))
+             (matched (if magic
+                          (ngit-pathspec-item-match-p
+                           item (if (aref item 5) (concat path "/") path))
+                        (or (ngit-paths-covers-p pattern path)
+                            (and (consp item) (eq (cdr item) t) (ngit-wildmatch pattern path))))))
+        (when (and magic (aref item 3))
+          (setq pattern (downcase pattern) name (downcase name)))
+        (if negative
+            ;; An exclusion matching this tree's name is entry_interesting:
+            ;; emit the tree and test its children individually. Only a
+            ;; literal ancestor is all_entries_interesting and prunes it.
+            (when (and prefix-ok
+                       (or (equal pattern "")
+                           (string-prefix-p (concat pattern "/") name)))
+              (setq excluded t))
+          (when (or matched (and prefix-ok (string-prefix-p (concat name "/") pattern)))
+            (setq selected t)))))
+    (and selected (not excluded))))
+
 (defun ngit-inspect--objects (repo hex path seen emit)
   "Visit a tree and its blobs in list-objects.c order, once per object."
   (unless (gethash hex seen)
@@ -64,16 +99,31 @@
     (let ((obj (ngit-read-object repo (ngit-unhex hex))))
       (when (eq (car obj) 'tree)
         (dolist (e (ngit-parse-tree (cdr obj)))
-          (unless (string= (car e) "160000")
-            (ngit-inspect--objects repo (ngit-hex (nth 2 e))
-                                   (concat path (if (string= path "") "" "/") (nth 1 e))
-                                   seen emit)))))))
+          (let ((name (concat path (if (string= path "") "" "/") (nth 1 e))))
+            (when (and (not (string= (car e) "160000"))
+                       (or (not emit) (not ngit--rv-paths)
+                           (if (string= (car e) "40000")
+                               (ngit-inspect--directory-selected name)
+                             (ngit--log-path-class name nil nil))))
+              (ngit-inspect--objects repo (ngit-hex (nth 2 e)) name seen emit))))))))
 
 (defun ngit-cmd-rev-list (repo args)
   (let* ((count (member "--count" args)) (objects (member "--objects" args))
          (parents (member "--parents" args))
          (walk-args (delete "--objects" (delete "--count" (copy-sequence args))))
-         (commits (ngit-inspect--walk repo walk-args t)))
+         (commits (ngit-inspect--walk repo walk-args t))
+         (ngit-inspect--object-directories
+          (when (and objects (eq (cdar ngit--rv-paths) 'magic))
+            ;; Tree entries use the name pattern, but cannot be rejected by
+            ;; attributes of the directory: descendants may match instead.
+            ;; Attribute exclusions likewise cannot exclude an entire tree.
+            (delq nil
+                  (mapcar (lambda (item)
+                            (cond ((not (and (vectorp item) (aref item 8))) item)
+                                  ((aref item 4) nil)
+                                  (t (let ((copy (copy-sequence item)))
+                                       (aset copy 8 nil) copy))))
+                          (caar ngit--rv-paths))))))
     (if count
         (ngit--emit (number-to-string (length commits)) "\n")
       (dolist (c commits)

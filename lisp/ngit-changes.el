@@ -309,6 +309,8 @@ With STOP-AT-FIRST, return as soon as one is found."
     set))
 
 (defvar ngit--no-excludes nil "Non-nil to ignore .gitignore rules (add -f).")
+(defvar ngit--untracked-pathspecs nil
+  "Attribute pathspecs limiting untracked directory traversal, when bound.")
 
 (defun ngit--walk-untracked (repo top tracked dir stack emit check-only &optional expand)
   ;; TRACKED is `ngit--tracked-set'; directories holding tracked files
@@ -320,7 +322,7 @@ files of untracked directories instead of the directories; nested
 repositories are still reported as \"dir/\"."
   ;; TOP ends in a slash; `expand-file-name' costs ~2.5 ms in NeLisp.
   (let* ((abs (concat top (decode-coding-string dir 'utf-8)))
-         (own (ngit-read-ignore-file (concat (file-name-as-directory abs) ".gitignore") dir))
+         (own (ngit-read-ignore-file (concat (file-name-as-directory abs) ".gitignore") dir t))
          (stack (if own (cons (ngit-compile-ignore own) stack) stack))
          (blen (length dir)))
     (dolist (name (ngit--dir-names abs))
@@ -331,10 +333,14 @@ repositories are still reported as \"dir/\"."
             (when (and st (or ngit--no-excludes (not (ngit-excluded-p stack path blen isdir))))
               (cond
                ((not isdir)
-                (if check-only (throw 'found t) (funcall emit path)))
+                (when (or (not ngit--untracked-pathspecs)
+                          (ngit-pathspec-match-p ngit--untracked-pathspecs path))
+                  (if check-only (throw 'found t) (funcall emit path))))
                ((ngit-index-dir-p (ngit-index-entries repo) (concat path "/"))
                 (ngit--walk-untracked repo top tracked (concat path "/") stack emit check-only
                                       expand))
+               ((and ngit--untracked-pathspecs
+                     (not (ngit-pathspec-untracked-class ngit--untracked-pathspecs path))))
                ((and expand (not (ngit-wt-lstat (concat path "/.git"))))
                 (ngit--walk-untracked repo top tracked (concat path "/") stack emit nil t))
                ((or (ngit-wt-lstat (concat path "/.git"))

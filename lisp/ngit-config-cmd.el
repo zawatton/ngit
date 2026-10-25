@@ -28,6 +28,23 @@
   (unless repo (ngit--die "fatal: --local can only be used inside a git repository"))
   (expand-file-name "config" (ngit-repo-commondir repo)))
 
+(defun ngit-config-cmd--worktree-file (repo)
+  "Select the worktree source, requiring the extension for linked trees."
+  (unless repo (ngit--die "fatal: --worktree can only be used inside a git repository"))
+  (let ((file (expand-file-name "config.worktree" (ngit-repo-gitdir repo)))
+        (admin (expand-file-name "worktrees" (ngit-repo-commondir repo)))
+        (multiple nil))
+    (if (member file (ngit--config-files repo)) file
+      (when (file-directory-p admin)
+        (dolist (entry (directory-files admin t "\\`[^.]"))
+          (when (file-exists-p (expand-file-name "gitdir" entry))
+            (setq multiple t))))
+      (when multiple
+        (ngit--die (concat "fatal: --worktree cannot be used with multiple working trees unless the config\n"
+                           "extension worktreeConfig is enabled. Please read \"CONFIGURATION FILE\"\n"
+                           "section in \"git help worktree\" for details")))
+      (ngit-config-cmd--local-file repo))))
+
 (defun ngit-config-cmd--lock (file)
   "Exclusively reserve FILE.lock, preserving errno and lock ownership."
   (let* ((lock (concat file ".lock"))
@@ -56,7 +73,7 @@
     (unwind-protect
         (progn
           (ngit-commit-lock lock (encode-coding-string text 'utf-8) mode)
-          (setq ngit--config-cache nil))
+          (ngit--config-invalidate))
       (ngit-unlock lock))))
 
 (defun ngit-config-cmd--set-file (file key value &optional add)
@@ -134,13 +151,14 @@ was set, including an unset miss and a single-value write over duplicates."
             (ngit-config-cmd--write-file file (apply #'concat (nreverse out)))
             t)))))))
 
-(defun ngit-config-cmd--entries (repo file includes &optional explicit-file)
+(defun ngit-config-cmd--entries (repo file includes &optional explicit-file required)
   "Read selected FILE or all sources, with the requested INCLUDES policy."
-  (if file (ngit--config-read file repo includes nil (and explicit-file file))
-    (let (entries)
-      (dolist (source (ngit--config-files repo))
-        (setq entries (append entries (ngit--config-read source repo includes))))
-      entries)))
+  (ngit--config-load repo includes file (and explicit-file file) required))
+
+(defun ngit-config-cmd--origin (entry origins)
+  "Emit the origin of ENTRY when ORIGINS was requested."
+  (when origins
+    (ngit--emit (ngit-quote-path (gethash entry origins)) "\t")))
 
 (defun ngit-config-cmd--get (entries key)
   (let ((key (ngit--config-normalize key)) (value nil) (seen nil))
@@ -161,8 +179,9 @@ was set, including an unset miss and a single-value write over duplicates."
 (defun ngit-cmd-config-write (repo args)
   "Implement config get/list/set/add/unset and --global."
   (ngit--config-startup repo)
-  (let ((file nil) (selection nil) (explicit-file nil) (includes 'default) (all nil)
-        (action nil) (rest nil))
+  (let ((file (getenv "GIT_CONFIG")) (selection (and (getenv "GIT_CONFIG") t))
+        (explicit-file (and (getenv "GIT_CONFIG") t)) (includes 'default) (all nil)
+        (action nil) (rest nil) (show-origin nil))
     ;; Git 2.47 accepts these subcommands only in the first argument slot.
     ;; A later literal "list" or "add" is an ordinary value.
     (when (member (car args) '("get" "list" "set" "add" "unset"))
@@ -171,6 +190,10 @@ was set, including an unset miss and a single-value write over duplicates."
       (let ((arg (pop args)))
         (cond ((string= arg "--global")
                (setq selection t file (ngit-config-cmd--global-file)))
+              ((string= arg "--system")
+               (setq selection t file (or (getenv "GIT_CONFIG_SYSTEM") "/etc/gitconfig")))
+              ((string= arg "--worktree")
+               (setq selection t file (ngit-config-cmd--worktree-file repo)))
               ((string= arg "--local")
                (setq selection t file (ngit-config-cmd--local-file repo)))
               ((member arg '("--file" "-f"))
@@ -180,6 +203,7 @@ was set, including an unset miss and a single-value write over duplicates."
                (setq selection t explicit-file t file (substring arg 7)))
               ((string= arg "--includes") (setq includes t))
               ((string= arg "--no-includes") (setq includes nil))
+              ((string= arg "--show-origin") (setq show-origin t))
               ((string= arg "--get-all") (setq action 'get all t))
               ((string= arg "--all") (setq all t))
               ((string= arg "--get") (setq action 'get))
@@ -191,7 +215,7 @@ was set, including an unset miss and a single-value write over duplicates."
                (ngit--die-with 129 "error: unknown option `%s'" arg))
               (t (push arg rest)))))
     (setq rest (nreverse rest))
-    (when (eq includes 'default) (setq includes (not selection)))
+    (when (eq includes 'default) (setq includes (or (not selection) (equal file "-"))))
     (unless action
       (setq action (cond ((= (length rest) 1) 'get)
                          ((= (length rest) 2) 'set)
@@ -199,15 +223,23 @@ was set, including an unset miss and a single-value write over duplicates."
     (pcase action
       ('list
        (when rest (ngit--die-with 129 "error: wrong number of arguments"))
-       (when explicit-file (ngit--config-readable file file t t))
-       (dolist (entry (ngit-config-cmd--entries repo file includes explicit-file))
-         (ngit--emit (car entry)
-                     (if (eq (cdr entry) t) "\n" (concat "=" (cdr entry) "\n"))))
+       ;; List consults the normal config for pager setup, even when the
+       ;; eventual list selects one file or disables includes.
+       (let ((ngit--config-early t)) (ngit--config-load repo t))
+       (let* ((ngit--config-origins (and show-origin (make-hash-table :test 'eq)))
+              (ngit--config-entry-callback
+               (lambda (entry)
+                 (ngit-config-cmd--origin entry ngit--config-origins)
+                 (ngit--emit (car entry)
+                             (if (eq (cdr entry) t) "\n" (concat "=" (cdr entry) "\n"))))))
+         (ngit-config-cmd--entries repo file includes explicit-file t))
        0)
       ('get
        (unless (= (length rest) 1)
          (ngit--die-with 129 "error: wrong number of arguments"))
-       (let* ((entries (ngit-config-cmd--entries repo file includes explicit-file))
+       (when all (let ((ngit--config-early t)) (ngit--config-load repo t)))
+       (let* ((ngit--config-origins (and show-origin (make-hash-table :test 'eq)))
+              (entries (ngit-config-cmd--entries repo file includes explicit-file))
               (found (ngit-config-cmd--get entries (car rest))))
          (if (not (car found))
              1
@@ -215,7 +247,12 @@ was set, including an unset miss and a single-value write over duplicates."
                (let ((key (ngit--config-normalize (car rest))))
                  (dolist (entry entries)
                    (when (string= key (car entry))
+                     (ngit-config-cmd--origin entry ngit--config-origins)
                      (ngit--emit (if (eq (cdr entry) t) "" (cdr entry)) "\n"))))
+             (when show-origin
+               (let ((key (ngit--config-normalize (car rest))) (last nil))
+                 (dolist (entry entries) (when (string= key (car entry)) (setq last entry)))
+                 (ngit-config-cmd--origin last ngit--config-origins)))
              (ngit--emit (if (eq (cdr found) t) "" (cdr found)) "\n"))
            0)))
       (_

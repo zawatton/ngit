@@ -343,6 +343,7 @@ Ties choose NEW, as in combine-diff.c's coalesce_lines."
       (let ((a (pop args)))
         (cond
          ((string= a "--") (setq paths (cons "--" args) args nil))
+         ((string-prefix-p ":(" a) (setq paths (cons "--" (cons a args)) args nil))
          ((member a '("--cc" "--no-walk" "--no-walk=unsorted" "--no-walk=sorted")))
          ((string= a "--do-walk") (setq walk t))
          ((string-prefix-p "-" a)

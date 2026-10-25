@@ -73,16 +73,16 @@ With MODE, set final permissions after writing, before the rename."
 (defconst ngit-empty-tree-bin (ngit-unhex "4b825dc642cb6eb9a060e54bf8d69288fbee4904"))
 
 (defun ngit--loose-level (repo)
-  (let ((v (or (ngit-config-get repo "core.loosecompression")
-               (ngit-config-get repo "core.compression"))))
-    (if (stringp v) (string-to-number v) 1)))
+  (ngit-config-compression-level repo "core.loosecompression"
+                   (ngit-config-compression-level repo "core.compression" 1)))
 
 (defun ngit-write-object (repo type data &optional dry-run)
   "Store DATA as a loose object of TYPE (a string); return its 20-byte name.
 With DRY-RUN, only compute the name."
   (let* ((obj (concat type " " (number-to-string (length data)) "\0" data))
          (bin (ngit-native-sha1 obj))
-         (hex (ngit-hex bin)))
+         (hex (ngit-hex bin))
+         (level (unless dry-run (ngit--loose-level repo))))
     (unless (or dry-run (ngit-object-exists-p repo bin))
       (let* ((path (ngit--loose-path repo hex))
              (dir (file-name-directory path))
@@ -90,8 +90,7 @@ With DRY-RUN, only compute the name."
                           "_" (number-to-string (random 1000000000)))))
         (ngit-make-directory dir t)
         (ngit-write-file tmp obj t nil 'defer)
-        (ngit-write-file tmp (ngit-native-deflate-file tmp (length obj)
-                                                       (ngit--loose-level repo)))
+        (ngit-write-file tmp (ngit-native-deflate-file tmp (length obj) level))
         (set-file-modes tmp #o444)
         (rename-file tmp path t)
         (ngit-abbrev-forget)))

@@ -796,10 +796,8 @@ KNOWN is a membership table for a pack successfully written by this command."
 
 (defun ngit-maint--auto-needed (repo)
   "Return `packs', `loose' or nil using git gc's automatic thresholds."
-  (let* ((auto (let ((v (ngit-config-get repo "gc.auto")))
-                 (if (stringp v) (string-to-number v) 6700)))
-         (pack-limit (let ((v (ngit-config-get repo "gc.autopacklimit")))
-                       (if (stringp v) (string-to-number v) 50))))
+  (let* ((auto (ngit-config-int repo "gc.auto" 6700))
+         (pack-limit (ngit-config-int repo "gc.autopacklimit" 50)))
     (when (> auto 0)
       (cond
        ((and (> pack-limit 0) (> (length (ngit-repo-packs repo)) pack-limit)) 'packs)

@@ -9,6 +9,7 @@
 
 ;;; Code:
 
+(require 'ngit-command-paths)
 (require 'ngit-log)
 (require 'ngit-add)
 (require 'ngit-write)
@@ -45,7 +46,8 @@ Hard reset binds this to `index-first'; path checkout uses worktree first.")
 (defun ngit--checkout-worktree-attr-data (repo name)
   (let* ((top (ngit-repo-toplevel repo))
          (file (and top (expand-file-name (decode-coding-string name 'utf-8) top))))
-    (and file (file-regular-p file) (ngit--read-file file))))
+    (and file (ngit--worktree-nofollow-p file name)
+         (file-regular-p file) (ngit--read-worktree-file file name))))
 
 (defun ngit--checkout-attr-data (repo name)
   (if (eq ngit--checkout-attr-direction 'index-first)
@@ -341,20 +343,20 @@ On success, leave `ngit-wt--stat' holding ENTRY's lstat result."
       (aset index 1 (apply #'concat (nreverse parts))))))
 
 (defun ngit--checkout-match-p (items path)
-  (let ((ngit--rv-paths items)) (eq (ngit--ps-class path nil) 'full)))
+  (eq (ngit-command-path-class items path nil) 'full))
 
 (defun ngit--checkout-item-matches (items path matched)
   (let ((i 0))
     (dolist (item items)
-      (let ((ngit--rv-paths (list item)))
-        (when (eq (ngit--ps-class path nil) 'full) (aset matched i t)))
+      (when (eq (ngit-command-path-class (list item) path nil) 'full)
+        (aset matched i t))
       (setq i (1+ i)))))
 
 (defun ngit--checkout-walk-source (repo tree prefix emit)
   "Visit only source subtrees relevant to `ngit--rv-paths'."
   (dolist (entry (ngit-tree-items repo tree))
     (let* ((mode (nth 0 entry)) (path (concat prefix (nth 1 entry)))
-           (dirp (= mode ngit-mode-tree)) (class (ngit--ps-class path dirp)))
+           (dirp (= mode ngit-mode-tree)) (class (ngit-command-path-class ngit--rv-paths path dirp)))
       (cond
        ((and dirp (eq class 'full))
         (ngit--flatten-tree repo (nth 2 entry) (concat path "/") emit))
@@ -393,10 +395,9 @@ On success, leave `ngit-wt--stat' holding ENTRY's lstat result."
   (let ((out nil) (i 0))
     (while (< i (length entries))
       (let ((e (aref entries i)))
-        (when (and (= (aref e 3) 0) (not (memq 'skip-worktree (aref e 5)))
-                   (ngit--checkout-match-p items (aref e 0)))
+        (when (and (= (aref e 3) 0) (not (memq 'skip-worktree (aref e 5))))
           (ngit--checkout-item-matches items (aref e 0) matched)
-          (push e out)))
+          (when (ngit--checkout-match-p items (aref e 0)) (push e out))))
       (setq i (1+ i)))
     (nreverse out)))
 
@@ -441,17 +442,22 @@ On success, leave `ngit-wt--stat' holding ENTRY's lstat result."
     (when (member "" paths)
       (ngit--die "fatal: empty string is not a valid pathspec. please use . instead if you meant to match all paths"))
     (unless paths (ngit--die-with 1 "fatal: you must specify path(s) to restore"))
-    (let* ((items (mapcar (lambda (p) (ngit--ps-item (ngit--pathspec-item repo p))) paths))
-           (matched (make-vector (length items) nil))
+    (let* ((items (ngit-command-path-items repo paths))
+           (matched (vconcat (mapcar (lambda (item)
+                                       (and (not tree) (vectorp (car item))
+                                            (aref (car item) 4))) items)))
            (index (ngit-read-index repo)) (old (aref index 0))
            (targets (if tree
                         (ngit--checkout-source-entries repo tree items matched)
                       (ngit--checkout-index-entries old items matched)))
-           (mi 0))
+           (mi 0) (misses nil))
       (dolist (path paths)
         (unless (aref matched mi)
-          (ngit--die-with 1 "error: pathspec '%s' did not match any file(s) known to git" path))
+          (push (format "error: pathspec '%s' did not match any file(s) known to git\n" path) misses))
         (setq mi (1+ mi)))
+      (when misses
+        (ngit-native-write-stderr (apply #'concat (nreverse misses)))
+        (ngit--die-with 1 ""))
       (let* ((removed nil)
              (entries (if tree
                           (ngit--checkout-overlay old targets

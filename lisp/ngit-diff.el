@@ -15,6 +15,15 @@
 
 (defvar ngit-rename-limit-warning)
 
+(defvar ngit-diff--relative-prefix ""
+  "Root-relative display prefix for the current diff command.")
+
+(defun ngit-diff--display (path)
+  (let ((n (length ngit-diff--relative-prefix)))
+    (when (and (> n 0) (< n (length path)) (= (aref path n) ?/))
+      (setq n (1+ n)))
+    (substring path n)))
+
 (defun ngit--diff-blob (repo mode bin)
   "Return the content of side (MODE BIN) as git diffs it."
   (cond ((null bin) "")
@@ -402,13 +411,25 @@
       (when st
         (ngit--emit (ngit--combined-hunks old2 old3 result ctx))))))
 
+(defvar ngit-diff--binary-patch-function nil
+  "Optional binary body emitter, bound by format-patch.")
+
 (defun ngit--emit-patch-part (repo path-a path-b old-mode old-bin new-mode new-bin
                                   new-data dirty rename ctx)
   "Emit one file pair; a nil BIN means that side is absent."
-  (let* ((a-name (ngit-quote-path (concat "a/" path-a)))
-         (b-name (ngit-quote-path (concat "b/" path-b)))
+  (let* ((a-name (ngit-quote-path (concat "a/" (ngit-diff--display path-a))))
+         (b-name (ngit-quote-path (concat "b/" (ngit-diff--display path-b))))
          (lbl-a (if old-bin a-name "/dev/null"))
          (lbl-b (if (or new-bin new-data) b-name "/dev/null"))
+         (old (ngit--diff-blob repo old-mode old-bin))
+         (new (cond ((and new-bin (= new-mode ngit-mode-gitlink))
+                     (concat "Subproject commit " (ngit-hex new-bin) (if dirty "-dirty" "") "\n"))
+                    (new-data new-data)
+                    (t (ngit--diff-blob repo new-mode new-bin))))
+         (binary (and (or (and old-bin (/= old-mode ngit-mode-gitlink))
+                          (and new-bin (/= new-mode ngit-mode-gitlink)))
+                      (or (ngit--binary-p repo path-a old) (ngit--binary-p repo path-b new))))
+         (full-index (and binary ngit-diff--binary-patch-function))
          (header (list (concat "diff --git " a-name " " b-name "\n"))))
     (cond ((null old-bin)
            (push (concat "new file mode " (ngit--octal6 new-mode) "\n") header))
@@ -420,27 +441,25 @@
                  header)))
     (when rename
       (push (concat "similarity index " (number-to-string (if (numberp rename) rename 100))
-                    "%\nrename from " (ngit-quote-path path-a)
-                    "\nrename to " (ngit-quote-path path-b) "\n")
+                    "%\nrename from " (ngit-quote-path (ngit-diff--display path-a))
+                    "\nrename to " (ngit-quote-path (ngit-diff--display path-b)) "\n")
             header))
     (unless (equal old-bin new-bin)
-      (push (concat "index " (ngit--abbrev-bin repo old-bin) ".."
-                    (ngit--abbrev-bin repo new-bin)
+      (push (concat "index " (if full-index (if old-bin (ngit-hex old-bin) (make-string 40 ?0))
+                               (ngit--abbrev-bin repo old-bin)) ".."
+                    (if full-index (if new-bin (ngit-hex new-bin) (make-string 40 ?0))
+                      (ngit--abbrev-bin repo new-bin))
                     (if (= old-mode new-mode) (concat " " (ngit--octal6 old-mode)) "")
                     "\n")
             header))
-    (let* ((old (ngit--diff-blob repo old-mode old-bin))
-           (new (cond ((and new-bin (= new-mode ngit-mode-gitlink))
-                       (concat "Subproject commit " (ngit-hex new-bin) (if dirty "-dirty" "") "\n"))
-                      (new-data new-data)
-                      (t (ngit--diff-blob repo new-mode new-bin)))))
+    (progn
       (apply #'ngit--emit (nreverse header))
       (cond
-       ((and (or (and old-bin (/= old-mode ngit-mode-gitlink))
-                 (and new-bin (/= new-mode ngit-mode-gitlink)))
-             (or (ngit--binary-p repo path-a old) (ngit--binary-p repo path-b new)))
+       (binary
         (unless (and (equal old-bin new-bin) (not dirty))
-          (ngit--emit "Binary files " lbl-a " and " lbl-b " differ\n")))
+          (if ngit-diff--binary-patch-function
+              (funcall ngit-diff--binary-patch-function old new)
+            (ngit--emit "Binary files " lbl-a " and " lbl-b " differ\n"))))
        (t
         (let ((hunks (ngit-xdiff-unified old new ctx)))
           (unless (string= hunks "")
@@ -605,30 +624,60 @@
     (if (>= num scale) 60000 (/ (* num 60000) scale))))
 
 (defun ngit-cmd-diff (repo args)
-  (let ((cached nil) (ctx 3) (out 'patch) (renames (ngit-config-get repo "diff.renames"))
+  (let ((cached nil) (ctx 3) (out nil) (formats nil) (renames (ngit-config-get repo "diff.renames"))
         (revs nil) (paths nil) (expanded-unmerged nil) (minimum nil)
+        (exit-code nil) (quiet nil) (combined-output nil)
+        (relative (ngit-config-bool repo "diff.relative" nil))
+        (ngit-diff--relative-prefix
+         (let ((prefix (if (ngit-repo-toplevel repo) (ngit-paths-prefix repo) "")))
+           (if (string= prefix "") "" (concat prefix "/"))))
         (ngit-rename-limit-warning nil))
-    (setq renames (if (null renames) t
-                    (or (equal renames "copies") (equal renames "copy")
-                        (ngit-config-bool repo "diff.renames" t))))
+    (setq renames (ngit-config-renames-p repo "diff.renames" t))
     (while args
       (let ((a (pop args)))
         (cond ((member a '("--cached" "--staged")) (setq cached t))
+              ((string= a "--exit-code") (setq exit-code t))
+              ((string= a "--quiet") (setq quiet t exit-code t))
               ((string-match "\\`\\(?:-U\\|--unified=\\)\\([0-9]+\\)\\'" a)
-               (setq ctx (string-to-number (match-string 1 a))))
-              ((string= a "--name-only") (setq out 'name-only))
-              ((string= a "--name-status") (setq out 'name-status))
+               (setq ctx (string-to-number (match-string 1 a))
+                     formats (cons 'patch (delq 'none formats))))
+              ((string= a "--relative") (setq relative t))
+              ((string-prefix-p "--relative=" a)
+               (setq relative t ngit-diff--relative-prefix (substring a 11)))
+              ((string= a "--no-relative") (setq relative nil))
+              ((member a '("-p" "--patch" "-u"))
+               (setq formats (cons 'patch (delq 'none formats))))
+              ((member a '("-s" "--no-patch")) (setq formats '(none)))
+              ((string= a "--patch-with-stat")
+               (setq formats (append '(patch stat) (delq 'none formats))))
+              ((member a '("--stat" "--shortstat" "--numstat" "--summary"))
+               (setq formats (cons (intern (substring a 2)) (delq 'none formats))))
+              ((string= a "--name-only") (push 'name-only formats))
+              ((string= a "--name-status") (push 'name-status formats))
               ((string= a "--no-renames") (setq renames nil))
               ((member a '("-M" "--find-renames" "--find-renames=")) (setq renames t minimum nil))
               ((string-match "\\`\\(?:-M\\|--find-renames=\\)\\(.+\\)\\'" a)
                (setq renames t minimum (ngit--parse-rename-score (match-string 1 a))))
               ((string= a "--") (setq paths args args nil))
+              ((string-prefix-p ":(" a) (setq paths (cons a args) args nil))
               ((string-prefix-p "-" a) (ngit--die "unsupported diff option %s" a))
               ((string-match "\\`\\(.*\\)\\.\\.\\(.*\\)\\'" a)
                (push (if (string= (match-string 1 a) "") "HEAD" (match-string 1 a)) revs)
                (push (if (string= (match-string 2 a) "") "HEAD" (match-string 2 a)) revs))
               (t (push a revs)))))
-    (setq revs (nreverse revs))
+    (setq revs (nreverse revs)
+          formats (delete-dups (or formats '(patch))))
+    ;; diff_setup_done: name formats override every ordinary output bit,
+    ;; independently of argument order.  -s resets the accumulated formats.
+    (when (> (+ (if (memq 'name-only formats) 1 0)
+                (if (memq 'name-status formats) 1 0)
+                (if (memq 'none formats) 1 0)) 1)
+      (ngit--die "fatal: options '--name-only', '--name-status', '--check', and '-s' cannot be used together"))
+    (setq out (cond ((memq 'name-status formats) 'name-status)
+                    ((memq 'name-only formats) 'name-only)
+                    ((memq 'patch formats) 'patch)))
+    (when (memq out '(name-only name-status)) (setq formats (list out)))
+    (unless relative (setq ngit-diff--relative-prefix ""))
     (let* ((items (ngit-pathspec-items repo paths))
            (changes
             (ngit-paths-filter-changes
@@ -644,8 +693,13 @@
              (ngit--compose-tree-wt repo (ngit-diff-tree-index repo (ngit--tree-of repo (car revs)))
                                     (ngit-wt-changes repo t)))
               (t (ngit-wt-changes repo t))))))
+      (unless (string= ngit-diff--relative-prefix "")
+        (setq changes (seq-filter (lambda (c)
+                                    (string-prefix-p ngit-diff--relative-prefix (aref c 0)))
+                                  changes)))
       (cond
-       ((memq out '(name-only name-status))
+       ((or (memq out '(name-only name-status))
+            (and (not (eq out 'patch)) (not (memq 'none formats))))
         (setq changes (ngit--unmerged-name-queue repo changes cached renames minimum)
               expanded-unmerged t))
        ((and (eq out 'patch) (not cached) (null revs))
@@ -659,17 +713,54 @@
        (renames
         (require 'ngit-rename)
         (setq changes (ngit-diffcore-rename repo changes nil minimum))))
-      (dolist (c changes)
+      ;; Combined work-tree diffs flush immediately, before diff_flush emits
+      ;; the ordinary queue's stats, summary and patch (combine-diff.c).
+      (when (and (eq out 'patch) (not cached) (null revs))
+        (setq changes
+              (seq-filter
+               (lambda (c)
+                 (if (ngit--combined-change-p c)
+                     (let ((stages (ngit--unmerged-stages c)))
+                       (setq combined-output t)
+                       (unless quiet
+                         (ngit--emit-combined repo c (aref stages 2) (aref stages 3) ctx))
+                       nil)
+                   t)) changes)))
+      (let ((separator nil))
+        (when (and (not quiet)
+                   (seq-some (lambda (format) (memq format '(stat shortstat numstat))) formats))
+          (require 'ngit-diff-stat)
+          (ngit-diff--emit-stats repo changes formats)
+          (setq separator (and changes t)))
+        (when (and (not quiet) (memq 'summary formats))
+          (require 'ngit-log)
+          (let ((summary (seq-filter
+                          (lambda (c)
+                            (and (not (ngit--unmerged-stages c))
+                                 (or (memq (aref c 1) '(?A ?D ?R))
+                                     (/= (aref c 2) (aref c 4))))) changes)))
+            (when summary
+              (ngit--emit-summary
+               (mapcar (lambda (c)
+                         (let ((display (copy-sequence c)))
+                           (aset display 0 (ngit-diff--display (aref c 0)))
+                           (when (aref c 8)
+                             (aset display 8 (ngit-diff--display (aref c 8))))
+                           display)) summary))
+              (setq separator t))))
+        (when (and (not quiet) separator (eq out 'patch)) (ngit--emit "\n")))
+      (when (and (not quiet) out)
+       (dolist (c changes)
         (if (null (ngit--unmerged-stages c))
             (pcase out
-              ('name-only (ngit--emit (ngit-quote-path (aref c 0)) "\n"))
+              ('name-only (ngit--emit (ngit-quote-path (ngit-diff--display (aref c 0))) "\n"))
               ('name-status
                (ngit--emit (if (= (aref c 1) ?R)
                                (format "R%03d" (ngit-similarity-percent c))
                              (string (if (eq (aref c 6) 'ita) ?A (aref c 1))))
                            "\t"
-                           (if (aref c 8) (concat (ngit-quote-path (aref c 8)) "\t") "")
-                           (ngit-quote-path (aref c 0)) "\n"))
+                           (if (aref c 8) (concat (ngit-quote-path (ngit-diff--display (aref c 8))) "\t") "")
+                           (ngit-quote-path (ngit-diff--display (aref c 0))) "\n"))
               (_ (ngit--emit-patch repo c ctx)))
           (let* ((stages (ngit--unmerged-stages c))
                  (stage2 (and stages (aref stages 2)))
@@ -678,23 +769,23 @@
                                 (ngit--unmerged-stage2-change repo c))))
             (pcase out
               ('name-only
-               (ngit--emit (ngit-quote-path (aref c 0)) "\n"))
+               (ngit--emit (ngit-quote-path (ngit-diff--display (aref c 0))) "\n"))
               ('name-status
                (ngit--emit (if (aref c 8) "U100" "U") "\t"
-                           (ngit-quote-path (or (aref c 8) (aref c 0))) "\n"))
+                           (ngit-quote-path (ngit-diff--display (or (aref c 8) (aref c 0)))) "\n"))
               (_
                (cond
                 (cached
-                 (ngit--emit "* Unmerged path " (or (aref c 8) (aref c 0)) "\n"))
+                 (ngit--emit "* Unmerged path " (ngit-diff--display (or (aref c 8) (aref c 0))) "\n"))
                 ((and stage2 stage3) (ngit--emit-combined repo c stage2 stage3 ctx))
                 (t
-                 (ngit--emit "* Unmerged path " (or (aref c 8) (aref c 0)) "\n")
-                 (when ordinary (ngit--emit-patch repo ordinary ctx)))))))))
+                 (ngit--emit "* Unmerged path " (ngit-diff--display (or (aref c 8) (aref c 0))) "\n")
+                 (when ordinary (ngit--emit-patch repo ordinary ctx))))))))))
     (when ngit-rename-limit-warning
       (ngit-native-write-stderr
        (format "warning: exhaustive rename detection was skipped due to too many files.\nwarning: you may want to set your diff.renameLimit variable to at least %d and retry the command.\n"
                ngit-rename-limit-warning)))
-    0)))
+    (if (and exit-code (or changes combined-output)) 1 0))))
 
 (provide 'ngit-diff)
 

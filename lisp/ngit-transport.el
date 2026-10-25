@@ -17,6 +17,8 @@
 (defconst ngit-tr--zero "0000000000000000000000000000000000000000")
 (defvar ngit-tr--action "fetch")
 (defvar ngit-tr--merge-heads nil)
+(defvar ngit-tr--pull-rebase-mode nil
+  "Special pull mode whose ancestry must be checked before publishing fetch.")
 
 (defun ngit-tr--pkt (text)
   (concat (format "%04x" (+ 4 (length text))) text))
@@ -202,11 +204,20 @@
     (ngit--die "fatal: invalid refspec destination '%s'" ref))
   ref)
 
-(defun ngit-tr--install-pack (repo path)
+(defun ngit-tr--install-pack (repo path &optional check)
   (let* ((dir (expand-file-name "objects/pack/" (ngit-repo-commondir repo)))
          (idx (concat path ".idx"))
          (indexed (ngit-transport-index-pack path idx))
          (base (concat dir "pack-" (car indexed))))
+    (when check
+      ;; Read the received objects alongside the original store without
+      ;; installing anything until pull knows that no replay is required.
+      (let ((checked (copy-sequence repo)) (pack (ngit--open-pack idx))
+            (ngit--pack-order nil) (ngit--rv-repo ngit--rv-repo))
+        (aset pack 0 path)
+        (aset checked 3 (cons pack (ngit-repo-packs repo)))
+        (unwind-protect (funcall check checked)
+          (ngit-native-close idx))))
     (make-directory dir t)
     (ngit-native-close path)
     (rename-file path (concat base ".pack") t)
@@ -214,18 +225,19 @@
     (aset repo 3 nil)
     (clrhash ngit-native--sizes)))
 
-(defun ngit-tr--receive (repo conn adv wants)
+(defun ngit-tr--receive (repo conn adv wants &optional check)
   "Fetch WANTS using complete packs; omitted thin-pack avoids external bases."
   (let ((seen (make-hash-table :test 'equal)) needed)
     (dolist (oid wants)
       (when (and oid (not (gethash oid seen))
                  (not (ngit-object-exists-p repo (ngit-unhex oid))))
         (puthash oid t seen) (push oid needed)))
-    (when needed
+    (if (null needed) (when check (funcall check repo))
       (let* ((v2 (= (nth 2 adv) 2)) (parts nil)
              (progress (ngit-transport-tty-p)) (first t)
-             (tmp (expand-file-name (concat "objects/pack/incoming-" (number-to-string (emacs-pid)))
-                                    (ngit-repo-commondir repo))) fd)
+             (tmp (if check (make-temp-file "ngit-pull-")
+                    (expand-file-name (concat "objects/pack/incoming-" (number-to-string (emacs-pid)))
+                                      (ngit-repo-commondir repo)))) fd)
         (when v2 (push (ngit-tr--pkt "command=fetch\n") parts) (push "0001" parts))
         (dolist (oid (nreverse needed))
           (push (ngit-tr--pkt (concat "want " oid
@@ -261,8 +273,11 @@
                           ((and (not v2) (or (string-prefix-p "NAK" packet) (string-prefix-p "ACK " packet))) nil)
                           (t (ngit--die "fatal: protocol error in pack stream")))))))
               (syscall-direct 3 fd 0 0 0 0 0) (setq fd nil)
-              (ngit-tr--install-pack repo tmp))
+              (ngit-tr--install-pack repo tmp check))
           (when fd (syscall-direct 3 fd 0 0 0 0 0))
+          (when check
+            (ngit-native-close tmp)
+            (when (file-exists-p (concat tmp ".idx")) (delete-file (concat tmp ".idx"))))
           (when (file-exists-p tmp) (delete-file tmp)))))))
 
 (defun ngit-cmd-ls-remote (repo args)
@@ -427,7 +442,7 @@
                        (list (concat "GIT_DIR="
                                      (directory-file-name
                                       (expand-file-name (ngit-repo-gitdir repo))))
-                             "GIT_PREFIX" "GIT_INDEX_FILE" "GIT_EDITOR=true")))))
+                             "GIT_PREFIX" "GIT_INDEX_FILE")))))
             (when (and (null oid) (not quiet) (not (string-search ":" source)))
               (ngit-native-write-stderr "done.\n"))
             (setq success t)
@@ -510,6 +525,31 @@
                                  (ngit-commit (ngit-peel repo new 'commit)))
          (error nil))))
 
+(defun ngit-tr--merge-candidates (mapping explicit merge &optional duplicates)
+  "Select fetch merge candidates, deduplicating sources unless DUPLICATES."
+  (let ((seen (make-hash-table :test 'equal)) incoming)
+    (dolist (item mapping)
+      (when (and (not (nth 5 item))
+                 (or (nth 4 item) (and (not explicit) (equal (car item) merge))
+                     (and (not explicit) (equal (car item) "HEAD")))
+                 (or duplicates (not (gethash (car item) seen))))
+        (puthash (car item) t seen)
+        (push (nth 1 item) incoming)))
+    (nreverse incoming)))
+
+(defun ngit-tr--check-pull-rebase (repo mapping explicit merge mode)
+  "Refuse unsupported replay before publishing any fetched object or ref."
+  (let ((head (ngit-resolve-ref repo "HEAD"))
+        (incoming (ngit-tr--merge-candidates mapping explicit merge)))
+    ;; pull.c rejects multiple FETCH_HEAD lines after fetch, even when two
+    ;; refspecs name the same source. Preserve that ordinary failure below.
+    (when (and (not (cdr (ngit-tr--merge-candidates mapping explicit merge t)))
+               (= (length incoming) 1)
+               (not (ngit-tr--ff-p repo head (car incoming)))
+               (or (eq mode 'interactive)
+                   (not (ngit-tr--ff-p repo (car incoming) head))))
+      (ngit--die "fatal: pull with rebase=%s is not supported" mode))))
+
 (defun ngit-tr--display-fetch (url rows)
   (when rows
     (ngit-native-write-stderr (concat "From " (ngit-tr--display-url (if (string-suffix-p ".git" url) (substring url 0 -4) url)) "\n"))
@@ -550,19 +590,22 @@
            (conn (ngit-transport-open repo url "git-upload-pack"))
            (branch (ngit-tr--branch repo))
            (merge (and branch (ngit-config-get repo (concat "branch." branch ".merge"))))
-           (fetch-head nil) (rows nil) (failed nil) (missing-tags nil)
-           (merged (make-hash-table :test 'equal)))
+           (fetch-head nil) (rows nil) (failed nil) (missing-tags nil))
       (setq ngit-tr--merge-heads nil)
       (unwind-protect
           (let* ((adv (progn
                         ;; Git clears FETCH_HEAD before reading advertisements
                         ;; or validating ref mappings, even when fetch fails.
-                        (unless append
+                        (unless (or append ngit-tr--pull-rebase-mode)
                           (ngit-write-file
                            (expand-file-name "FETCH_HEAD" (ngit-repo-gitdir repo)) ""))
                         (ngit-tr--advertise conn)))
                  (refs (car adv))
-                 (mapping (ngit-tr--fetch-map refs specs tracking explicit tags)) wants)
+                 (mapping (ngit-tr--fetch-map refs specs tracking explicit tags))
+                 (check (when ngit-tr--pull-rebase-mode
+                          (lambda (checked)
+                            (ngit-tr--check-pull-rebase
+                             checked mapping explicit merge ngit-tr--pull-rebase-mode)))) wants)
             (dolist (item mapping)
               (when (and (nth 2 item) (string-prefix-p "refs/heads/" (nth 2 item)))
                 (let ((where (ngit--branch-checked-out repo (nth 2 item))))
@@ -574,13 +617,15 @@
                            (lambda (oid)
                              (and oid (not (ngit-object-exists-p repo (ngit-unhex oid)))))
                            wants)))
-              (ngit-tr--receive repo conn adv wants)
+              (ngit-tr--receive repo conn adv wants check)
               ;; Git checks upload-pack's status when it requested a pack,
               ;; but accepts a complete advertisement for a no-op fetch.
               (when needed
                 (ngit-transport-finish-write conn)
                 (unless (= 0 (ngit-transport-close conn))
                   (ngit--die-with 1 "error: remote transport failed"))))
+            (when (and ngit-tr--pull-rebase-mode (not append))
+              (ngit-write-file (expand-file-name "FETCH_HEAD" (ngit-repo-gitdir repo)) ""))
             ;; Auto-follow only tags whose peeled targets arrived with this fetch.
             (unless (or no-tags tags)
               (dolist (ref refs)
@@ -612,6 +657,7 @@
             (setq mapping
                   (append (seq-remove (lambda (item) (nth 5 item)) mapping)
                           (seq-filter (lambda (item) (nth 5 item)) mapping)))
+            (setq ngit-tr--merge-heads (ngit-tr--merge-candidates mapping explicit merge))
             (when (or prune (ngit-config-bool repo (concat "remote." remote ".prune")
                                             (ngit-config-bool repo "fetch.prune" nil)))
               (dolist (local (ngit-list-refs repo))
@@ -632,9 +678,6 @@
                      (dest-tag (and dest (string-prefix-p "refs/tags/" dest)))
                      (ignore-head (nth 5 item))
                      (short (ngit-tr--short src)) code summary message reason)
-                (when (and mergep (not ignore-head) (not (gethash src merged)))
-                  (puthash src t merged)
-                  (push oid ngit-tr--merge-heads))
                 (unless ignore-head
                   (push (cons mergep (concat oid "\t" (if mergep "" "not-for-merge") "\t"
                                              (cond ((equal src "HEAD") "") (tag (concat "tag '" short "' of "))
@@ -674,30 +717,206 @@
           (ngit-transport-finish-write conn)
           (ngit-transport-close conn))))))
 
+(defun ngit-tr--config-rebase (repo key)
+  "Read KEY as a rebase mode, retaining Git's special-value diagnostics."
+  (let ((value (ngit-config-get repo key)))
+    (cond ((member value '("merges" "m")) 'merges)
+          ((member value '("interactive" "i")) 'interactive)
+          (t (condition-case nil
+                 (ngit--config-boolean-value value key)
+               (ngit-fatal
+                (when (member value '("preserve" "p"))
+                  (ngit-native-write-stderr
+                   (concat "error: " value ": 'preserve' superseded by 'merges'\n")))
+                (ngit--die "fatal: invalid value for '%s': '%s'" key value)))))))
+
+(defun ngit-tr--pull-up-to-date (repo head incoming mode quiet action)
+  "Finish a special-mode pull whose existing linear commits need no replay."
+  (let* ((branch (ngit-tr--branch repo))
+         (ref (and branch (concat "refs/heads/" branch))))
+    (if (eq mode 'interactive)
+        (progn
+          ;; Git skips every unnecessary pick, then checks out that same
+          ;; tip and finishes. Only HEAD's start/finish reflogs are added.
+          (ngit--write-ref repo "ORIG_HEAD" head (ngit-resolve-ref repo "ORIG_HEAD") nil)
+          (ngit--switch-write-head repo nil head head (concat action " (start): checkout " incoming))
+          (when ref
+            (ngit--switch-write-head repo ref head head
+                                     (concat action " (finish): returning to " ref)))
+          (unless quiet
+            (ngit-native-write-stderr
+             (concat "Successfully rebased and updated " (or ref "detached HEAD") ".\n"))))
+      (unless quiet
+        (ngit--emit (if branch (concat "Current branch " branch " is up to date.\n")
+                      "HEAD is up to date.\n"))))
+    0))
+
+(defun ngit-tr--pull-changes (repo)
+  "Return unstaged and staged changes, ignoring submodules as pull.c does."
+  (let ((ordinary (lambda (c) (and (/= (aref c 2) ngit-mode-gitlink)
+                                   (/= (aref c 4) ngit-mode-gitlink)))))
+    (list (seq-filter ordinary (ngit-wt-changes repo nil t))
+          (seq-filter ordinary (ngit-diff-tree-index
+                                repo (ngit--switch-tree repo (ngit-resolve-ref repo "HEAD")))))))
+
+(defun ngit-tr--check-pull-worktree (repo autostash)
+  "Check the requested rebase before fetch or ff-only mode selection."
+  (when (and (not (ngit-resolve-ref repo "HEAD"))
+             (> (length (ngit-index-entries repo)) 0))
+    (ngit--die "fatal: Updating an unborn branch with changes added to the index."))
+  (unless autostash
+    (let* ((changes (ngit-tr--pull-changes repo))
+           (unstaged (car changes)) (staged (cadr changes)))
+      (when (or unstaged staged)
+        (ngit--die-with
+         128 "%s%s%s"
+         (if unstaged "error: cannot pull with rebase: You have unstaged changes.\n" "")
+         (if staged (if unstaged "error: additionally, your index contains uncommitted changes.\n"
+                      "error: cannot pull with rebase: Your index contains uncommitted changes.\n") "")
+         "error: Please commit or stash them.")))))
+
+(defun ngit-tr--create-autostash (repo head)
+  "Create merge's temporary stash without changing refs/stash or HEAD."
+  (let* ((changes (ngit-tr--pull-changes repo)) (wt (car changes)))
+    (when (or wt (cadr changes))
+      (require 'ngit-stash)
+      (let* ((index (ngit--stash-refresh repo)) (old (aref index 0))
+             (branch (or (ngit-tr--branch repo) "(no branch)"))
+             (label (concat branch ": " (ngit-abbrev repo head) " " (ngit--subject-of repo head)))
+             (root (or (ngit-ct-root index) (ngit-ct-new)))
+             (itree (ngit-ct-update repo root old))
+             (icommit (ngit--stash-commit repo itree (list head) (concat "index on " label "\n")))
+             (dropped (make-hash-table :test 'equal)) targets)
+        (ngit-write-index repo index old root)
+        (setq index (ngit-read-index repo) old (aref index 0))
+        (dolist (c wt)
+          (let ((path (aref c 0)))
+            (puthash path t dropped)
+            (when (/= (aref c 4) 0)
+              (push (ngit--switch-entry
+                     path (aref c 4)
+                     (ngit-write-object repo "blob" (ngit-wt-content repo path (ngit-wt-lstat path)))
+                     nil) targets))))
+        (let* ((tree (ngit--stash-tree repo index (ngit-index-overlay old targets dropped) wt))
+               (hex (ngit--stash-commit repo tree (list head icommit) (concat "On " branch ": autostash"))))
+          (ngit--write-ref repo "MERGE_AUTOSTASH" hex nil nil)
+          (ngit--reset-hard repo (ngit--switch-tree repo head) "HEAD")
+          hex)))))
+
+(defun ngit-tr--apply-autostash (repo hex)
+  "Restore HEX quietly, storing it in refs/stash on conflicts."
+  (let ((ngit--out nil) (stderr (symbol-function 'ngit-native-write-stderr)) status)
+    (unwind-protect
+        (progn
+          (fset 'ngit-native-write-stderr (lambda (&rest ignored) nil))
+          (setq status (condition-case nil (ngit--stash-apply repo (list hex nil hex) nil t)
+                         (ngit-fatal 1))))
+      (fset 'ngit-native-write-stderr stderr))
+    (if (= status 0)
+        (ngit-native-write-stderr "Applied autostash.\n")
+      (let ((log (ngit--stash-log-file repo)))
+        (ngit-make-directory (file-name-directory log) t)
+        (unless (file-exists-p log) (ngit-write-file log ""))
+        (ngit--write-ref repo "refs/stash" hex (ngit-resolve-ref repo "refs/stash") "autostash" t))
+      (ngit-native-write-stderr
+       "Applying autostash resulted in conflicts.\nYour changes are safe in the stash.\nYou can run \"git stash pop\" or \"git stash drop\" at any time.\n"))
+    (ngit--delete-ref repo "MERGE_AUTOSTASH")))
+
+(defun ngit-tr--pull-merge (repo args autostash head incoming)
+  "Run merge, applying the selected autostash for a dirty fast-forward."
+  ;; merge.c refuses a resolved cherry-pick before creating its autostash.
+  ;; Unlike pull.c's index/MERGE_HEAD checks, this check follows fetch.
+  (when (ngit-resolve-ref repo "CHERRY_PICK_HEAD")
+    (ngit--die
+     (concat "fatal: You have not concluded your cherry-pick (CHERRY_PICK_HEAD exists)."
+             (if (ngit-config-bool repo "advice.resolveConflict" t)
+                 "\nPlease, commit your changes before you merge." ""))))
+  (let ((stash (and autostash head (not (equal head incoming))
+                    (ngit-tr--ff-p repo head incoming) (ngit-tr--create-autostash repo head))))
+    (if (not stash) (ngit-cmd-merge repo args)
+      (let (output status)
+        (unwind-protect
+            (let ((ngit--out nil))
+              (setq status (condition-case err (ngit-cmd-merge repo args)
+                             (ngit-fatal (ngit-native-write-stderr (concat (cadr err) "\n"))
+                                         (or (nth 2 err) 128))))
+              (setq output (apply #'concat (nreverse ngit--out))))
+          ;; merge prints its Updating line before creating the autostash.
+          (let ((end (and output (string-prefix-p "Updating " output) (string-search "\n" output))))
+            (when end (ngit--emit (substring output 0 (1+ end))))
+            (ngit--emit "Created autostash: " (ngit-abbrev repo stash) "\n"
+                        (if end (substring output (1+ end)) (or output ""))))
+          (ngit-tr--apply-autostash repo stash))
+        status))))
+
 (defun ngit-cmd-pull (repo args)
-  (let ((fetch-args nil) (merge-args nil) (rebase nil) (rebase-set nil)
+  (let ((fetch-args nil) (merge-args nil) (rebase nil) (rebase-set nil) ff-option
+        autostash
         (action (concat "pull" (if args (concat " " (mapconcat #'identity args " ")) ""))))
     (dolist (a args)
       (cond ((or (equal a "--rebase") (equal a "--rebase=true") (equal a "-r")) (setq rebase t rebase-set t))
+            ((member a '("--rebase=merges" "--rebase=m")) (setq rebase 'merges rebase-set t))
+            ((member a '("--rebase=interactive" "--rebase=i")) (setq rebase 'interactive rebase-set t))
             ((or (equal a "--no-rebase") (equal a "--rebase=false")) (setq rebase nil rebase-set t))
-            ((member a '("--ff-only" "--ff" "--no-ff" "--no-edit" "--no-stat" "--stat")) (push a merge-args))
+            ((equal a "--autostash") (setq autostash 'yes))
+            ((equal a "--no-autostash") (setq autostash 'no))
+            ((member a '("--ff-only" "--ff" "--no-ff")) (setq ff-option a))
+            ((member a '("--no-edit" "--no-stat" "--stat")) (push a merge-args))
             ((member a '("-q" "--quiet")) (push a merge-args) (push a fetch-args))
             (t (push a fetch-args))))
     (unless rebase-set
-      (setq rebase (or (ngit-config-bool repo (concat "branch." (or (ngit-tr--branch repo) "") ".rebase") nil)
-                       (ngit-config-bool repo "pull.rebase" nil))))
-    (unless (seq-some (lambda (arg) (member arg '("--ff" "--no-ff" "--ff-only"))) merge-args)
+      (let ((key (concat "branch." (or (ngit-tr--branch repo) "") ".rebase")))
+        (setq rebase (ngit-tr--config-rebase
+                      repo (if (ngit-config-get repo key) key "pull.rebase")))))
+    (unless ff-option
       (let ((ff (ngit-config-get repo "pull.ff")))
-        (cond ((equal ff "only") (push "--ff-only" merge-args))
-              ((equal ff "false") (push "--no-ff" merge-args))
-              ((equal ff "true") (push "--ff" merge-args)))))
-    (let ((ngit-tr--action action) (ngit-tr--merge-heads nil))
+        ;; pull.c lets any explicit rebase option override configured only,
+        ;; before reading the branch/pull rebase configuration.
+        (setq ff-option (cond ((equal ff "only") (if rebase-set "--ff" "--ff-only"))
+                              ((equal ff "false") "--no-ff")
+                              ((equal ff "true") "--ff")))))
+    (when ff-option (push ff-option merge-args))
+    (setq autostash (if autostash (eq autostash 'yes)
+                      (ngit-config-bool repo (if rebase "rebase.autostash" "merge.autostash") nil)))
+    ;; pull.c checks these before require_clean_work_tree and run_fetch,
+    ;; including when ff-only will select merge instead of rebase.
+    (when (aref (ngit-read-index repo) 9)
+      (ngit--die
+       (concat "error: Pulling is not possible because you have unmerged files.\n"
+               (if (ngit-config-bool repo "advice.resolveConflict" t)
+                   "hint: Fix them up in the work tree, and then use 'git add/rm <file>'\nhint: as appropriate to mark resolution and make a commit.\n" "")
+               "fatal: Exiting because of an unresolved conflict.")))
+    (when (file-exists-p (expand-file-name "MERGE_HEAD" (ngit-repo-gitdir repo)))
+      (ngit--die
+       (concat "error: You have not concluded your merge (MERGE_HEAD exists).\n"
+               (if (ngit-config-bool repo "advice.resolveConflict" t)
+                   "hint: Please, commit your changes before merging.\n" "")
+               "fatal: Exiting because of unfinished merge.")))
+    (when rebase (ngit-tr--check-pull-worktree repo autostash))
+    (let ((ngit-tr--action action) (ngit-tr--merge-heads nil)
+          (ngit-tr--pull-rebase-mode (and (memq rebase '(merges interactive))
+                                         (not (equal ff-option "--ff-only")) rebase)))
       (let ((status (ngit-cmd-fetch repo (nreverse fetch-args))))
         (if (/= status 0) status
           (unless ngit-tr--merge-heads (ngit--die "There is no tracking information for the current branch.\nPlease specify which branch you want to merge with."))
+          (let ((heads (split-string
+                        (ngit--read-file (expand-file-name "FETCH_HEAD" (ngit-repo-gitdir repo))) "\n" t)))
+            (when (and rebase (> (length (seq-filter
+                                        (lambda (line) (string-search "\t\t" line)) heads)) 1))
+              (ngit--die "fatal: Cannot rebase onto multiple branches.")))
           (when (cdr ngit-tr--merge-heads) (ngit--die "fatal: Cannot merge multiple branches with ngit pull."))
           (let ((old-action (getenv "GIT_REFLOG_ACTION"))
                 (head (ngit-resolve-ref repo "HEAD")) (incoming (car ngit-tr--merge-heads)))
+            ;; pull.c refuses a divergent --ff-only before invoking merge,
+            ;; so this failure must not publish merge's ORIG_HEAD either.
+            (when (and head (equal ff-option "--ff-only")
+                       (not (ngit-tr--ff-p repo head incoming))
+                       (not (ngit-tr--ff-p repo incoming head)))
+              (ngit--die
+               (concat
+                (if (ngit-config-bool repo "advice.diverging" t)
+                    "hint: Diverging branches can't be fast-forwarded, you need to either:\nhint:\nhint: \tgit merge --no-ff\nhint:\nhint: or:\nhint:\nhint: \tgit rebase\nhint:\nhint: Disable this message with \"git config advice.diverging false\"\n" "")
+                "fatal: Not possible to fast-forward, aborting.")))
             (when (and (not rebase-set)
                        (not (ngit-config-get repo "pull.rebase"))
                        (not (ngit-config-get repo (concat "branch." (or (ngit-tr--branch repo) "") ".rebase")))
@@ -711,18 +930,26 @@
             (unwind-protect
                 (progn
                   (setenv "GIT_REFLOG_ACTION" action)
+                  (when (and ngit-tr--pull-rebase-mode (ngit-tr--ff-p repo head incoming))
+                    ;; builtin/pull.c uses merge --ff-only even with pull.ff=false.
+                    (setq merge-args (cons "--ff-only" (seq-remove
+                                                       (lambda (arg) (member arg '("--ff" "--no-ff" "--ff-only")))
+                                                       merge-args))))
                   (if (and rebase (not (member "--ff-only" merge-args))
                            (not (ngit-tr--ff-p repo head incoming)))
-                      (ngit-cmd-rebase repo (list "--onto" incoming incoming))
+                      (if ngit-tr--pull-rebase-mode
+                          (ngit-tr--pull-up-to-date repo head incoming rebase
+                                                   (or (member "-q" merge-args) (member "--quiet" merge-args)) action)
+                        (ngit-cmd-rebase repo (list "--onto" incoming incoming)))
                     (let* ((text (ngit--read-file (expand-file-name "FETCH_HEAD" (ngit-repo-gitdir repo))))
                            (line (car (split-string text "\n" t)))
                            (fields (split-string line "\t"))
                            (title (concat "Merge " (nth 2 fields))))
-                      (ngit-cmd-merge repo
+                      (ngit-tr--pull-merge repo
                                       (append (nreverse merge-args)
                                               (unless (or (equal head incoming) (ngit-tr--ff-p repo head incoming))
                                                 (list "-m" title))
-                                              (list "FETCH_HEAD"))))))
+                                              (list "FETCH_HEAD")) autostash head incoming))))
               (setenv "GIT_REFLOG_ACTION" old-action))))))))
 
 (defun ngit-tr--push-map (repo refs specs all tags delete)

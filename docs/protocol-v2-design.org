@@ -1,0 +1,126 @@
+#+TITLE: Protocol v2 for ngit: design
+#+STATUS: DESIGN (not implemented; separate objective and ledger)
+
+* Goal
+
+Fetch-side Git wire protocol version 2 that behaves like Git 2.47.3 on every
+transport ngit supports (file://, local paths, ssh, smart HTTP(S)), so that
+clone, fetch, pull and ls-remote send the same requests as Git and produce
+the same output and repository state.  Push (receive-pack) stays on
+protocol v0, as in Git.
+
+Shallow and partial clones, packfile-uris, bundle-uri, object-info and
+sideband-all are out of scope; they get their own objective once v2
+negotiation exists.
+
+* Current state (commit 273be60)
+
+- file:// and ssh upload-pack: the child gets =GIT_PROTOCOL=version=2=
+  (ssh with =-o SendEnv=GIT_PROTOCOL=), and =ngit-tr--advertise= accepts a
+  =version 2= capability list and sends =ls-refs= with =peel=, =symrefs=
+  and =unborn= when advertised.  It never sends =ref-prefix=.
+- =ngit-tr--receive= sends one =fetch= request with every want, a =have=
+  for every local ref tip and =done=: no negotiation rounds, no
+  acknowledgments section, no =wait-for-done=, no capability checks
+  (=agent=, =object-format=, =server-option=).
+- protocol.version is not read: v2 is always requested for upload-pack and
+  =GIT_PROTOCOL= from the caller is dropped.
+- Smart HTTP (=ngit-transport-http.el=) speaks v0 only: discovery GET
+  without a =Git-Protocol= header and one POST.  README lists "HTTP
+  protocol v2" as unsupported.
+
+* Git behaviour to match
+
+- Selection (protocol.c, connect.c, transport.c): =protocol.version=
+  (default 2; 0, 1, 2; any other value is fatal) applies to upload-pack
+  only.  file/ssh pass =GIT_PROTOCOL=version=N=; HTTP sends the header
+  =Git-Protocol: version=2=.  A server that ignores the request answers
+  with a v0 advertisement and the client continues in v0.
+- HTTP discovery (http-backend.c get_info_refs, remote-curl.c
+  discover_refs): for v2 the server omits the =# service== preamble and
+  answers with =version 2= and the capability list.  Each command is then a
+  separate POST to =/git-upload-pack= carrying the =Git-Protocol= header;
+  the client is stateless, so every negotiation round resends the wants
+  and the common haves.
+- ls-refs (ls-refs.c, builtin/fetch.c, clone.c, ls-remote.c): =peel=,
+  =symrefs=, =unborn= when advertised, and =ref-prefix= lines: fetch
+  derives them from the refspecs (plus =refs/tags/= when tags are
+  followed and HEAD when needed); clone sends =HEAD= plus the default
+  refspec prefixes and =refs/tags/=; ls-remote sends prefixes only for
+  =--heads=/=--tags=.  Prefixes change only what the server sends;
+  ls-remote patterns still filter on the client.
+- fetch (fetch-pack.c do_fetch_pack_v2, negotiator/default.c): the first
+  request carries wants and capabilities (=thin-pack= unless disabled,
+  =no-progress=, =include-tag=, =ofs-delta=, =agent=, =object-format= when
+  advertised, =server-option= for =-o=).  Haves come from the
+  commit-walking negotiator in batches (INITIAL_FLUSH 16, then doubling up
+  to PIPESAFE_FLUSH 32 increments for stateless RPC); the server replies
+  with an =acknowledgments= section (=ACK=, =NAK=, =ready=), and the client
+  sends =done= after =ready=, when it runs out of haves, or after
+  MAX_IN_VAIN (256) haves without a new common commit.  The final response
+  has optional =shallow-info= and =wanted-refs= sections and the
+  =packfile= section with side-band data.
+- Errors: =ERR= packets become =fatal: remote error: ...=; an unknown
+  section, a missing =packfile= or a bad object format are protocol
+  errors with Git's exact messages.
+
+* Design
+
+1. *Protocol selection* (ngit-transport.el): one function returns the
+   version for a (repo, service) from =protocol.version= and validates it
+   with Git's fatal message.  It replaces the hard-coded =v2= flag in
+   =ngit-transport-open= and drives the env variable (file/ssh) and the
+   header (HTTP).
+2. *Capabilities*: parse the v2 list once into an alist kept on the
+   connection; reject a non-sha1 =object-format= as Git does; echo =agent=
+   only when Git would.
+3. *ls-refs*: compute =ref-prefix= lines with Git's rules per command
+   (fetch refspecs, clone, ls-remote options).  Reuse the existing
+   advertisement parser.
+4. *Negotiation*: port the default negotiator (priority queue of local
+   commits by date, marking common ancestors) used by both v0 stateful
+   and v2 stateless paths, so the haves, their order and batch sizes match
+   Git.  This also replaces the current "every ref tip" haves in v0.
+5. *Stateless RPC*: a request writer that rebuilds wants plus the known
+   common haves for each round; on file/ssh the same writer runs over the
+   open pipe.
+6. *HTTP v2*: discovery with the =Git-Protocol= header, v2 detection
+   without the preamble, one POST per command and per negotiation round,
+   reusing the existing credential, redirect (no POST replay) and TLS
+   policy code unchanged.
+7. *Response parsing*: a section reader for =acknowledgments=,
+   =shallow-info=, =wanted-refs= and =packfile=, feeding the existing
+   pack installer.
+
+Each part keeps the no-hooks/no-network fast paths cheap: nothing new loads
+for local operations that do not touch a remote.
+
+* Implementation units (each with its own lane)
+
+1. Selection + capabilities + ls-refs =ref-prefix= on file/ssh
+   (ls-remote, clone and fetch discovery).
+2. HTTP v2 discovery and single-round fetch.
+3. Default negotiator and multi-round negotiation on all transports,
+   v0 included.
+4. Error paths, =-o=/server options and v0 fallback against v0-only
+   servers.
+
+* Verification plan (draft ledger criteria)
+
+- Wire transcripts: a recording wrapper for =--upload-pack= (file/ssh) and
+  the existing smart-HTTP fixture (test/smart-http-fixture.py) log every
+  request body and header; ngit's requests must equal Git's byte for byte
+  for clone, fetch with and without local history, ls-remote with options,
+  and each =protocol.version=.
+- Output and state: clone/fetch/pull/ls-remote output, refs, FETCH_HEAD and
+  object sets equal Git's, with =git fsck= clean.
+- Negotiation: histories where common commits are deep (more than 16 and
+  more than 256 haves) produce the same rounds and pack sizes as Git.
+- Fallback and errors: v0-only server, =ERR= packets, malformed sections,
+  invalid =protocol.version=, unsupported object format.
+- Controls: on the baseline the HTTP discovery request lacks the
+  =Git-Protocol= header and file/ssh fetch requests lack =ref-prefix= and
+  negotiation rounds, so the transcript comparisons fail before the change.
+- End to end: clone, fetch and pull over verified HTTPS and over ssh from a
+  repository with real history, compared with Git, in byte-code and source
+  modes.

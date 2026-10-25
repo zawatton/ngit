@@ -150,7 +150,7 @@ ignore lists of the top and of every directory down to DIR inclusive,
 and the first of those directories that is itself ignored, if any."
   (let* ((top (file-name-as-directory (ngit-repo-toplevel repo)))
          (stack (ngit-ignore-global-patterns repo))
-         (own (ngit-read-ignore-file (concat top ".gitignore") ""))
+         (own (ngit-read-ignore-file (concat top ".gitignore") "" t))
          (start 0) (ignored nil))
     (when own (push (ngit-compile-ignore own) stack))
     (while (and (not ignored) (< start (length dir)))
@@ -160,7 +160,7 @@ and the first of those directories that is itself ignored, if any."
             (setq ignored sub)
           (setq own (ngit-read-ignore-file
                      (concat top (decode-coding-string sub 'utf-8) "/.gitignore")
-                     (concat sub "/")))
+                     (concat sub "/") t))
           (when own (push (ngit-compile-ignore own) stack)))
         (setq start (1+ slash))))
     (cons stack ignored)))

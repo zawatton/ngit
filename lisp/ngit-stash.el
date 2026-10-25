@@ -9,6 +9,7 @@
 
 ;;; Code:
 
+(require 'ngit-command-paths)
 (require 'ngit-switch)
 
 (defun ngit--stash-parents (repo commit)
@@ -38,14 +39,15 @@
 (defun ngit--stash-index-matches-p (entries item)
   "Check one pathspec without collecting its matching index entries."
   (let ((path (car item)))
-    (if (not (cdr item))
+    (if (and (vectorp path) (aref path 4)) t
+     (if (not (cdr item))
         (or (and (string= path "") (> (length entries) 0))
             (ngit-index-lookup entries path) (ngit-index-dir-p entries (concat path "/")))
       (let ((ngit--rv-paths (list item)) (i 0) (found nil))
         (while (and (not found) (< i (length entries)))
-          (setq found (eq (ngit--ps-class (aref (aref entries i) 0) nil) 'full)
+          (setq found (eq (ngit-command-path-class (list item) (aref (aref entries i) 0) nil) 'full)
                 i (1+ i)))
-        found))))
+        found)))))
 
 (defun ngit--stash-tree (repo index entries changes)
   "Write ENTRIES, reusing INDEX's cache tree except at CHANGES."
@@ -138,7 +140,9 @@
     (let* ((head (or (ngit-resolve-ref repo "HEAD")
                      (ngit--die-with 1 "You do not have the initial commit yet")))
            (base (ngit--switch-tree repo head))
-           (items (mapcar (lambda (p) (ngit--ps-item (ngit--pathspec-item repo p))) paths))
+           (items (ngit-command-path-items repo paths))
+           (selectors (mapcar #'car items))
+           (ngit--untracked-pathspecs (and (ngit-pathspec-attr-p selectors) selectors))
            (index (ngit--stash-refresh repo)) (old (aref index 0))
            (staged (ngit-diff-tree-index repo base))
            (wt (seq-filter (lambda (c) (ngit--stash-covered-p items (aref c 0)))
@@ -150,7 +154,8 @@
         (let ((remaining items))
           (dolist (p paths)
             (unless (ngit--stash-index-matches-p old (car remaining))
-              (ngit--die-with 1 "error: pathspec ':(prefix:0)%s' did not match any file(s) known to git\nDid you forget to 'git add'?" p))
+              (ngit--die-with 1 "error: pathspec '%s' did not match any file(s) known to git\nDid you forget to 'git add'?"
+                             (ngit-command-path-origin repo p)))
             (setq remaining (cdr remaining)))))
       (if (not (or wt unames
                    (seq-some (lambda (c) (ngit--stash-covered-p items (aref c 0))) staged)))

@@ -24,9 +24,8 @@ merge.renameLimit still bounds its similarity search."
 
 (defun ngit-merge-rename-map (repo base side)
   "Return fresh (SOURCE . DESTINATION) pairs from BASE to SIDE."
-  (let* ((value (or (ngit-config-get repo "merge.renameLimit")
-                    (ngit-config-get repo "diff.renameLimit")))
-         (limit (if value (string-to-number value) 7000))
+  (let* ((limit (or (ngit-config-int repo "merge.renameLimit" nil)
+                    (ngit-config-int repo "diff.renameLimit" 7000)))
          ;; Zero means unlimited, as in diffcore-rename.
          (limit (if (<= limit 0) 32767 limit))
          (ngit-rename-limit-warning nil)

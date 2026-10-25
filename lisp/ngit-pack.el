@@ -410,9 +410,8 @@ a large Lisp-string-to-native copy for blobs."
       (when (and own-temp tmp (file-exists-p tmp)) (delete-file tmp)))))
 
 (defun ngit-pack--compression-level (repo)
-  (let ((v (or (ngit-config-get repo "pack.compression")
-               (ngit-config-get repo "core.compression"))))
-    (if (stringp v) (string-to-number v) 1)))
+  (ngit-config-compression-level repo "pack.compression"
+                   (ngit-config-compression-level repo "core.compression" 1)))
 
 ;;;; Delta creation (diff-delta.c)
 

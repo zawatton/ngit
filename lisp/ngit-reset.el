@@ -8,13 +8,13 @@
 
 ;;; Code:
 
+(require 'ngit-command-paths)
 (require 'ngit-branch)
 (require 'ngit-commit)
 (require 'ngit-checkout)
 
 (defun ngit--reset-covered-p (items path)
-  (let ((ngit--rv-paths items))
-    (eq (ngit--ps-class path nil) 'full)))
+  (eq (ngit-command-path-class items path nil) 'full))
 
 (defun ngit--reset-invalidate (root replaced path)
   (puthash path t replaced)
@@ -106,7 +106,7 @@ If CANDIDATES is a cons, collect unverified paths in its car for a later diff."
   "Reset the index to TREE, limited to PATHS when non-nil."
   (let* ((index (ngit-read-index repo)) (old (aref index 0))
          (root (ngit-ct-root index))
-         (items (mapcar (lambda (p) (ngit--ps-item (ngit--pathspec-item repo p))) paths))
+         (items (ngit-command-path-items repo paths))
          (changes (ngit-diff-tree-index repo tree))
          (replaced (make-hash-table :test 'equal))
          (checked (make-hash-table :test 'eql))
@@ -341,7 +341,8 @@ protected entry checks and before the first work-tree deletion or write."
                                "Use '--' to separate paths from revisions, like this:\n"
                                "'git <command> [<revision>...] -- [<file>...]'") (car rest)))
           (setq rev (car rest) paths (cdr rest)))
-         ((or file (ngit--glob-special-p (car rest) 0)) (setq paths rest))
+         ((or file (string-prefix-p ":(" (car rest))
+              (ngit--glob-special-p (car rest) 0)) (setq paths rest))
          (t (ngit--reset-unknown (car rest)))))))
     (when (string= rev "@") (setq rev "HEAD"))
     (when (member "" paths)

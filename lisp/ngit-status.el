@@ -59,24 +59,9 @@ one concatenation for each byte that needs quoting."
     out))
 
 (defun ngit-cmd-ls-files (repo args)
-  (let* ((unmerged (or (member "-u" args) (member "--unmerged" args)))
-         (stage (or unmerged (member "-s" args) (member "--stage" args)))
-         (entries (ngit-index-entries repo))
-         (names (ngit-quote-paths (vconcat (mapcar (lambda (e) (aref e 0)) entries))))
-         (modes nil) (i 0) (n (length entries)))
-    (while (< i n)
-      (let ((e (aref entries i)))
-        (unless (and unmerged (= (aref e 3) 0))
-          (if stage
-            (let ((m (or (cdr (assq (aref e 2) modes))
-                         (let ((s (ngit--octal6 (aref e 2)))) (push (cons (aref e 2) s) modes) s))))
-              (push (concat m " " (ngit-hex (aref e 1))
-                            (aref [" 0\t" " 1\t" " 2\t" " 3\t"] (aref e 3))
-                            (aref names i) "\n")
-                    ngit--out))
-            (push (concat (aref names i) "\n") ngit--out))))
-      (setq i (1+ i)))
-    0))
+  "Use the shared selector and invocation-relative listing implementation."
+  (require 'ngit-ls-files)
+  (ngit-cmd-list-files repo args))
 
 (defun ngit-cmd-config (repo args)
   (let ((key (car (last args))))
@@ -255,9 +240,8 @@ one concatenation for each byte that needs quoting."
 (defun ngit--status-renames-p (repo)
   (if (not (eq ngit--status-rename-override 'default))
       ngit--status-rename-override
-    (let* ((key (if (ngit-config-get repo "status.renames") "status.renames" "diff.renames"))
-           (value (ngit-config-get repo key)))
-      (or (member value '("copy" "copies")) (ngit-config-bool repo key t)))))
+    (let ((key (if (ngit-config-get repo "status.renames") "status.renames" "diff.renames")))
+      (ngit-config-renames-p repo key t))))
 
 (defun ngit-status-collect (repo &optional items)
   "Return branch, merge state and staged, unmerged, unstaged and untracked paths."
@@ -273,9 +257,9 @@ one concatenation for each byte that needs quoting."
          (unmerged nil))
     (when renames
       (require 'ngit-rename)
-      (let ((limit (ngit-config-get repo "status.renameLimit")))
-        (setq staged (ngit-diffcore-rename repo staged (and limit (string-to-number limit)))
-              unstaged (ngit-diffcore-rename repo unstaged (and limit (string-to-number limit))))))
+      (let ((limit (ngit-config-int repo "status.renameLimit" nil)))
+        (setq staged (ngit-diffcore-rename repo staged limit)
+              unstaged (ngit-diffcore-rename repo unstaged limit))))
     (setq staged (delq nil (mapcar (lambda (c)
                                     (if (= (aref c 1) ?U)
                                         (progn (push c unmerged) nil)
@@ -320,6 +304,7 @@ one concatenation for each byte that needs quoting."
   (ngit--status-directory-warning repo items)
   (if (ngit-pathspec-magic-p items)
       (let* ((top (file-name-as-directory (ngit-repo-toplevel repo)))
+             (ngit--untracked-pathspecs (and (ngit-pathspec-attr-p items) items))
              (tracked (ngit--tracked-set (ngit-index-entries repo))) (out nil))
         (ngit-wt-setup top)
         (dolist (path (ngit-untracked repo))

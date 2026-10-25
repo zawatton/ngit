@@ -225,11 +225,53 @@ Return one of `match', `nomatch', `abort-all', `abort-to-starstar'."
 
 ;;;; gitignore
 
-(defun ngit-read-ignore-file (path base)
+(defun ngit--worktree-nofollow-p (path name)
+  "Reject a worktree symlink PATH with Git's nofollow diagnostic for NAME."
+  (if (file-symlink-p path)
+      (progn
+        (ngit-native-write-stderr
+         (concat "warning: unable to access '" (decode-coding-string name 'utf-8)
+                 "': Too many levels of symbolic links\n"))
+        nil)
+    t))
+
+(defun ngit--read-worktree-file (path name)
+  "Read PATH atomically without following a symlink, diagnosing NAME.
+The descriptor is private; a rename between lstat and open cannot redirect
+attribute or ignore reads to the target of a symlink."
+  (let* ((bytes (encode-coding-string path 'utf-8))
+         (address (nl-ffi-memory-address (ngit-native--buffer 3 (1+ (length bytes))))))
+    (ptr-write-bytes address bytes)
+    (ptr-write-u8 address (length bytes) 0)
+    (let ((descriptor (syscall-direct ngit-native--sys-open address
+                                      (logior ngit-native--o-rdonly-cloexec #o400000)
+                                      0 0 0 0)))
+      (if (< descriptor 0)
+          (progn
+            (when (= descriptor -40)
+              (ngit-native-write-stderr
+               (concat "warning: unable to access '" (decode-coding-string name 'utf-8)
+                       "': Too many levels of symbolic links\n")))
+            nil)
+        (unwind-protect
+            (let ((buffer (nl-ffi-memory-address (ngit-native--buffer 0 65536)))
+                  parts done)
+              (while (not done)
+                (let ((size (syscall-direct 0 descriptor buffer 65536 0 0 0)))
+                  (if (<= size 0) (setq done t)
+                    (push (ptr-read-bytes buffer size) parts))))
+              (apply #'concat (nreverse parts)))
+          (syscall-direct ngit-native--sys-close descriptor 0 0 0 0 0))))))
+
+(defun ngit-read-ignore-file (path base &optional nofollow)
   "Return the patterns of ignore file PATH, last line first."
-  (when (file-regular-p path)
+  (when (and (or (not nofollow)
+                 (ngit--worktree-nofollow-p path (concat base ".gitignore")))
+             (file-regular-p path))
     (let ((pats nil))
-      (dolist (l (ngit--pattern-lines (ngit--read-file path)))
+      (dolist (l (ngit--pattern-lines
+                 (if nofollow (or (ngit--read-worktree-file path (concat base ".gitignore")) "")
+                   (ngit--read-file path))))
         (let ((l (ngit--trim-trailing-spaces l)))
           (unless (string= l "")
             (push (ngit-parse-pattern l base) pats))))
@@ -349,19 +391,91 @@ first, then info/exclude and core.excludesFile."
             states))
     (nreverse states)))
 
+(defun ngit--attr-unquote (line)
+  "C-unquote LINE's initial pattern, returning (PATTERN . END) or nil."
+  (let ((position 1) (parts nil) (done nil) (valid t) quote slash end)
+    (while (and valid (not done))
+      (setq quote (string-search "\"" line position)
+            slash (string-search "\\" line position)
+            end (if (and slash (or (not quote) (< slash quote))) slash quote))
+      (if (not end) (setq valid nil)
+        (push (substring line position end) parts)
+        (setq position (1+ end))
+        (if (equal end quote) (setq done t)
+          (if (>= position (length line)) (setq valid nil)
+            (let* ((c (aref line position))
+                   (escape (assq c '((?a . 7) (?b . 8) (?f . 12) (?n . 10)
+                                     (?r . 13) (?t . 9) (?v . 11) (?\\ . 92) (?\" . 34)))))
+              (cond (escape (push (unibyte-string (cdr escape)) parts)
+                            (setq position (1+ position)))
+                    ((and (<= ?0 c) (<= c ?3) (< (+ position 2) (length line))
+                          (<= ?0 (aref line (1+ position))) (<= (aref line (1+ position)) ?7)
+                          (<= ?0 (aref line (+ position 2))) (<= (aref line (+ position 2)) ?7))
+                     (push (unibyte-string (string-to-number (substring line position (+ position 3)) 8)) parts)
+                     (setq position (+ position 3)))
+                    (t (setq valid nil))))))))
+    (and valid done (cons (apply #'concat (nreverse parts)) position))))
+
+(defun ngit--parse-attr-data (data base)
+  "Return attribute patterns from DATA in directory BASE, last line first."
+  (let ((pats nil))
+    (dolist (l (ngit--pattern-lines data))
+      (let* ((line (string-trim-left l "[ \t]+"))
+             (quoted (and (string-prefix-p "\"" line) (ngit--attr-unquote line)))
+             (fields (split-string (if quoted (substring line (cdr quoted)) line) "[ \t]+" t))
+             ;; attr.c falls back to the raw token when C-unquoting fails.
+             (pat (if quoted (car quoted) (pop fields))))
+        ;; attr.c consumes the decoded buffer as a NUL-terminated string.
+        (when quoted
+          (let ((nul (string-search (unibyte-string 0) pat)))
+            (when nul (setq pat (substring pat 0 nul)))))
+        (when (and pat (not (string-prefix-p "#" line)) (not (string-prefix-p "[attr]" pat))
+                   (not (string-prefix-p "!" pat)))
+          (let ((p (ngit-parse-pattern pat base)))
+            (aset p 3 (ngit--parse-attr-states fields))
+            (push p pats)))))
+    pats))
+
 (defun ngit-read-attr-file (path base)
   "Return the attribute lines of PATH as patterns, last line first."
   (when (file-regular-p path)
-    (let ((pats nil))
-      (dolist (l (ngit--pattern-lines (ngit--read-file path)))
-        (let* ((fields (split-string l "[ \t]+" t))
-               (pat (car fields)))
-          (when (and pat (not (string-prefix-p "[attr]" pat))
-                     (not (string-prefix-p "!" pat)))
-            (let ((p (ngit-parse-pattern pat base)))
-              (aset p 3 (ngit--parse-attr-states (cdr fields)))
-              (push p pats)))))
-      pats)))
+    (ngit--parse-attr-data (ngit--read-file path) base)))
+
+(defun ngit--read-worktree-attr-file (repo base)
+  "Read BASE's .gitattributes, falling back to the index when absent.
+An existing empty file must override the index just like any other file."
+  (let* ((name (concat base ".gitattributes"))
+         (top (ngit-repo-toplevel repo))
+         (path (and top (expand-file-name (decode-coding-string name 'utf-8) top))))
+    (if (and path (ngit--worktree-nofollow-p path name)
+             (or (file-regular-p path)
+                 ;; Git opens a directory as an empty attribute source.
+                 (file-directory-p path)))
+        (when (file-regular-p path)
+          (let ((data (ngit--read-worktree-file path name)))
+            (if data (ngit--parse-attr-data data base)
+              ;; An open-time symlink race uses the same index fallback.
+              (ngit--read-index-attr-file repo name base))))
+      (when top
+        (ngit--read-index-attr-file repo name base)))))
+
+(defun ngit--read-index-attr-file (repo name base)
+  "Read NAME's attribute blob from the index, with directory BASE."
+  (require 'ngit-index)
+  (let* ((entries (ngit-index-entries repo))
+         (pos (ngit-index-find entries name)) (entry nil))
+    ;; Git reads ours while the attribute file is unmerged.  Never
+    ;; use the base or theirs when stage 0 and stage 2 are absent.
+    (while (and (not entry) (< pos (length entries))
+                (string= name (aref (aref entries pos) 0)))
+      (when (memq (aref (aref entries pos) 3) '(0 2))
+        (setq entry (aref entries pos)))
+      (setq pos (1+ pos)))
+    (when entry
+      (let ((object (ngit-read-object repo (aref entry 1))))
+        ;; read_blob_data_from_index checks object type, not entry mode.
+        (when (eq (car object) 'blob)
+          (ngit--parse-attr-data (cdr object) base))))))
 
 (defun ngit-attr-stack (repo dir)
   "Return the attribute pattern lists that apply inside DIR (\"\" or
@@ -378,20 +492,14 @@ first, then info/exclude and core.excludesFile."
                                 (expand-file-name "git/attributes"
                                                   (if (and xdg (not (string= xdg ""))) xdg
                                                     (expand-file-name ".config" (getenv "HOME")))))))
-                 (delq nil
-                       (list (ngit-read-attr-file
-                              (expand-file-name "info/attributes" (ngit-repo-commondir repo)) "")
-                             (and top (ngit-read-attr-file
-                                       (expand-file-name ".gitattributes" top) ""))
-                             (ngit-read-attr-file global ""))))
+                 (cons (ngit-read-attr-file
+                        (expand-file-name "info/attributes" (ngit-repo-commondir repo)) "")
+                       (delq nil (list (ngit--read-worktree-attr-file repo "")
+                                      (ngit-read-attr-file global "")))))
              (let* ((parent-dir (let ((d (file-name-directory (substring dir 0 -1))))
                                   (or d "")))
                     (parent (ngit-attr-stack repo parent-dir))
-                    (own (and top (ngit-read-attr-file
-                                   (expand-file-name ".gitattributes"
-                                                     (expand-file-name
-                                                      (decode-coding-string dir 'utf-8) top))
-                                   dir))))
+                    (own (ngit--read-worktree-attr-file repo dir)))
                ;; info/attributes stays first; the deeper file comes next.
                (if own
                    (cons (car parent) (cons own (cdr parent)))
@@ -404,21 +512,28 @@ STATE is `set', `unset', a string value, or `unspecified'."
   (let* ((slash (let ((i (1- (length path)))) (while (and (>= i 0) (/= (aref path i) ?/)) (setq i (1- i))) i))
          (dir (if (< slash 0) "" (substring path 0 (1+ slash))))
          (bstart (1+ slash))
-         (result (mapcar (lambda (n) (cons n nil)) names)))
+         ;; Resolve macro names even when only their expanded states were
+         ;; requested.  A higher-priority -binary or !binary blocks expansion.
+         (result (mapcar (lambda (n) (cons n nil))
+                         (delete-dups (append names (mapcar #'car ngit--attr-macros)))))
+         (requested (mapcar (lambda (name) (assoc name result)) names)))
     (catch 'done
       (dolist (pats (ngit-attr-stack repo dir))
         (dolist (pat pats)
           (when (ngit-pattern-match-p pat path bstart nil)
             ;; Later assignments on one line win, so walk it backwards.
             (dolist (st (reverse (aref pat 3)))
-              (let ((expanded (cons st (and (eq (cdr st) 'set)
-                                            (cdr (assoc (car st) ngit--attr-macros))))))
+              (let* ((own (assoc (car st) result))
+                     (expanded (cons st (and own (null (cdr own)) (eq (cdr st) 'set)
+                                             (cdr (assoc (car st) ngit--attr-macros))))))
                 (dolist (e expanded)
                   (let ((slot (assoc (car e) result)))
                     (when (and slot (null (cdr slot)))
                       (setcdr slot (cdr e)))))))
-            (unless (rassq nil result) (throw 'done nil))))))
-    (mapcar (lambda (r) (cons (car r) (or (cdr r) 'unspecified))) result)))
+            ;; Macro slots track blocking assignments, but only requested
+            ;; attributes determine whether the query is complete.
+            (unless (rassq nil requested) (throw 'done nil))))))
+    (mapcar (lambda (name) (cons name (or (cdr (assoc name result)) 'unspecified))) names)))
 
 (provide 'ngit-match)
 

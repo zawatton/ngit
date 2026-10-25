@@ -1987,7 +1987,7 @@ cases: combining marks are zero and East Asian wide characters two."
   "Pathspec items for PATHS given relative to the current directory."
   (let ((compiled (ngit-pathspec-items repo paths)))
    (if (ngit-pathspec-magic-p compiled)
-       (list (cons compiled 'magic))
+       (list (cons (ngit-pathspec-mixed-items repo paths compiled) 'magic))
     (mapcar (lambda (p)
             ;; Keep log's glob compiler; only normalize the path prefix.
             ;; The shared API also retains the invocation cwd after -C.
@@ -2031,9 +2031,7 @@ cases: combining marks are zero and East Asian wide characters two."
           ngit--rv-grep nil ngit--rv-max-count -1 ngit--rv-skip 0 ngit--rv-reverse nil
           ngit--decorations nil ngit--decorate-full nil
           ngit--ld-formats nil ngit--ld-context 3
-          ngit--ld-renames (let ((v (ngit-config-get repo "diff.renames")))
-                             (or (null v) (ngit-config-bool repo "diff.renames" t)
-                                 (member v '("copies" "copy"))))
+          ngit--ld-renames (ngit-config-renames-p repo "diff.renames" t)
           ngit--ld-full-diff nil
           ngit--ld-show-root (ngit-config-bool repo "log.showRoot" t))
     (while args
@@ -2048,6 +2046,8 @@ cases: combining marks are zero and East Asian wide characters two."
          ((setq v (ngit--log-opt-value a "--skip" args))
           (setq ngit--rv-skip (string-to-number (car v)) args (cdr v)))
          ((string= a "--reverse") (setq ngit--rv-reverse t))
+         ;; log accepts revision object-walk flags but only displays commits.
+         ((string= a "--objects") nil)
          ((string= a "--oneline") (setq fmt '(oneline) abbrev-commit t))
          ((member a '("--pretty" "--format")) (setq fmt '(medium)))
          ((or (string-prefix-p "--pretty=" a) (string-prefix-p "--format=" a))
@@ -2142,6 +2142,8 @@ cases: combining marks are zero and East Asian wide characters two."
          ((string= a "--full-diff") (setq ngit--ld-full-diff t))
          ((string= a "--root") (setq ngit--ld-show-root t))
          ((string-prefix-p "-" a) (ngit--die "fatal: unrecognized argument: %s" a))
+         ((string-prefix-p ":(" a)
+          (setq paths (append paths (cons a args)) args nil))
          (t
           (let ((r (ngit--handle-revision repo a flags pending)))
             (cond ((not (eq r 'not-a-rev)) (setq pending r seen-rev t))

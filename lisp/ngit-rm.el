@@ -8,11 +8,24 @@
 
 ;;; Code:
 
+(require 'ngit-command-paths)
 (require 'ngit-checkout)
 
 (defun ngit-rm--path-match-p (item path)
   (let ((ngit--rv-paths (list item)))
-    (eq (ngit--ps-class path nil) 'full)))
+    (eq (ngit-command-path-class (list item) path nil) 'full)))
+
+(defun ngit-rm--exact-item-p (item path)
+  "Whether ITEM matched PATH exactly, rather than through wildcards."
+  (let* ((compiled (car item))
+         (pattern (if (vectorp compiled) (aref compiled 0) compiled)))
+    (if (and (vectorp compiled) (aref compiled 3))
+        (let ((prefix (aref compiled 7)))
+          (and (= (length pattern) (length path))
+               (string= (substring pattern 0 prefix) (substring path 0 prefix))
+               (string= (downcase (substring pattern prefix))
+                        (downcase (substring path prefix)))))
+      (string= pattern path))))
 
 (defun ngit-rm--decode (path)
   (decode-coding-string path 'utf-8))
@@ -169,7 +182,7 @@
          (paths (nth 6 parsed)))
     (unless paths
       (ngit--die "fatal: No pathspec was given. Which files should I remove?"))
-    (let* ((items (mapcar (lambda (p) (ngit--ps-item (ngit--pathspec-item repo p))) paths))
+    (let* ((items (ngit-command-path-items repo paths t))
            (seen (make-vector (length items) nil))
            (recur (make-vector (length items) nil))
            (index-file (ngit-index-file repo))
@@ -183,16 +196,37 @@
             (ngit-wt-setup (ngit-repo-toplevel repo))
             (let ((j 0))
               (dolist (item items)
-                (let* ((literal (car item))
+                (let* ((literal (if (vectorp (car item)) (aref (car item) 0) (car item)))
                        (prefix (if (string= literal "") "" (concat literal "/")))
                        (i (if (cdr item) 0 (ngit-index-find old literal)))
+                       (exact nil)
                        (ngit--rv-paths (and (cdr item) (list item))))
-                  (if (cdr item)
-                      (while (< i (length old))
+                  (when (and (vectorp (car item)) (aref (car item) 4))
+                    (aset seen j t))
+                  (unless (and (vectorp (car item)) (aref (car item) 4))
+                   (if (cdr item)
+                      (while (and (< i (length old)) (not exact))
                         (let* ((entry (aref old i)) (path (aref entry 0)))
                           (when (and (not (memq 'skip-worktree (aref entry 5)))
-                                     (eq (ngit--ps-class path nil) 'full))
+                                     (or (and (not (vectorp (car item)))
+                                              (ngit-paths-covers-p literal path))
+                                         (eq (ngit-command-path-class (list item) path nil) 'full)))
                             (aset seen j t)
+                            ;; Git's seen[MATCHED_EXACTLY] skips this item on
+                            ;; later index entries, preserving earlier matches.
+                            (when (and (not (and (vectorp (car item)) (aref (car item) 4)))
+                                       (ngit-rm--exact-item-p item path))
+                              (setq exact t))
+                            (when (and (not (string= literal path))
+                                       (ngit-paths-covers-p literal path))
+                              (aset recur j t))
+                            (when (and (vectorp (car item))
+                                       (not (aref (car item) 4))
+                                       (not (ngit--glob-special-p literal (aref (car item) 7)))
+                                       (or (string= literal "")
+                                           (and (> (length path) (length literal))
+                                                (= (aref path (length literal)) ?/))))
+                              (aset recur j t))
                             (unless (gethash path selected-names)
                               (puthash path t selected-names)
                               (push entry selected))))
@@ -228,9 +262,24 @@
                             (unless (gethash path selected-names)
                               (puthash path t selected-names)
                               (push entry selected))))
-                        (setq i (1+ i))))))
+                        (setq i (1+ i)))))))
                   (setq j (1+ j))))
-            (setq selected (sort selected #'ngit--entry-less))
+            ;; Exclusions inspect only paths admitted by a positive selector.
+            ;; Their seen-exact state likewise applies to later index entries.
+            (let ((exact-excludes (make-hash-table :test 'eq)))
+              (setq selected
+                    (seq-filter
+                     (lambda (entry)
+                       (let ((path (aref entry 0)) (excluded nil))
+                         (dolist (item items)
+                           (when (and (vectorp (car item)) (aref (car item) 4)
+                                      (not (gethash item exact-excludes))
+                                      (ngit-pathspec-item-match-p (car item) path))
+                             (setq excluded t)
+                             (when (ngit-rm--exact-item-p item path)
+                               (puthash item t exact-excludes))))
+                         (not excluded)))
+                     (sort selected #'ngit--entry-less))))
             (let ((i 0))
               (dolist (original paths)
                 (cond
@@ -244,6 +293,9 @@
                   (ngit--die "fatal: not removing '%s' recursively without -r"
                              (if (string= original "") "." original))))
                 (setq i (1+ i))))
+            (when (and (> (length items) (length paths)) (not recursive)
+                       (aref recur (length paths)))
+              (ngit--die "fatal: not removing '.' recursively without -r"))
             (when (and selected (not force)
                        (ngit-rm--check-local repo index selected cached))
               (ngit-unlock lock)
@@ -350,6 +402,16 @@
          (t (push arg paths)))))
     (list force ignore dry verbose (nreverse paths))))
 
+(defun ngit-mv--path (repo arg)
+  "Normalize a filename, retaining mv's outside-repository diagnostic."
+  (condition-case err
+      (ngit--pathspec-item repo arg)
+    (ngit-fatal
+     (if (string-search "is outside repository at" (cadr err))
+         (ngit--die "fatal: '%s' is outside repository at '%s'"
+                    arg (directory-file-name (ngit-repo-toplevel repo)))
+       (signal (car err) (cdr err))))))
+
 (defun ngit-cmd-mv (repo args)
   (let* ((parsed (ngit-mv--parse args))
          (force (nth 0 parsed)) (ignore (nth 1 parsed))
@@ -359,7 +421,7 @@
       (ngit--die-with 129 "fatal: git mv [<options>] <source>... <destination>"))
     (let* ((destination-arg (car (last argv)))
            (source-args (butlast argv))
-           (destination (ngit--pathspec-item repo destination-arg))
+           (destination (ngit-mv--path repo destination-arg))
            (top (ngit-repo-toplevel repo))
            (index-file (ngit-index-file repo))
            (lock (ngit-lock index-file))
@@ -377,7 +439,7 @@
                 (setq lock nil)
                 (ngit--die "fatal: destination '%s' is not a directory" destination-arg))
               (dolist (source-arg source-args)
-                (let* ((source (ngit--pathspec-item repo source-arg))
+                (let* ((source (ngit-mv--path repo source-arg))
                        (dest (if (or dst-dir (string= destination ""))
                                  (concat (if (string= destination "") ""
                                            (concat destination "/"))

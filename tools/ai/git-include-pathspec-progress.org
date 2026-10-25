@@ -1,0 +1,113 @@
+#+TITLE: ngit remote-URL includes, attribute pathspecs and subdirectory commands
+
+Baseline: 273be60.  Three isolated lanes add includeIf
+hasconfig:remote.*.url conditions, attribute pathspec magic, and the
+remaining subdirectory/pathspec behavior (ls-files, diff --relative, clean
+and paths leaving the invocation directory).  Protocol v2 is designed
+separately and gets its own ledger.  Fourteen criteria were defined before
+implementation; S5 was added after the independent audits to cover their fixes
+(three criteria after the first audit, S5.4 after the re-audit, S5.5 after the
+final audit, S5.6 after its fifth review round, S5.7 after
+the sixth, S5.8 after the seventh).  Original test sources remain unchanged.
+
+Each suite reports exact comparisons and intended differences separately.
+An intended difference is a named diagnostic or security divergence with a
+reason recorded in the suite; it never counts as an exact comparison.
+
+* S1 Remote-URL include conditions
+
+** S1.1 hasconfig:remote.*.url conditions select includes exactly as Git, in every config scope and in nested invocations
+#+TIMEOUT: 600
+cmd: sh test/include-hasconfig.sh match
+
+** S1.2 Remote URLs defined inside hasconfig includes, ordering, malformed and unsupported conditions keep Git's boundaries
+#+TIMEOUT: 600
+cmd: sh test/include-hasconfig.sh boundaries
+
+** S1.3 A hasconfig-selected identity and settings drive clone, commit and push end to end
+#+TIMEOUT: 600
+cmd: sh test/include-hasconfig.sh e2e
+
+* S2 Attribute pathspec magic
+
+** S2.1 attr: magic selects set, unset, unspecified and valued attributes in every command ngit implements whose Git 2.47.3 pathspec mask accepts it (list derived from git-src and recorded in the suite; commands ngit lacks, such as archive and check-ignore, stay in README's unsupported list)
+#+TIMEOUT: 600
+cmd: sh test/pathspec-attr.sh select
+
+** S2.2 Invalid attr specs, commands whose mask rejects attr, and combinations with other magic match Git's exact diagnostics
+#+TIMEOUT: 600
+cmd: sh test/pathspec-attr.sh boundaries
+
+** S2.3 An attribute-selected stage, commit and inspect workflow matches Git end to end
+#+TIMEOUT: 600
+cmd: sh test/pathspec-attr.sh e2e
+
+* S3 Subdirectory commands
+
+** S3.1 ls-files and diff --relative (and diff.relative) from subdirectories match Git
+#+TIMEOUT: 600
+cmd: sh test/subdir-commands.sh inspect
+
+** S3.2 clean and path-mutating commands from subdirectories, with ../ and :/ paths, match Git output and state
+#+TIMEOUT: 600
+cmd: sh test/subdir-commands.sh mutate
+
+** S3.3 Paths outside the repository, nested repositories and ignored files keep Git's boundaries
+#+TIMEOUT: 600
+cmd: sh test/subdir-commands.sh boundaries
+
+** S3.4 A subdirectory-only edit, clean, stage, inspect and commit workflow matches Git end to end
+#+TIMEOUT: 600
+cmd: sh test/subdir-commands.sh e2e
+
+* S4 Integration
+
+** S4.1 Named cases fail on baseline 273be60 and pass now; original test sources are unchanged
+#+TIMEOUT: 600
+cmd: python3 tools/include-pathspec-verify.py controls
+
+** S4.2 Every non-exact case is a declared intended diagnostic or security difference, reported apart from exact comparisons
+#+TIMEOUT: 600
+cmd: python3 tools/include-pathspec-verify.py differences
+
+** S4.3 Affected existing regression suites pass
+#+TIMEOUT: 600
+cmd: python3 tools/include-pathspec-verify.py regression
+
+** S4.4 Combined remote-URL include, attribute pathspec and subdirectory workflow on a clone of a real repository matches Git in compiled and source modes
+#+TIMEOUT: 600
+cmd: python3 tools/include-pathspec-verify.py e2e
+
+* S5 Audit fixes
+
+** S5.1 Config parameter export to hooks, Git integer/boolean parsing and attribute lookup fixes match Git
+#+TIMEOUT: 600
+cmd: python3 tools/include-pathspec-verify.py differences audit-config-paths
+
+** S5.2 Mixed glob/magic selection, diff stat formats and attribute fallback match Git end to end
+#+TIMEOUT: 600
+cmd: python3 tools/include-pathspec-verify.py differences audit-fixes
+
+** S5.3 clean, rm and other path commands never select or remove anything outside the invocation scope, for every pathspec form
+#+TIMEOUT: 600
+cmd: python3 tools/include-pathspec-verify.py differences audit-prefix
+
+** S5.4 Symlinked attribute files, special config values, mixed globs in add/restore and attr in rev-list/shortlog/format-patch match Git
+#+TIMEOUT: 600
+cmd: python3 tools/include-pathspec-verify.py differences audit-reaudit
+
+** S5.5 Special pull rebase modes, quoted attribute patterns, binary patch preimages and wildcard object walks match Git or refuse safely
+#+TIMEOUT: 600
+cmd: python3 tools/include-pathspec-verify.py differences audit-final
+
+** S5.6 apply/am path spelling and traditional unified diffs, and pull option precedence with unsupported rebase modes, match Git or refuse safely
+#+TIMEOUT: 600
+cmd: python3 tools/include-pathspec-verify.py differences audit-round5
+
+** S5.7 apply -pN on rename/copy headers and pull rebase preconditions with --ff-only and autostash match Git
+#+TIMEOUT: 600
+cmd: python3 tools/include-pathspec-verify.py differences audit-round6
+
+** S5.8 apply rejects one-sided missing names after -pN and pull runs every pre-fetch precondition before any autostash, and am finds the first patch in mixed mails, as Git
+#+TIMEOUT: 600
+cmd: python3 tools/include-pathspec-verify.py differences audit-round7

@@ -163,7 +163,7 @@ section event and the full key for an entry."
                    (ngit-native-creation-mode #o666)))
          (lock (ngit-lock file 'defer)))
     (ngit-commit-lock lock (encode-coding-string text 'utf-8) mode)
-    (setq ngit--config-cache nil)))
+    (ngit--config-invalidate)))
 
 (defun ngit-config-set (repo key value &optional add)
   "Set KEY to VALUE in REPO's config, or unset it when VALUE is nil; with
@@ -793,6 +793,16 @@ HEAD-OLD-VALUE adds the dereferenced current HEAD deletion to that transaction."
   "setup_tracking for NEW-BRANCH started at ORIG-REF (a full ref)."
   (let ((remote-src (ngit--remote-for-tracking-ref repo orig-ref)))
     (cond
+     ((eq track 'inherit)
+      (let* ((name (if (string-prefix-p "refs/heads/" orig-ref) (substring orig-ref 11) orig-ref))
+             (remote (ngit-config-get repo (concat "branch." name ".remote")))
+             (merges (ngit-config-get-all repo (concat "branch." name ".merge"))))
+        (if (not remote)
+            (ngit--branch-warning "asked to inherit tracking from '%s', but no remote is set" name)
+          (when merges
+            (ngit--install-tracking repo new-branch remote (car merges) quiet)
+            (dolist (merge (cdr merges))
+              (ngit-config-set repo (concat "branch." new-branch ".merge") merge t))))))
      (remote-src
       (ngit--install-tracking repo new-branch (car remote-src) (cdr remote-src) quiet))
      ((memq track '(explicit override always))
