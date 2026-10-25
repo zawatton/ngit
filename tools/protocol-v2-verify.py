@@ -29,22 +29,29 @@ DEADLINE = time.monotonic() + float(os.environ.get("NGIT_PV2_DEADLINE", "580"))
 
 MODES = ("select", "lsrefs", "e2e-ssh", "http-discovery", "http-fetch", "e2e-https",
          "negotiate", "negotiate-http", "negotiate-v0", "e2e-negotiate", "errors",
-         "server-option", "fallback", "review")
-E2E_MODES = ("e2e-ssh", "e2e-https", "e2e-negotiate")
+         "server-option", "fallback", "review",
+         # Follow-ups to 5db0c7f (tools/ai/git-pv2-followups-progress.org).
+         "followups-launcher", "file", "followups", "config-case")
+FOLLOWUP_BASE = "5db0c7f"
+FOLLOWUP_MODES = ("followups-launcher", "file", "followups", "config-case")
+E2E_MODES = ("e2e-ssh", "e2e-https", "e2e-negotiate", "file")
 # Exact comparisons each mode must reach: every case the calibrated harness runs.
 FLOORS = {"select": 40, "lsrefs": 18, "e2e-ssh": 4, "http-discovery": 12, "http-fetch": 24,
           "e2e-https": 4, "negotiate": 6, "negotiate-http": 6, "negotiate-v0": 6,
           "e2e-negotiate": 4, "errors": 7, "server-option": 36, "fallback": 6,
-          "review": 59}
+          "review": 59, "followups-launcher": 60, "file": 60, "followups": 8,
+          "config-case": 50}
 # Test files the harness may change; everything else present at BASE stays.
 GROWN = {"test/smart-http-fixture.py"}
 
-REGRESSION = [["sh", "test/compare.sh", s] for s in
-              ("clone", "fetch", "push", "remote", "ssh", "hooks")] + \
-             [["sh", "test/smart-http.sh", m] for m in ("discovery", "fetch", "push", "auth", "e2e")] + \
-             [["sh", "test/credential-helpers.sh", m] for m in ("helpers", "auth", "boundaries", "e2e")] + \
+# Longest suites first (round4-pull alone takes about 440-480 s), so every
+# suite starts early enough to finish inside the 580 s deadline.
+REGRESSION = [["sh", "test/audit-reaudit.sh", m] for m in ("round4-pull", "pull")] + \
+             [["sh", "test/compare.sh", s] for s in ("hooks", "clone")] + \
              [["sh", "test/round6.sh", "pull"]] + \
-             [["sh", "test/audit-reaudit.sh", m] for m in ("pull", "round4-pull")]
+             [["sh", "test/compare.sh", s] for s in ("fetch", "push", "remote", "ssh")] + \
+             [["sh", "test/smart-http.sh", m] for m in ("discovery", "fetch", "push", "auth", "e2e")] + \
+             [["sh", "test/credential-helpers.sh", m] for m in ("helpers", "auth", "boundaries", "e2e")]
 
 
 def fail(message):
@@ -129,31 +136,31 @@ def summary(label, mode, r):
         r["unexpected_errors"], r["rc"])
 
 
-def baseline():
-    """The 6a462c1 checkout."""
-    tree = TASK / "baseline"
+def baseline(base=BASE):
+    """The checkout of BASE."""
+    tree = TASK / ("baseline" if base == BASE else "baseline-" + base)
     if not (tree / "bin/ngit").exists():
-        subprocess.run(["git", "worktree", "add", "--detach", str(tree), BASE], cwd=ROOT,
+        subprocess.run(["git", "worktree", "add", "--detach", str(tree), base], cwd=ROOT,
                        check=True, stdout=subprocess.DEVNULL)
     head = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"], cwd=tree,
                           capture_output=True, text=True).stdout.strip()
-    if head != BASE:
-        fail("baseline checkout is at %s, not %s" % (head, BASE))
+    if head != base:
+        fail("baseline checkout is at %s, not %s" % (head, base))
     # build-elc.sh finds nelisp beside the checkout, which a nested worktree
     # lacks, so the baseline runs from source; the result does not depend on it.
     return tree
 
 
-def controls():
+def controls(base=BASE, modes=MODES[:14], grown=GROWN):
     TASK.mkdir(parents=True, exist_ok=True)
-    changed = subprocess.run(["git", "diff", "--name-only", "--diff-filter=MDT", BASE, "--", "test"], cwd=ROOT,
+    changed = subprocess.run(["git", "diff", "--name-only", "--diff-filter=MDT", base, "--", "test"], cwd=ROOT,
                              capture_output=True, text=True).stdout.split()
     # Deleted files count as changed, so a removed test cannot pass this check.
-    if set(changed) - GROWN:
-        fail("test sources present at the baseline changed: %s" % sorted(set(changed) - GROWN))
-    old = str(baseline() / "bin/ngit")
-    jobs = [(m, "git", {"NGIT_PV2_COMMAND": "git"}) for m in MODES] + \
-           [(m, "baseline", {"NGIT_PV2_COMMAND": old}) for m in MODES]
+    if set(changed) - grown:
+        fail("test sources present at the baseline changed: %s" % sorted(set(changed) - grown))
+    old = str(baseline(base) / "bin/ngit")
+    jobs = [(m, "git", {"NGIT_PV2_COMMAND": "git"}) for m in modes] + \
+           [(m, "baseline", {"NGIT_PV2_COMMAND": old}) for m in modes]
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda j: (j[0], j[1], suite(j[0], j[1], **j[2])), jobs))
     bad = []
@@ -214,7 +221,16 @@ def differences():
         fail("; ".join(errors))
 
 
-def regression():
+PULL_SUITES = ("audit-reaudit.sh", "round6.sh")
+
+
+def regression(group="all"):
+    # "pull" runs the long pull suites alone and "transport" the rest, so
+    # each half fits the meter's 600 s limit on a loaded machine.
+    suites = [a for a in REGRESSION
+              if group == "all" or (a[1].split("/")[-1] in PULL_SUITES) == (group == "pull")]
+    if group not in ("all", "pull", "transport"):
+        fail("unknown regression group %s" % group)
     fixtures = Path(tempfile.mkdtemp())
 
     def job(argv):
@@ -225,7 +241,7 @@ def regression():
         return argv, rc, time.monotonic() - start, (out + err)[-400:]
     try:
         with ThreadPoolExecutor(max_workers=6) as pool:
-            results = list(pool.map(job, REGRESSION))
+            results = list(pool.map(job, suites))
     finally:
         shutil.rmtree(fixtures, ignore_errors=True)
     bad = [r for r in results if r[1]]
@@ -261,7 +277,11 @@ if __name__ == "__main__":
     if mode == "mode" and len(sys.argv) > 2:
         one(sys.argv[2])
     else:
-        {"controls": controls, "differences": differences, "regression": regression,
+        {"controls": controls,
+         "controls-followups": lambda: controls(FOLLOWUP_BASE, FOLLOWUP_MODES,
+                                                {"test/protocol-v2.py",
+                                                 "test/smart-http-fixture.py"}),
+         "differences": differences, "regression": lambda: regression(*sys.argv[2:3]),
          "e2e": e2e}.get(mode, lambda: fail("usage: protocol-v2-verify.py "
                                            "controls|mode MODE|differences|regression|e2e"))()
     print("PASS " + " ".join(sys.argv[1:]))

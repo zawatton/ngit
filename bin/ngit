@@ -8,7 +8,10 @@ skip=
 for arg do
   if [ -n "$skip" ]; then skip=; continue; fi
   case $arg in
-    -C) skip=yes ;;
+    -C|-c|--config-env|--git-dir|--work-tree|--namespace|--super-prefix|--shallow-file|--attr-source)
+      skip=yes ;;
+    --config-env=*|--git-dir=*|--work-tree=*|--namespace=*|--exec-path=*|--super-prefix=*|--attr-source=*) ;;
+    --bare|-p|--paginate|-P|--no-pager|--no-replace-objects|--no-lazy-fetch|--no-optional-locks|--no-advice|--literal-pathspecs|--no-literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs) ;;
     clone|fetch|pull) supervise=yes; break ;;
     *) break ;;
   esac

@@ -201,6 +201,8 @@
                ;; Git rejects options as soon as it discovers v0/v1,
                ;; before consuming the rest of the advertisement.
                (unless (equal first "version 2")
+                 (when (and (equal first "version 1") (not ngit-tr--clone))
+                   (ngit-transport-abort conn))
                  (ngit-native-write-stderr
                   (concat "hint: see protocol.version in 'git help config' for more details\n"
                           "fatal: server options require protocol version 2 or later\n"))
@@ -243,7 +245,9 @@
                   (push (list name (unless (equal oid "unborn") (downcase oid))
                               sym (and peeled (downcase peeled))) refs))))
             (unless (eq packet 'flush)
-              (ngit--die "fatal: expected flush after ref listing")))
+              (ngit--die "fatal: expected flush after ref listing"))
+            (when (and (fboundp 'ngit-http-p) (ngit-http-p conn))
+              (ngit-http-response-end conn 'ls-refs)))
           (list (nreverse refs) caps 2))
       (when (equal (car lines) "version 1") (setq lines (cdr lines)))
       (append (ngit-tr--v0-refs lines) (list 0)))))
@@ -600,6 +604,7 @@
                           ((= channel 2) (when progress (ngit-native-write-stderr (concat "remote: " (substring packet 1)))))
                           ((= channel 3) (ngit--die "fatal: %s" (substring packet 1)))
                           (t (ngit--die "fatal: protocol error in pack stream")))))))
+              (when (and v2 stateless) (ngit-http-response-end conn 'fetch))
               (syscall-direct 3 fd 0 0 0 0 0) (setq fd nil)
               (ngit-tr--install-pack repo tmp check))
           (when fd (syscall-direct 3 fd 0 0 0 0 0))
@@ -657,7 +662,8 @@
             (ngit-transport-close conn)))))))
 
 (defun ngit-cmd-clone (_repo args)
-  (let (bare branch no-checkout quiet source dest template no-tags single (origin "origin")
+  (let (bare branch no-checkout no-local quiet source dest template no-tags single (origin "origin")
+        (ngit-tr--clone t)
         (ngit-tr--server-options nil))
     (while args
       (let ((a (pop args)))
@@ -679,7 +685,8 @@
                (unless args (ngit--die-with 129 "error: option `template' requires a value"))
                (setq template (pop args)))
               ((string-prefix-p "--template=" a) (setq template (substring a 11)))
-              ((member a '("--no-local" "--no-hardlinks")) nil)
+              ((equal a "--no-local") (setq no-local t))
+              ((equal a "--no-hardlinks") nil)
               ((string-prefix-p "-" a) (ngit--die-with 129 "error: unknown option `%s'" a))
               ((null source) (setq source a)) ((null dest) (setq dest a))
               (t (ngit--die-with 129 "fatal: Too many arguments.")))))
@@ -755,15 +762,15 @@
             (unless (= 0 (ngit-transport-close conn))
               (ngit--die "fatal: remote transport failed"))
             (when (and oid (null head-ref)) (setq oid (ngit-peel repo oid 'commit)))
-            (when (and oid (not quiet) (not (string-search ":" source)))
+            (when (and oid (not no-local) (not quiet) (not (string-search ":" source)))
               (ngit-native-write-stderr "done.\n"))
             (ngit-config-set repo (concat "remote." origin ".url") url)
+            (when no-tags (ngit-config-set repo (concat "remote." origin ".tagOpt") "--no-tags"))
             (unless bare
               (ngit-config-set repo (concat "remote." origin ".fetch")
                                (if (and single head-ref)
                                    (concat "+" head-ref ":refs/remotes/" origin "/" (substring head-ref 11))
                                  (concat "+refs/heads/*:refs/remotes/" origin "/*"))))
-            (when no-tags (ngit-config-set repo (concat "remote." origin ".tagOpt") "--no-tags"))
             (when packed
               (setq packed (sort packed (lambda (a b) (string< (car a) (car b)))))
               (let ((lock (ngit-lock (expand-file-name "packed-refs" (ngit-repo-gitdir repo)))) input)
@@ -817,7 +824,7 @@
                                      (directory-file-name
                                       (expand-file-name (ngit-repo-gitdir repo))))
                              "GIT_PREFIX" "GIT_INDEX_FILE")))))
-            (when (and (null oid) (not quiet) (not (string-search ":" source)))
+            (when (and (null oid) (not no-local) (not quiet) (not (string-search ":" source)))
               (ngit-native-write-stderr "done.\n"))
             (setq success t)
             hook-status))
@@ -1766,7 +1773,7 @@ REPORTS maps each update to its ordered report-status-v2 option records."
                                     (seq-filter (lambda (r) (equal (car r) "!")) rows)))
                         (ngit-native-write-stderr
                          (concat " " (car row) " " (ngit--pad-to (nth 1 row) width) " "
-                                 (if (equal (car row) "-") (nth 3 row)
+                                 (if (or (equal (car row) "-") (equal (nth 2 row) "")) (nth 3 row)
                                    (concat (nth 2 row) " -> " (nth 3 row)))
                                  (if (nth 4 row) (concat " (" (nth 4 row) ")") "") "\n")))))
                 (ngit-native-write-stderr "Everything up-to-date\n")))

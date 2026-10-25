@@ -351,7 +351,7 @@ sh test/subdir-commands.sh (inspect|mutate|boundaries|e2e)
 sh test/audit-config.sh (core|e2e); sh test/audit-paths.sh (core|e2e)
 sh test/audit-reaudit.sh (core|special|boundaries|e2e|pull|attrs|binary|objects|round4-paths|round4-pull|round4-unified|round5-autostash|round5-headers)
 sh test/round6.sh (headers|pull|mail_starts)
-sh test/protocol-v2.sh (select|lsrefs|e2e-ssh|http-discovery|http-fetch|e2e-https|negotiate|negotiate-http|negotiate-v0|e2e-negotiate|errors|server-option|fallback|review)
+sh test/protocol-v2.sh (select|lsrefs|e2e-ssh|http-discovery|http-fetch|e2e-https|negotiate|negotiate-http|negotiate-v0|e2e-negotiate|errors|server-option|fallback|review|followups-launcher|file|followups|config-case)
 sh test/audit-fixes.sh (core|e2e|prefix|prefix-boundary|prefix-untracked|prefix-rm|prefix-e2e)
 python3 tools/include-pathspec-verify.py (controls|differences [GROUP]|regression|e2e)
 python3 tools/usability-verify.py (controls|regression|e2e)
@@ -364,7 +364,7 @@ bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Note
 
 Dumb HTTP, interactive credential prompts, OAuth and git:// transports,
 protocol-v2 shallow/partial fetch, packfile-uris, bundle-uri and object-info,
-shallow/partial/single-branch clones,
+shallow/partial clones,
 template copying, =--force-if-includes= pushes,
 push.default=matching/nothing, multi-head pulls, submodules (beyond
 gitlink entries), strategy-specific
@@ -380,6 +380,11 @@ whose body lines look like a =+++= header line,
 delta-encoded binary hunks in output (format-patch always writes
 =literal= binary bodies where Git picks the smaller of delta and literal;
 apply and am read both forms).
+
+Global options other than -c, -C, --config-env, -P/--no-pager/-p/--paginate,
+--git-dir, --work-tree and --bare (the last three only set GIT_DIR and
+GIT_WORK_TREE; status and rev-parse under them can differ from Git), and git
+config value patterns and --replace-all/--unset-all on multi-valued variables.
 
 Alternates, multi-pack-index, reftable, split or sparse
 indexes, SHA-256 repositories, copy detection, commit

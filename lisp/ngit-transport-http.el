@@ -373,25 +373,64 @@
       (aset state 5 nil))
     (aset state 8 (+ (aref state 8) (string-bytes bytes)))))
 
-(defun ngit-http--check-v2-response (file)
-  "Reject server response-end packets before forwarding a v2 RPC body.
-Like remote-curl's check_pktline, skip payloads by their packet lengths."
-  (let ((owner (nl-ffi-memory-allocate 4)) (offset 0) size)
+(defun ngit-http-response-end (conn command)
+  "Require the end of a stateless COMMAND response after its final flush."
+  (let ((header (ngit-transport-read conn 4)))
+    (when header
+      (unless (and (= (length header) 4) (ngit-hex-p header 4))
+        (ngit--die "fatal: protocol error: bad line length character: %.4s" header))
+      (let ((size (string-to-number header 16)))
+        (when (or (= size 3) (> size 65520))
+          (ngit--die "fatal: protocol error: bad line length %d" size))
+        (when (> size 4)
+          (let ((line (ngit-transport-read conn (- size 4))))
+            (when (and line (string-prefix-p "ERR " line))
+              (ngit--die "fatal: remote error: %s" (string-trim-right (substring line 4)))))))
+      (ngit-transport--fail
+       (if (eq command 'ls-refs)
+           "fatal: expected response end packet after ref listing"
+         "fatal: git fetch-pack: expected response end packet")))))
+
+(defun ngit-http--check-v2-response (file request)
+  "Check every RPC packet, including bytes after a flush, as remote-curl does."
+  (let ((owner (nl-ffi-memory-allocate 24)) (offset 0) size lsrefs)
     (unwind-protect
         (progn
+          (ngit-http--seek request 0)
+          (let ((count (ngit-http--call "fread" (nl-ffi-memory-address owner) 1 24 request)))
+            (setq lsrefs (string-search "command=ls-refs"
+                                        (ptr-read-bytes (nl-ffi-memory-address owner) count))))
+          (ngit-http--seek request 0)
           (ngit-http--check (ngit-http--call "fseek" file 0 2) "response seek")
           (setq size (ngit-http--call "ftell" file))
-          (catch 'checked
-            (while (<= (+ offset 4) size)
+          (while (< offset size)
+            (let ((available (- size offset)))
+              (when (< available 4)
+                (ngit-native-write-stderr
+                 (format "error: %d bytes of length header were received\n" available))
+                (ngit-transport--fail
+                 (if lsrefs "fatal: expected response end packet after ref listing"
+                   "fatal: the remote end hung up unexpectedly")))
               (ngit-http--seek file offset)
               (unless (= 4 (ngit-http--call "fread" (nl-ffi-memory-address owner) 1 4 file))
-                (throw 'checked nil))
+                (ngit-transport--fail "fatal: cannot read HTTP response"))
               (let ((header (ptr-read-bytes (nl-ffi-memory-address owner) 4)))
-                (unless (ngit-hex-p header 4) (throw 'checked nil))
+                (unless (ngit-hex-p header 4)
+                  (ngit-native-write-stderr
+                   (format "fatal: remote-curl: bad line length character: %.4s\n" header))
+                  (ngit-transport--fail
+                   (if lsrefs "fatal: expected flush after ref listing"
+                     "fatal: the remote end hung up unexpectedly")))
                 (let ((length (string-to-number header 16)))
                   (when (= length 2)
                     (ngit-native-write-stderr "fatal: remote-curl: unexpected response end packet\n")
                     (ngit-transport--fail "fatal: the remote end hung up unexpectedly"))
+                  (when (> length available)
+                    (ngit-native-write-stderr
+                     (format "error: %d bytes of body are still expected\n" (- length available)))
+                    (ngit-transport--fail
+                     (if lsrefs "fatal: expected response end packet after ref listing"
+                       "fatal: git fetch-pack: expected response end packet")))
                   (setq offset (+ offset (max length 4))))))))
       (ngit-http--seek file 0)
       ;; fread may retain lookahead; transport reads use the raw descriptor.
@@ -432,7 +471,7 @@ Like remote-curl's check_pktline, skip payloads by their packet lengths."
         (aset conn 3 (ngit-http--fd (car response)))
         (aset conn 5 nil)
         (when (= (aref state 9) 2)
-          (ngit-http--check-v2-response (car response)))))))
+          (ngit-http--check-v2-response (car response) (aref state 3)))))))
 
 (defun ngit-http-close (conn)
   "Release FILE spools idempotently without ever sending an RPC."

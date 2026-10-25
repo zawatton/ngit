@@ -84,7 +84,7 @@ was set, including an unset miss and a single-value write over duplicates."
                     (decode-coding-string (ngit--read-file file) 'utf-8)))
          (split (ngit--cfg-split-key key))
          (base (car split))
-         (full (concat base "." (cdr split))))
+         (full (concat base "." (downcase (cdr split)))))
     (if (or (null text) (= (length text) 0))
         (when value
           (ngit-config-cmd--write-file
@@ -267,7 +267,7 @@ was set, including an unset miss and a single-value write over duplicates."
                    (format (concat "warning: %s has multiple values\n"
                                    "error: cannot overwrite multiple values with a single value\n"
                                    "       Use a regexp, --add or --replace-all to change %s.\n")
-                           (car rest) (car rest)))
+                           (ngit--config-normalize (car rest)) (car rest)))
                   5)
               (if (ngit-config-cmd--set-file file (car rest) (cadr rest)) 0 5)))
            ('add
@@ -282,7 +282,7 @@ was set, including an unset miss and a single-value write over duplicates."
               (cond ((= count 0) 5)
                     ((> count 1)
                      (ngit-native-write-stderr
-                      (format "warning: %s has multiple values\n" (car rest)))
+                      (format "warning: %s has multiple values\n" (ngit--config-normalize (car rest))))
                      5)
                     (t (ngit-config-cmd--set-file file (car rest) nil) 0))))))))))
 

@@ -499,6 +499,13 @@ An EOF after a partial result is a truncated Git stream and signals an error."
   "Return non-nil when stderr is attached to a terminal."
   (and (fboundp 'file-tty-p) (file-tty-p "/dev/stderr")))
 
+(defun ngit-transport-abort (conn)
+  "Terminate a rejected transport before closing its pipes, as Git does."
+  (unless (aref conn 4)
+    (syscall-direct ngit-transport--sys-kill (aref conn 1)
+                    ngit-transport--sigterm 0 0 0 0))
+  (ngit-transport-close conn))
+
 (provide 'ngit-transport-process)
 
 ;;; ngit-transport-process.el ends here

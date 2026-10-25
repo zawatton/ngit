@@ -125,11 +125,11 @@ section event and the full key for an entry."
       v)))
 
 (defun ngit--cfg-split-key (key)
-  "Return (BASE . NAME) of KEY: BASE \"section.sub\" normalized, NAME lowercased."
+  "Return (BASE . NAME) of KEY: BASE \"section.sub\" normalized, NAME as spelled."
   (let ((last (let ((i (1- (length key)))) (while (and (>= i 0) (/= (aref key i) ?.)) (setq i (1- i))) i))
         (first (string-search "." key)))
     (cons (concat (downcase (substring key 0 first)) (substring key first last))
-          (downcase (substring key (1+ last))))))
+          (substring key (1+ last)))))
 
 (defun ngit--cfg-section-header (base)
   "store_create_section for BASE (\"section.sub\" or \"section\")."
@@ -173,7 +173,7 @@ nothing was set (git's CONFIG_NOTHING_SET)."
          (text (and (file-exists-p file) (decode-coding-string (ngit--read-file file) 'utf-8)))
          (split (ngit--cfg-split-key key))
          (base (car split))
-         (full (concat base "." (cdr split))))
+         (full (concat base "." (downcase (cdr split)))))
     (if (null text)
         (when value
           (ngit--config-write repo (concat (ngit--cfg-section-header base)

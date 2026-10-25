@@ -1,0 +1,66 @@
+#+TITLE: ngit protocol v2 follow-ups
+
+Baseline: 5db0c7f.  The follow-ups recorded when protocol v2 was committed
+(worklog "ngit fetch-side protocol v2 committed (5db0c7f)"): launcher memory
+supervision with global options, file:// protocol v1 diagnostics, HTTP bytes
+after the final flush, rejected-delete push output, and three gaps in
+test/protocol-v2.py (Content-Length values, --set-upstream configuration, no
+local-path or file:// cases).  Eight criteria were defined before
+implementation; S1.5 was added after the independent review and narrowed
+after the second one: the config-case cases for --replace-all/--unset-all and
+value patterns on differently spelled variables, unimplemented global options,
+and --git-dir/--work-tree/--bare with status fail at 5db0c7f as well; they are
+kept ungraded in the config-deferred mode and listed in README.  S2.1 was split into S2.1
+and S2.4 (same suites) because the pull suites alone take up to 530 s and did
+not fit the 600 s limit beside the others on a loaded machine.
+
+Each suite reports exact comparisons and intended differences separately.
+An intended difference is a named diagnostic or security divergence with a
+reason recorded in the suite; it never counts as an exact comparison.  The
+verifier enforces a floor of exact comparisons per mode.
+
+* S0 Calibration
+
+** S0.1 The new modes fail against the 5db0c7f baseline by compared cases, Git compared with itself passes them, and no test present at 5db0c7f was removed or changed except test/protocol-v2.py and test/smart-http-fixture.py, which may only grow
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py controls-followups
+
+* S1 Fixes
+
+** S1.1 fetch, clone and pull run under the transport memory supervisor whatever global options precede them (-c, -C, --git-dir, --work-tree, --bare, -P/--no-pager and the --opt=value forms), as without them
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode followups-launcher
+
+** S1.2 Over file:// and local paths with protocol.version 0, 1 and 2, clone, fetch, ls-remote, pull and server-option errors equal Git (transcripts, output, diagnostics, state)
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode file
+
+** S1.3 Malformed bytes after the final flush of an HTTP response and a rejected delete in push give Git's diagnostics and output
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode followups
+
+** S1.4 The tightened suite (Content-Length values compared beside agent normalisation, --set-upstream branch configuration compared) passes every existing protocol-v2 mode
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py differences
+
+** S1.5 Config variables written by clone, fetch, remote, branch and git config keep Git's spelling and order in the config file, git config sets and unsets a variable spelled with different case as Git does, and the global options -c, -C, --config-env, -P/--no-pager/-p/--paginate before a command and unknown global options behave as Git
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py mode config-case
+
+* S2 Integration
+
+** S2.1 Existing transport, smart-HTTP and credential suites stay green
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py regression transport
+
+** S2.2 End to end with byte code and with sources, including the file mode
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py e2e
+
+** S2.3 README lists what is unsupported accurately: single-branch clone is no longer listed once the suite covers it, and the suite list names the new modes
+#+TIMEOUT: 60
+cmd: sh -c '! grep -q "single-branch clones" README.org && grep -q "followups-launcher" README.org'
+
+** S2.4 Existing pull suites (audit-reaudit pull and round4-pull, round6 pull) stay green
+#+TIMEOUT: 600
+cmd: python3 tools/protocol-v2-verify.py regression pull

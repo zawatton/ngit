@@ -497,17 +497,48 @@ Git's repository setup reads the local primary config without following includes
     parameters))
 
 (defun ngit--config-main (original args)
-  "Handle global -c options before ORIGINAL dispatches the command."
+  "Handle global options backed by ngit's existing command paths."
   (condition-case err
-   (let ((ngit--config-cli-parameters nil) (prefix nil)
+   (let ((ngit--config-cli-parameters nil)
+         (default-directory default-directory)
          (ngit--config-text-cache (make-hash-table :test 'equal)))
-    (while (member (car args) '("-c" "-C"))
-      (let ((option (pop args)) (value (pop args)))
-        (if (string= option "-C")
-            (setq prefix (append prefix (list option value)))
-          (require 'ngit-config-parameters)
-          (unless value (ngit-config-parameters--missing-argument))
-          (ngit-config-parameters--push value))))
+    (while (and args (string-prefix-p "-" (car args)))
+      (let* ((option (pop args))
+             (equal (string-search "=" option))
+             (name (if equal (substring option 0 equal) option))
+             (value (and equal (substring option (1+ equal))))
+             (environment
+              (cdr (assoc name '(("--git-dir" . "GIT_DIR")
+                                 ("--work-tree" . "GIT_WORK_TREE"))))))
+        (cond
+         ;; ngit never starts a pager, so both pager choices are no-ops.
+         ((member option '("-p" "--paginate" "-P" "--no-pager")) nil)
+         ((or environment (member option '("-c" "-C" "--config-env"))
+              (string= name "--config-env"))
+          (unless equal (setq value (pop args)))
+          (unless value
+            (require 'ngit-config-parameters)
+            (ngit-config-parameters--usage
+             (cond ((string= name "-c") "-c expects a configuration string")
+                   ((string= name "--config-env") "no config key given for --config-env")
+                   (t (format "no directory given for '%s' option" name)))))
+          (cond
+           (environment (ngit-hook-setenv environment value))
+           ((string= name "-C")
+            (unless (string= value "")
+              (let ((directory (expand-file-name value)))
+                (unless (file-directory-p directory)
+                  (ngit--die "fatal: cannot change to '%s': No such file or directory" value))
+                (setq default-directory (file-name-as-directory directory)))))
+           (t (require 'ngit-config-parameters)
+              (if (string= name "-c") (ngit-config-parameters--push value)
+                (ngit-config-parameters--push-env value)))))
+         ((string= option "--bare")
+          (unless (getenv "GIT_DIR")
+            (ngit-hook-setenv "GIT_DIR" (directory-file-name default-directory)))
+          (ngit-hook-setenv "GIT_IMPLICIT_WORK_TREE" "0"))
+         (t (require 'ngit-config-parameters)
+            (ngit-config-parameters--usage (concat "unknown option: " option))))))
     (let* ((command (car args))
            (handler (cdr (assoc command ngit--commands)))
            (ngit--commands
@@ -531,7 +562,7 @@ Git's repository setup reads the local primary config without following includes
                                 (funcall handler repo arguments))))
                       ngit--commands)
               ngit--commands)))
-      (funcall original (append prefix args))))
+      (funcall original args)))
    (ngit-fatal
     (ngit-native-write-stderr (concat (cadr err) "\n"))
     (or (nth 2 err) 128))))

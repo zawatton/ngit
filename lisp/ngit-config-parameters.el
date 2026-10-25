@@ -11,26 +11,48 @@
   "Quote TEXT with Git's sq_quote_buf format, including exclamation marks."
   (concat "'" (replace-regexp-in-string "['!]" (lambda (match) (concat "'\\" match "'")) text t t) "'"))
 
-(defun ngit-config-parameters--push (text)
-  "Export a -c TEXT for hooks and child Git with Git's split quoting."
-  (let* ((equal (string-search "=" text))
-         (key (if equal (substring text 0 equal) text))
-         (old (getenv "GIT_CONFIG_PARAMETERS")))
+(defun ngit-config-parameters--push-pair (key value)
+  "Export KEY and VALUE for hooks and child Git with Git's split quoting."
+  (let ((old (getenv "GIT_CONFIG_PARAMETERS")))
     (ngit-hook-setenv
      "GIT_CONFIG_PARAMETERS"
      (concat (if (and old (not (string= old ""))) (concat old " ") "")
              (ngit-config-parameters--quote key) "="
-             (if equal (ngit-config-parameters--quote (substring text (1+ equal))) "")))))
+             (if value (ngit-config-parameters--quote value) "")))))
 
-(defun ngit-config-parameters--missing-argument ()
+(defun ngit-config-parameters--push (text)
+  "Split a -c TEXT at the first equals, preserving the rest of its value."
+  (let ((equal (string-search "=" text)))
+    (ngit-config-parameters--push-pair
+     (if equal (substring text 0 equal) text)
+     (and equal (substring text (1+ equal))))))
+
+(defun ngit-config-parameters--usage (message)
+  "Report a global-option MESSAGE followed by Git's usage."
   (ngit--die-with
-   129 (concat "-c expects a configuration string\n"
+   129 "%s" (concat message "\n"
                "usage: git [-v | --version] [-h | --help] [-C <path>] [-c <name>=<value>]\n"
                "           [--exec-path[=<path>]] [--html-path] [--man-path] [--info-path]\n"
                "           [-p | --paginate | -P | --no-pager] [--no-replace-objects] [--no-lazy-fetch]\n"
                "           [--no-optional-locks] [--no-advice] [--bare] [--git-dir=<path>]\n"
                "           [--work-tree=<path>] [--namespace=<name>] [--config-env=<name>=<envvar>]\n"
                "           <command> [<args>]")))
+
+(defun ngit-config-parameters--missing-argument ()
+  (ngit-config-parameters--usage "-c expects a configuration string"))
+
+(defun ngit-config-parameters--push-env (spec)
+  "Split a --config-env SPEC at the last equals and export its value."
+  (let ((last (1- (length spec))))
+    (while (and (>= last 0) (/= (aref spec last) ?=)) (setq last (1- last)))
+    (when (< last 0) (ngit--die "fatal: invalid config format: %s" spec))
+    (let* ((key (substring spec 0 last)) (name (substring spec (1+ last)))
+           (value (getenv name)))
+      (when (string= name "")
+        (ngit--die "fatal: missing environment variable name for configuration '%s'" key))
+      (unless value
+        (ngit--die "fatal: missing environment variable '%s' for configuration '%s'" name key))
+      (ngit-config-parameters--push-pair key value))))
 
 (defun ngit-config-parameters--pair (text)
   "Split the first equals in a -c or legacy environment parameter TEXT."

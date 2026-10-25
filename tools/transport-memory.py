@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 import re
 import resource
+import select
 import signal
 import subprocess
 import sys
@@ -41,14 +42,97 @@ def identity(pid):
         return None
 
 
-def snapshot(known):
+class OlderProcesses:
+    """Pin exclusions born before this supervisor, never its descendants."""
+
+    def __init__(self):
+        self.started = identity(os.getpid())[0]
+        limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+        if limit == resource.RLIM_INFINITY:
+            self.capacity = 4096
+        else:
+            with os.scandir('/proc/self/fd') as entries:
+                opened = sum(1 for _ in entries)
+            self.capacity = max(0, min(4096, limit // 4, limit - opened - 64))
+        self.poller = select.poll()
+        self.by_pid = {}
+        self.by_fd = {}
+
+    def discard(self, fd):
+        pid = self.by_fd.pop(fd)
+        del self.by_pid[pid]
+        self.poller.unregister(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return pid
+
+    def close(self):
+        for fd in list(self.by_fd):
+            self.discard(fd)
+
+    def expired(self):
+        try:
+            return [self.discard(fd) for fd, _events in self.poller.poll(0)]
+        except OSError:
+            # Failure of this optimization must restore the uncached census.
+            pids = list(self.by_pid)
+            self.close()
+            self.capacity = 0
+            return pids
+
+    def remember(self, pid, value):
+        if value[0] >= self.started or len(self.by_pid) >= self.capacity:
+            return False
+        fd = None
+        try:
+            fd = os.pidfd_open(pid)
+            if identity(pid) != value:
+                return False
+            self.poller.register(fd, select.POLLIN)
+            self.by_pid[pid] = fd
+            self.by_fd[fd] = pid
+            fd = None
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError:
+            self.close()
+            self.capacity = 0
+            return False
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+
+def snapshot(known, older=None):
+    if older is not None:
+        older.expired()
     processes = {}
+    skipped = set()
     for entry in os.scandir("/proc"):
         if entry.name.isdigit():
             pid = int(entry.name)
+            if older is not None and pid not in known and pid in older.by_pid:
+                skipped.add(pid)
+                continue
             value = identity(pid)
             if value:
+                if older is not None and pid not in known and older.remember(pid, value):
+                    skipped.add(pid)
+                    continue
                 processes[pid] = value
+    if older is not None:
+        # A cached PID can exit and be reused during enumeration.  Read its
+        # new identity before computing ownership, rather than skipping a scan.
+        for pid in older.expired():
+            if pid in skipped:
+                value = identity(pid)
+                if value:
+                    processes[pid] = value
+        if older.capacity == 0 and skipped:
+            return snapshot(known)
     owned = {pid: start for pid, start in known.items()
              if pid in processes and processes[pid][0] == start}
     # Adopted grandchildren and descendants that changed session remain owned.
@@ -154,13 +238,14 @@ def main():
     reason = "exit"
     result = 2
     samples = 0
+    older = OlderProcesses()
     try:
         child = subprocess.Popen(command, start_new_session=True, preexec_fn=child_cap)
         value = identity(child.pid)
         if value:
             known[child.pid] = value[0]
         while True:
-            known = snapshot(known)
+            known = snapshot(known, older)
             used, metric = aggregate(known)
             samples += 1
             peak[metric] = max(peak[metric], used)
@@ -191,6 +276,9 @@ def main():
         reason = "supervisor-error"
         print(f"fatal: transport memory supervisor: {error}", file=sys.stderr)
     finally:
+        # Exit and cleanup always use a full census, with descriptor headroom
+        # restored before signaling or examining any late adopted children.
+        older.close()
         if child is not None:
             # Adopt and kill new descendants during cleanup too.  No process
             # group signals, inherited groups or unrelated sentinel processes.

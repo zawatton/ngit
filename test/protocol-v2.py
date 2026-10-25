@@ -8,6 +8,7 @@ clients. No expected diagnostic differences are waived.
 import base64
 import gzip
 import contextlib
+import copy
 import importlib.util
 import json
 import os
@@ -27,7 +28,8 @@ NO_ELC = os.environ.get('NGIT_NO_ELC')
 REPORT_DIR = Path(os.environ.get('NGIT_REPORT_DIR', ROOT / 'target/protocol-v2/reports'))
 MODES = ('select', 'lsrefs', 'e2e-ssh', 'http-discovery', 'http-fetch',
          'e2e-https', 'negotiate', 'negotiate-http', 'negotiate-v0',
-         'e2e-negotiate', 'errors', 'server-option', 'fallback', 'review')
+         'e2e-negotiate', 'errors', 'server-option', 'fallback', 'review',
+         'followups-launcher', 'file', 'followups', 'config-case', 'config-deferred')
 START = time.monotonic()
 DEADLINE = START + 450
 REPORT = dict(comparisons=0, exact=0, intended={}, failures=0,
@@ -154,6 +156,36 @@ def normalize(data, root, server=None):
     return data
 
 
+HANGUP = b'fatal: the remote end hung up unexpectedly\n'
+
+
+def without_hangup(record):
+    record = copy.deepcopy(record)
+    stderr = base64.b64decode(record['result']['stderr_b64'])
+    # Git prints the line before or after the option error depending on the
+    # race; strip exactly one copy at either end, nothing in the middle.
+    if stderr.startswith(HANGUP):
+        stderr = stderr[len(HANGUP):]
+    elif stderr.endswith(HANGUP):
+        stderr = stderr[:-len(HANGUP)]
+    record['result']['stderr_b64'] = b64(stderr)
+    return record
+
+
+def installs_nothing(expected, actual):
+    """True when ACTUAL equals EXPECTED except that it kept none of the
+    objects Git stored from the rejected response, and fsck stays clean."""
+    def strip(record):
+        record = copy.deepcopy(record)
+        record['state'].pop('objects', None)
+        record['state'].pop('fsck', None)
+        return record
+    return (expected['state'] is not None and actual['state'] is not None
+            and strip(expected) == strip(actual) and actual['state']['clean']
+            and set(actual['state']['objects']) < set(expected['state']['objects'])
+            and actual['state']['objects'] == [])
+
+
 def encoded(result, root, server=None):
     return dict(exit=result.returncode,
                 stdout_b64=b64(normalize(result.stdout, root, server)),
@@ -179,6 +211,8 @@ def repository_state(repo, env, root, server=None):
                 reachable=reachable, objects=sorted(objects), fsck=fsck,
                 index=inspect(['ls-files', '-s']),
                 status=inspect(['status', '--porcelain=v1', '--ignored']),
+                branch_config=inspect(['config', '--get-regexp', r'^branch\.']),
+                remote_config=inspect(['config', '--get-regexp', r'^remote\.']),
                 clean=fsck['exit'] == 0)
 
 
@@ -235,6 +269,26 @@ exit "$status"
 '''
 
 
+UPLOAD_PACK = r'''#!/bin/sh
+base=$(dirname "$(dirname "$0")")
+log=$base/wire/$(ls "$base/wire" | wc -l)
+mkdir "$log"
+if [ "${GIT_PROTOCOL+x}" ]; then printf '%s' "$GIT_PROTOCOL" >"$log/protocol"; fi
+printf 'git-upload-pack\n' >"$log/command"
+printf '%s\n' "$@" >>"$log/command"
+mkfifo "$log/input"
+exec 3<&0
+tee "$log/stdin" <&3 >"$log/input" &
+recorder=$!
+"$NGIT_PV2_REAL_UPLOAD_PACK" "$@" <"$log/input" 3<&-
+status=$?
+exec 3<&-
+kill "$recorder" 2>/dev/null || :
+wait "$recorder" 2>/dev/null || :
+exit "$status"
+'''
+
+
 class Suite:
     def __init__(self, root):
         self.root = root
@@ -261,6 +315,12 @@ class Suite:
         git(['clone', '-q', '--bare', '--template=', seed, self.template / 'remote.git'], root, self.env)
         (self.template / 'ssh').write_text(SSH)
         (self.template / 'ssh').chmod(0o755)
+        (self.template / 'exec').mkdir()
+        wrapper = self.template / 'exec/git-upload-pack'
+        wrapper.write_text(UPLOAD_PACK)
+        wrapper.chmod(0o755)
+        self.upload_pack = str(Path(git(['--exec-path'], root, self.env).decode()) /
+                               'git-upload-pack')
 
     def reset(self, template):
         if self.active.exists():
@@ -330,7 +390,6 @@ class Suite:
         if server:
             result = []
             for method, path, headers, body, raw in server.requests:
-                wire_body = body
                 # Preserve spelling, order, absent vs empty and duplicates.
                 selected = [(k, v) for k, v in raw if k.lower() in
                             ('git-protocol', 'content-type', 'accept', 'content-encoding')]
@@ -339,13 +398,19 @@ class Suite:
                 if any(k.lower() == 'content-encoding' and v.strip() == 'gzip'
                        for k, v in selected):
                     body = gzip.decompress(body)
+                    length_delta = (len(gzip.compress(wire_normalize(body), mtime=0)) -
+                                    len(gzip.compress(body, mtime=0)))
+                else:
+                    length_delta = len(wire_normalize(body)) - len(body)
                 record = dict(method=method, path=path, headers=selected,
                               body_b64=b64(wire_normalize(body)))
                 if method == 'POST':
-                    record.update(content_length=[v for k, v in raw if k.lower() == 'content-length'],
+                    # Adjust only the agent-induced byte difference, retaining
+                    # any discrepancy between the declared and actual length.
+                    record.update(content_length=[str(int(v) + length_delta) for k, v in raw
+                                                  if k.lower() == 'content-length'],
                                   transfer_encoding=[(k, v) for k, v in raw
-                                                     if k.lower() == 'transfer-encoding'],
-                                  wire_body_b64=b64(wire_body))
+                                                     if k.lower() == 'transfer-encoding'])
                 result.append(record)
             return result
         result = []
@@ -377,6 +442,13 @@ class Suite:
         shutil.copytree(self.active, snapshot)
         server = None
         is_http = transport in ('http', 'auth', 'fallback-http')
+        is_file = transport in ('file', 'local')
+        if is_file:
+            # Git prepends its exec path before looking up git-upload-pack.
+            # Shadow that path as well as PATH; never substitute --upload-pack.
+            env.update(GIT_EXEC_PATH=str(self.active / 'exec'),
+                       PATH=str(self.active / 'exec') + os.pathsep + env['PATH'],
+                       NGIT_PV2_REAL_UPLOAD_PACK=self.upload_pack)
         if is_http:
             cls = AUTH_HTTP if transport == 'auth' else HTTP
             server = cls(self.active, forward_protocol=transport != 'fallback-http',
@@ -384,6 +456,9 @@ class Suite:
                          backend_env=env, run_process=process)
         with server if server else contextlib.nullcontext():
             url = server.url('remote.git') if server else 'fake:' + str(self.active / 'remote.git')
+            if is_file:
+                remote = self.active / 'remote.git'
+                url = remote.as_uri() if transport == 'file' else str(remote)
             if server:
                 env['GIT_SSL_CAINFO'] = server.ca_file
             if transport == 'auth':
@@ -421,7 +496,8 @@ class Suite:
                     destination = self.active / 'destination' if operation == 'clone' else repo
                     work = destination if step != 'initial' else repo
                     if op == 'clone':
-                        argv = [*extra, 'clone', '--template=', *opts, url, str(destination)]
+                        argv = [*extra, 'clone', '--template=',
+                                *(['--no-local'] if is_file else []), *opts, url, str(destination)]
                     elif op == 'ls-remote':
                         # Patterns are supplied after the URL, flags before it.
                         flags, patterns = [], []
@@ -436,7 +512,7 @@ class Suite:
                         argv = [*extra, op, *flags, 'origin', *patterns]
                     elif op == 'push':
                         argv = [*extra, op, *([] if error and error.startswith('push-') else ['-q']),
-                                *opts, 'origin', *(['--delete', 'main'] if error == 'push-delete'
+                                *opts, 'origin', *(['--delete', 'main'] if error in ('push-delete', 'push-reject-delete')
                                                   else ['main:refs/heads/pushed'])]
                     else:
                         argv = [*extra, op, *opts]
@@ -462,24 +538,35 @@ class Suite:
                                         if immutable else None))
                 runs.append(records)
             for i, (expected, actual) in enumerate(zip(*runs)):
-                for left, right in zip(expected['wire'], actual['wire']):
-                    if 'wire_body_b64' in left and 'wire_body_b64' in right:
-                        if left['wire_body_b64'] != right['wire_body_b64']:
-                            for record in (left, right):
-                                record['content_length'] = [True for _ in record['content_length']]
-                        del left['wire_body_b64'], right['wire_body_b64']
                 label = name + ('/' + steps[i][0] if flow else '')
                 # Git 2.47.3's HTTP remote helper ignores server options even
                 # on v0; the native SSH transport rejects them on v0. Keep
                 # comparing the complete result and wire in either case.
-                rejects_options = version == 0 and not is_http and any(
+                rejects_options = version in (0, 1) and not is_http and any(
                     o.startswith('--server-option') or
                     (o == '-o' and operation != 'clone') for o in options)
                 wanted_exit = expected_exit if expected_exit is not None else (128 if immutable or version in (3, 'foo') or rejects_options else 0)
                 reference_ok = (expected['result'].get('exit') == wanted_exit and
                                 (wanted_exit != 0 or bool(expected['wire'])))
+                if is_file:
+                    # A matching empty transcript is not a file-transport test.
+                    reference_ok = reference_ok and bool(expected['wire'])
+                    reference_ok = reference_ok and all(
+                        r['command'].startswith('git-upload-pack\n') for r in expected['wire'])
+                if rejects_options and version == 1:
+                    # Git 2.47.3 races here: the v1 server may close the pipe
+                    # around the client's option error, and Git then prints this
+                    # line first, last or not at all.
+                    expected, actual = (without_hangup(r) for r in (expected, actual))
                 equal = expected == actual and not actual['unexpected_error']
                 equal = equal and reference_ok
+                reason = None
+                if (not equal and reference_ok and not actual['unexpected_error']
+                        and error and error.startswith('trailing-fetch')
+                        and installs_nothing(expected, actual)):
+                    reason = ('ngit checks the whole response framing before it installs '
+                              'the pack; Git installs the pack first and leaves its objects '
+                              'dangling. Exit status, output, refs and wire are equal.')
                 if immutable:
                     equal = equal and expected['unchanged'] and actual['unchanged']
                     equal = equal and expected['result'].get('exit', 0) != 0 and actual['result'].get('exit', 0) != 0
@@ -487,13 +574,220 @@ class Suite:
                     equal = equal and all(s is None or s['clean'] for s in (r['state'], r['remote']))
                 REPORT['comparisons'] += 1
                 REPORT['exact'] += int(bool(equal))
-                REPORT['failures'] += int(not equal)
+                if reason:
+                    REPORT['intended'][label] = reason
+                REPORT['failures'] += int(not equal and not reason)
                 REPORT['unexpected_errors'] += int(actual['unexpected_error']) + int(not reference_ok)
                 REPORT['cases'].append(dict(name=label, expected=expected, actual=actual,
                                             expected_exit=wanted_exit, reference_ok=reference_ok,
                                             equal=bool(equal)))
                 print(('PASS ' if equal else 'FAIL ') + label, flush=True)
         shutil.rmtree(snapshot)
+
+    def config_cases(self, deferred=False):
+        """Compare each command and its unnormalized config bytes on fresh repos."""
+        # Deferred cases preserve coverage of reverted features without grading them.
+        def pair(label, commands, setup=(), bare=False, expected_exits=None, defer=False):
+            if defer != deferred:
+                return
+            records = []
+            for command in (['git'], COMMAND):
+                env = self.prepare('ssh', client='clone')
+                env['PV2_CONFIG_VALUE'] = 'from-environment'
+                repo = self.active / ('remote.git' if bare else 'client')
+                for args in setup:
+                    git(args, repo, env)
+                steps = commands(repo)
+                observations = []
+                for args in steps:
+                    result = process([*command, *map(str, args)], repo, env)
+                    configs = {}
+                    for name, file in (('local', repo / ('config' if bare else '.git/config')),
+                                       ('global', Path(env['HOME']) / '.gitconfig'),
+                                       ('clone', self.active / 'destination/.git/config')):
+                        configs[name] = b64(file.read_bytes()) if file.exists() else None
+                    listed = {}
+                    for name, directory in (('local', repo),
+                                            ('clone', self.active / 'destination')):
+                        if directory.exists():
+                            listed[name] = encoded(process(
+                                ['git', 'config', '--list', '--show-origin'], directory, env),
+                                self.root)
+                    observations.append(dict(result=encoded(result, self.root), configs=configs,
+                                             listed=listed))
+                records.append(observations)
+            expected, actual = records
+            unexpected = any(BAD.search(base64.b64decode(step['result'][stream]))
+                             or step['result']['exit'] < 0
+                             or step['result']['exit'] in (126, 127, 134, 139)
+                             for step in actual for stream in ('stdout_b64', 'stderr_b64'))
+            exits = expected_exits if expected_exits is not None else [0] * len(expected)
+            reference_ok = (len(exits) == len(expected)
+                            and [step['result']['exit'] for step in expected] == exits
+                            and all(result['exit'] == 0 for step in expected
+                                    for result in step['listed'].values()))
+            equal = expected == actual and not unexpected and reference_ok
+            REPORT['comparisons'] += 1
+            REPORT['exact'] += int(equal)
+            REPORT['failures'] += int(not equal)
+            REPORT['unexpected_errors'] += int(unexpected) + int(not reference_ok)
+            REPORT['cases'].append(dict(name=label, expected=expected, actual=actual,
+                                        reference_ok=reference_ok, expected_exits=exits, equal=equal))
+            print(('PASS ' if equal else 'FAIL ') + label, flush=True)
+
+        for scope in ([], ['--global']):
+            for initial, key in (('core.filemode', 'core.FileMode'),
+                                 ('remote.origin.tagopt', 'remote.origin.tagOpt'),
+                                 ('branch.main.rebase', 'branch.main.ReBase'),
+                                 ('remote.Origin.tagopt', 'REMOTE.Origin.TagOpt')):
+                prefix = ('global-' if scope else 'local-') + key
+                setup = [['config', *scope, initial, 'true']]
+                for action in ('set', 'replace', 'unset', 'unset-all', 'replace-all', 'add'):
+                    def commands(repo, action=action, key=key, scope=scope):
+                        head = ['config', *scope]
+                        if action == 'set':
+                            return [head + [key, 'false'], head + [key, 'true']]
+                        if action == 'replace':
+                            return [head + [key, 'false', 'true']]
+                        if action == 'unset':
+                            return [head + ['--unset', key]]
+                        if action == 'unset-all':
+                            return [head + ['--add', key, 'second'],
+                                    head + ['--unset-all', key]]
+                        if action == 'replace-all':
+                            return [head + ['--add', key, 'second'],
+                                    head + ['--replace-all', key, 'replacement']]
+                        return [head + ['--add', key, 'second'], head + [key, 'third']]
+                    pair(prefix + '-' + action, commands, setup,
+                         expected_exits=[0, 5] if action == 'add' else None,
+                         defer=action in ('replace', 'unset-all', 'replace-all'))
+                pair(prefix + '-subcommand-set-unset',
+                     lambda repo, key=key, scope=scope: [
+                         ['config', 'set', *scope, key, 'false'],
+                         ['config', 'unset', *scope, key]], setup)
+        pair('subsection-case-distinct', lambda repo: [
+            ['config', 'remote.Origin.tagOpt', 'upper'],
+            ['config', 'remote.origin.TagOpt', 'lower'],
+            ['config', '--unset-all', 'remote.Origin.TAGOPT']], defer=True)
+        # Keep subsection-case coverage on the supported single-value writer too.
+        pair('subsection-case-distinct-single-unset', lambda repo: [
+            ['config', 'remote.Origin.tagOpt', 'upper'],
+            ['config', 'remote.origin.TagOpt', 'lower'],
+            ['config', '--unset', 'remote.Origin.TAGOPT']])
+        for opts in (['--no-tags'], ['--origin', 'Origin'], ['--branch', 'topic'],
+                     ['--no-tags', '--origin', 'Origin', '--branch', 'topic']):
+            pair('clone-' + '-'.join(opts), lambda repo, opts=opts: [
+                ['clone', '-q', '--template=', *opts, self.active / 'remote.git',
+                 self.active / 'destination']])
+        pair('remote-add-rename-set-url', lambda repo: [
+            ['remote', 'add', 'Other', str(self.active / 'remote.git')],
+            ['remote', 'rename', 'Other', 'Renamed'],
+            ['remote', 'set-url', 'Renamed', 'replacement'],
+            ['remote', 'set-url', '--add', 'Renamed', 'another']],
+             [['config', 'remote.origin.URL', 'original'],
+              ['config', 'remote.origin.TagOpt', '--no-tags']])
+        pair('remote-existing-case-set-url-rename', lambda repo: [
+            ['remote', 'set-url', 'origin', str(self.active / 'remote.git')],
+            ['remote', 'rename', 'origin', 'Origin']],
+             [['config', 'remote.origin.URL', 'original'],
+              ['config', 'remote.origin.Fetch', '+refs/heads/*:refs/remotes/origin/*']])
+        upstream_setup = [['config', 'branch.main.Remote', 'origin'],
+                          ['config', 'branch.main.Merge', 'refs/heads/topic']]
+        pair('branch-upstream-case', lambda repo: [
+            ['branch', '--set-upstream-to=origin/main', 'main']], upstream_setup)
+        pair('push-upstream-case', lambda repo: [
+            ['push', '--no-verify', '--set-upstream', 'origin', 'main']], upstream_setup)
+        for flags in (['-P'], ['--no-pager'], ['-p'], ['--paginate'],
+                      ['--no-replace-objects'], ['--literal-pathspecs'], ['--glob-pathspecs'],
+                      ['--noglob-pathspecs'], ['--icase-pathspecs'], ['--no-optional-locks'],
+                      ['--namespace=fixture'], ['--namespace', 'fixture'],
+                      ['--config-env=fixture.key=PV2_CONFIG_VALUE'],
+                      ['--config-env', 'fixture.key=PV2_CONFIG_VALUE']):
+            pair('global-' + '-'.join(flags), lambda repo, flags=flags: [
+                [*flags, 'config', '--get', 'fixture.key'],
+                [*flags, 'ls-remote', '--get-url', str(self.active / 'remote.git')]],
+                 expected_exits=[0 if flags[0].startswith('--config-env') else 1, 0],
+                 defer=not (flags[0] in ('-P', '--no-pager', '-p', '--paginate')
+                            or flags[0].startswith('--config-env')))
+        pair('global-no-pager-log', lambda repo: [['--no-pager', 'log', '-1']])
+        for equals in (False, True):
+            pair('global-git-dir-status-' + str(equals), lambda repo, equals=equals: [
+                [*(['--git-dir=' + str(repo / '.git')] if equals else
+                   ['--git-dir', str(repo / '.git')]), 'status', '--porcelain=v1']],
+                 defer=True)
+            pair('global-work-tree-' + str(equals), lambda repo, equals=equals: [
+                ['--git-dir=' + str(repo / '.git'),
+                 *(['--work-tree=' + str(repo)] if equals else ['--work-tree', str(repo)]),
+                 'status', '--porcelain=v1']], defer=True)
+        # These commands require discovery/rev-parse extensions reverted by the coordinator.
+        pair('global-bare', lambda repo: [['--bare', 'rev-parse', '--is-bare-repository']],
+             bare=True, defer=True)
+        pair('global-exec-path', lambda repo: [
+            ['--exec-path=' + git(['--exec-path'], repo, self.env).decode(),
+             'config', '--get', 'user.name'], ['--exec-path'],
+            ['--exec-path=' + str(self.active / 'exec'), '--exec-path']], defer=True)
+        pair('global-interleaved', lambda repo: [
+            ['-C', '..', '-P', '-C', 'client', '-c', 'fixture.key=first',
+             '--config-env=fixture.key=PV2_CONFIG_VALUE', 'config', '--get', 'fixture.key']])
+        pair('global-unknown', lambda repo: [['--unknown-option', 'status']], expected_exits=[129])
+
+    def launcher_cases(self):
+        env = self.prepare('ssh')
+        repo = self.active / 'client'
+        runtime = self.root / 'runtime'
+        observation = self.root / 'supervision'
+        runtime.write_text('#!' + sys.executable + '\n'
+                           'import os\nfrom pathlib import Path\n'
+                           'parent = Path(f"/proc/{os.getppid()}/cmdline").read_bytes()\n'
+                           'Path(os.environ["PV2_OBSERVATION"]).write_text(str(any(\n'
+                           '    Path(os.fsdecode(arg)).name == "transport-memory.py"\n'
+                           '    for arg in parent.split(b"\\0") if arg)))\n')
+        runtime.chmod(0o755)
+        env.update(NGIT_NELISP=str(runtime), PV2_OBSERVATION=str(observation),
+                   PV2_CONFIG='fixture')
+        globals_cases = [
+            ('config', ['-c', 'fixture.key=value']),
+            ('chdir', ['-C', str(repo)]),
+            ('git-dir-equals', ['--git-dir=' + str(repo / '.git')]),
+            ('git-dir', ['--git-dir', str(repo / '.git')]),
+            ('work-tree-equals', ['--work-tree=' + str(repo)]),
+            ('work-tree', ['--work-tree', str(repo)]),
+            ('bare', ['--bare']), ('pager-short', ['-P']),
+            ('no-pager', ['--no-pager']),
+            ('config-env-equals', ['--config-env=fixture.key=PV2_CONFIG']),
+            ('config-env', ['--config-env', 'fixture.key=PV2_CONFIG']),
+            ('combined', ['-C', str(repo), '-c', 'fixture.key=value',
+                          '--config-env=fixture.other=PV2_CONFIG', '--no-pager']),
+        ]
+        for op in ('clone', 'fetch', 'pull', 'status', 'log'):
+            for name, globals_ in globals_cases:
+                observations = []
+                unexpected = False
+                for args in ([op], [*globals_, op]):
+                    observation.unlink(missing_ok=True)
+                    result = process([*COMMAND, *args], repo, env)
+                    observed = observation.read_text() if observation.exists() else 'False'
+                    unexpected |= (result.returncode < 0 or
+                                   result.returncode in (126, 127, 134, 139) or
+                                   bool(BAD.search(result.stderr)))
+                    observations.append(dict(supervised=observed == 'True',
+                                             runtime_invoked=observation.exists(),
+                                             result=encoded(result, self.root)))
+                expected, actual = observations
+                reference_ok = op in ('clone', 'fetch', 'pull') or not expected['supervised']
+                if Path(COMMAND[0]).name == 'ngit':
+                    reference_ok &= expected['runtime_invoked'] and actual['runtime_invoked']
+                    reference_ok &= expected['supervised'] == (op in ('clone', 'fetch', 'pull'))
+                equal = (expected['supervised'] == actual['supervised'] and
+                         reference_ok and not unexpected)
+                REPORT['comparisons'] += 1
+                REPORT['exact'] += int(equal)
+                REPORT['failures'] += int(not equal)
+                REPORT['unexpected_errors'] += int(unexpected) + int(not reference_ok)
+                label = f'launcher-{op}-{name}'
+                REPORT['cases'].append(dict(name=label, expected=expected, actual=actual,
+                                            reference_ok=reference_ok, equal=equal))
+                print(('PASS ' if equal else 'FAIL ') + label, flush=True)
 
 
 def rewriter(error):
@@ -510,7 +804,13 @@ def rewriter(error):
         elif error == 'err-discovery' and handler.command == 'GET':
             response = pkt(b'ERR protocol-v2 fixture failure\n') + b'0000'
         elif handler.command == 'POST':
-            if b'command=fetch' in handler.request_body:
+            if error and error.startswith('trailing-'):
+                command, tail = error[len('trailing-'):].rsplit('-', 1)
+                if b'command=' + command.encode() in handler.request_body:
+                    if not response.endswith(b'0000'):
+                        raise RuntimeError('trailing-bytes fixture needs a final flush')
+                    response += bytes.fromhex(tail)
+            elif b'command=fetch' in handler.request_body:
                 response = fault_response(error, response)
             elif b'command=ls-refs' in handler.request_body:
                 response = refs_response(error, response)
@@ -552,7 +852,7 @@ def refs_response(error, response):
 
 
 def push_peer(repo, error):
-    """A receive-pack fixture that reports successful rewritten updates."""
+    """A receive-pack fixture with rewritten updates and rejected refs."""
     oid = git(['rev-parse', 'main'], repo, os.environ)
     caps = b'report-status report-status-v2 delete-refs'
     sys.stdout.buffer.write(pkt(oid + b' refs/heads/main\0' + caps + b'\n') + b'0000')
@@ -562,6 +862,12 @@ def push_peer(repo, error):
     command = sys.stdin.buffer.read(size - 4).split(b'\0', 1)[0]
     sys.stdin.buffer.read(4)  # command-list flush
     dst = command.split(b' ')[2]
+    if error in ('push-reject-delete', 'push-reject-update'):
+        sys.stdout.buffer.write(pkt(b'unpack ok\n') +
+                                pkt(b'ng ' + dst + b' fixture rejects this ref\n') + b'0000')
+        sys.stdout.buffer.flush()
+        sys.stdin.buffer.read()
+        return
     values = {
         'push-refname': [b'refname refs/tags/rewritten'],
         'push-old-oid': [b'old-oid ' + git(['rev-parse', 'main~1'], repo, os.environ)],
@@ -649,7 +955,37 @@ def fetch_cases(s, transport='ssh', versions=(2,)):
 
 
 def main(mode, s):
-    if mode == 'select':
+    if mode in ('config-case', 'config-deferred'):
+        s.config_cases(deferred=mode == 'config-deferred')
+    elif mode == 'followups-launcher':
+        s.launcher_cases()
+    elif mode == 'file':
+        for transport in ('local', 'file'):
+            for version in (0, 1, 2):
+                prefix = f'{transport}-v{version}'
+                s.pair(prefix + '-clone', 'clone', transport=transport, version=version)
+                s.pair(prefix + '-fetch-empty', transport=transport, version=version)
+                s.pair(prefix + '-fetch-divergent', transport=transport, version=version,
+                       client='clone', shape='divergent')
+                s.pair(prefix + '-ls-heads', 'ls-remote', ['--heads'], transport,
+                       version=version)
+                s.pair(prefix + '-pull', 'pull', ['--no-rebase', '--no-edit'], transport,
+                       version=version, client='clone', shape='divergent')
+                for op in ('clone', 'fetch', 'ls-remote'):
+                    spellings = ('long',) if op == 'clone' else ('short', 'long')
+                    for spelling in spellings:
+                        opts = ['-o', 'one'] if spelling == 'short' else ['--server-option=one']
+                        s.pair(f'{prefix}-{op}-option-{spelling}', op, opts, transport,
+                               version=version)
+    elif mode == 'followups':
+        for command, op in (('ls-refs', 'ls-remote'), ('fetch', 'fetch')):
+            for tail in (b'zzzz', b'abc', b'0008ab', b'0003', b'0010ERR failure\n'):
+                s.pair(f'http-{command}-trailing-{tail.decode()}', op, transport='http',
+                       error=f'trailing-{command}-{tail.hex()}', expected_exit=128)
+        for error in ('push-reject-delete', 'push-reject-update'):
+            s.pair(error, 'push', ['--no-verify'], client='clone', error=error,
+                   expected_exit=1)
+    elif mode == 'select':
         for source in ('cli', 'config'):
             for version in (None, 0, 1, 2, 3, 'foo'):
                 for op in ('ls-remote', 'clone', 'fetch'):
