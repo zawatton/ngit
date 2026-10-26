@@ -125,7 +125,7 @@ Ties choose NEW, as in combine-diff.c's coalesce_lines."
                 (if (= same 0) (setq same (cdr line))
                   (unless (= same (cdr line)) (setq interesting t))))
               (setq k (1+ k)))
-            (unless (or interesting (= same all))
+            (unless (or interesting (= same all) (eq ngit--ld-merge 'combined))
               (setq k i)
               (while (< k j)
                 (aset flags k (logand (aref flags k) (lognot mark)))
@@ -238,7 +238,7 @@ Ties choose NEW, as in combine-diff.c's coalesce_lines."
           (setq p (1+ p)))
         (setq hunks (ngit--cc-hunks flags lost cnt parents)))
       (when (or binary mode-diff hunks)
-        (ngit--emit "diff --cc " (ngit-quote-path path) "\nindex "
+        (ngit--emit (if (eq ngit--ld-merge 'combined) "diff --combined " "diff --cc ") (ngit-quote-path path) "\nindex "
                     (mapconcat (lambda (c) (ngit--abbrev-bin repo (aref c 3))) pairs ",")
                     ".." (ngit--abbrev-bin repo bin) "\n")
         (when mode-diff
@@ -344,7 +344,7 @@ Ties choose NEW, as in combine-diff.c's coalesce_lines."
         (cond
          ((string= a "--") (setq paths (cons "--" args) args nil))
          ((string-prefix-p ":(" a) (setq paths (cons "--" (cons a args)) args nil))
-         ((member a '("--cc" "--no-walk" "--no-walk=unsorted" "--no-walk=sorted")))
+         ((member a '("--no-walk" "--no-walk=unsorted" "--no-walk=sorted")))
          ((string= a "--do-walk") (setq walk t))
          ((string-prefix-p "-" a)
           (push a opts)

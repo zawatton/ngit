@@ -104,6 +104,85 @@
                       (string< (aref left 0) (aref right 0)))))))
     changes))
 
+(defvar ngit--switch-allow-merge nil)
+
+(defun ngit--switch-merge-local (repo base target label quiet style ancestor)
+  "Merge local work-tree edits across a branch change after two-tree refusal."
+  (require 'ngit-merge-tree)
+  (let* ((index (ngit-read-index repo)) (old (aref index 0))
+         (staged (ngit-diff-tree-index repo base))
+         (wt (ngit-wt-changes repo t))
+         (drop (make-hash-table :test 'equal)) (local nil))
+    (when staged
+      (ngit--die "fatal: cannot continue with staged changes in the following files:\n%s"
+                 (mapconcat (lambda (c) (aref c 0)) staged "\n")))
+    (dolist (c wt)
+      (puthash (aref c 0) t drop)
+      (when (/= (aref c 4) 0)
+        (push (ngit--switch-entry (aref c 0) (aref c 4)
+                                  (if (aref c 7) (ngit-write-object repo "blob" (aref c 7)) (aref c 5)) nil) local)))
+    (let* ((work (ngit-ct-update repo (ngit-ct-new) (ngit-index-overlay old local drop)))
+           (ngit--config-cache (cons repo (append (ngit-config-entries repo)
+                                                  (and style (list (cons "merge.conflictstyle" style))))))
+           (ngit-merge-ancestor-label ancestor)
+           (ngit-merge-unique-worktree-root (ngit-repo-toplevel repo))
+           (result (ngit-merge-trees repo base target work label "local"))
+           (image (plist-get result :worktree))
+           (conflicts (plist-get result :conflicts))
+           (final (ngit-merge-tree-entries repo target))
+           (relocations (make-hash-table :test 'equal))
+           (directory-conflicts nil)
+           (unmerged nil) (dropped (make-hash-table :test 'equal))
+           (lock nil) (i 0))
+      (ngit--switch-protect-untracked repo base (plist-get result :tree) "checkout")
+      ;; Checkout's recursive merge keeps D/F conflict stages at the original
+      ;; path.  Only the work-tree copy moves aside; reset_tree then skips
+      ;; target descendants obstructed by those unmerged stages.
+      (dolist (e local)
+        (let* ((path (aref e 0)) (stem (concat path "~local")))
+          (when (ngit-index-dir-p final (concat path "/"))
+            (dolist (c conflicts)
+              (when (and (or (equal c stem)
+                             (and (string-prefix-p (concat stem "_") c)
+                                  (string-match-p "\\`[0-9]+\\'" (substring c (1+ (length stem))))))
+                         (seq-some (lambda (entry)
+                                     (and (equal (aref entry 0) c) (= (aref entry 3) 3)
+                                          (equal (aref entry 1) (aref e 1))))
+                                   (append (plist-get result :entries) nil)))
+                (puthash c path relocations)
+                (push path directory-conflicts))))))
+      (when directory-conflicts
+        (setq final (vconcat
+                     (seq-remove (lambda (e)
+                                   (seq-some (lambda (path) (string-prefix-p (concat path "/") (aref e 0)))
+                                             directory-conflicts))
+                                 (append final nil)))))
+      (dolist (path conflicts) (puthash path t dropped))
+      (dolist (e (append (plist-get result :entries) nil))
+        (when (gethash (aref e 0) dropped)
+          (let ((original (gethash (aref e 0) relocations)))
+            (when original
+              (setq e (copy-sequence e))
+              (aset e 0 original)
+              (puthash original t dropped))
+            (push e unmerged))))
+      (setq final (ngit-index-overlay final unmerged dropped)
+            lock (ngit-lock (ngit-index-file repo)))
+      (unwind-protect
+          (progn
+            (while (< i (length old))
+              (let ((e (aref old i)))
+                (unless (ngit-index-lookup image (aref e 0)) (ngit--unlink-entry repo e)))
+              (setq i (1+ i)))
+            (aset index 0 final)
+            (dolist (e (append image nil))
+              (unless (ngit--checkout-clean-p repo index e) (ngit-checkout-entry repo e)))
+            (ngit-commit-lock lock (ngit-index-bytes repo index final (ngit-ct-new) nil))
+            (setq lock nil) (aset repo 6 nil) (aset repo 7 nil))
+        (when lock (ngit-unlock lock)))
+      (ngit--switch-show-local repo target quiet)
+      'merged)))
+
 (defun ngit--switch-twoway (repo old-tree new-tree command &optional known-untracked)
   "Merge OLD-TREE and NEW-TREE through the current index and work tree.
 KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
@@ -198,6 +277,9 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
                      (push u collisions)))))))
       (dolist (path removed-check)
         (when (member path all-untracked) (push path removed)))
+      (when (and ngit--switch-allow-merge local (not (or removed dirs))
+                 (seq-every-p (lambda (path) (member path local)) collisions))
+        (throw 'ngit-switch-merge-needed 'merge))
       (ngit--switch-error-paths command local collisions removed dirs))
     (let ((lock (ngit-lock (ngit-index-file repo)))
           (fresh nil)
@@ -428,7 +510,7 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
   "Parse switch-style ARGS.  CHECKOUT selects -b/-B spellings."
   (let ((quiet nil) (create nil) (force-create nil) (detach nil)
         (force nil) (discard nil) (orphan nil) (track 'default) (guess t)
-        (pos nil))
+        (pos nil) (merge nil) (style nil))
     (while args
       (let ((a (pop args)))
         (cond
@@ -436,6 +518,9 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
          ((string= a "-") (setq pos (append pos (list a))))
          ((member a '("-q" "--quiet")) (setq quiet t))
          ((member a '("-f" "--force")) (setq force t discard t))
+         ((member a '("-m" "--merge")) (setq merge t))
+         ((string-prefix-p "--conflict=" a) (setq merge t style (substring a 11)))
+         ((string= a "--track=inherit") (setq track 'inherit))
          ((string= a "--discard-changes") (setq discard t))
          ((member a '("-d" "--detach")) (setq detach t))
          ((string= a "--no-guess") (setq guess nil))
@@ -467,7 +552,10 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
          (t (setq pos (append pos (list a)))))))
     (when (> (+ (if create 1 0) (if force-create 1 0) (if orphan 1 0)) 1)
       (ngit--die "fatal: branch creation options cannot be used together"))
-    (list :quiet quiet :create create :force-create force-create
+    (when (and style (not (member style '("merge" "diff3" "zdiff3"))))
+      (ngit--die "fatal: unknown style '%s' given for 'merge.conflictstyle'" style))
+    (when (and merge discard) (ngit--die "fatal: options '-f' and '-m' cannot be used together"))
+    (list :merge merge :style style :quiet quiet :create create :force-create force-create
           :detach detach :force force :discard discard :orphan orphan :track track
           :guess guess :pos pos :checkout checkout)))
 
@@ -709,9 +797,14 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
              repo new-tree start
              (lambda (entries)
                (ngit--switch-clear-target-directories repo entries))))
-        (setq candidates
-              (ngit--switch-twoway repo old-tree new-tree (if checkout "checkout" "switch"))))
-      (ngit--switch-show-local repo new-tree (or quiet (plist-get opts :discard)) candidates)
+        (let ((ngit--switch-allow-merge (plist-get opts :merge)))
+          (setq candidates
+                (catch 'ngit-switch-merge-needed
+                  (ngit--switch-twoway repo old-tree new-tree (if checkout "checkout" "switch")))))
+        (when (eq candidates 'merge)
+          (setq candidates (ngit--switch-merge-local repo old-tree new-tree display quiet (plist-get opts :style) (or old-name (ngit-abbrev repo old-hex))))))
+      (unless (eq candidates 'merged)
+        (ngit--switch-show-local repo new-tree (or quiet (plist-get opts :discard)) candidates))
       (ngit--flush)
       (when (and (null old-ref) old-hex)
         (ngit--switch-leaving-detached repo old-hex hex quiet))
@@ -767,7 +860,7 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
 
 (defun ngit--checkout-option-p (a)
   (or (member a '("-b" "-B" "--orphan" "-d" "--detach" "-t" "--track"
-                   "--track=direct" "--no-track"))
+                   "--track=direct" "--track=inherit" "--no-track"))
       (string-prefix-p "-b" a) (string-prefix-p "-B" a)
       (string-prefix-p "--orphan=" a)))
 
@@ -788,7 +881,7 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
         (cond (skip (setq skip nil))
               ((member a '("-b" "-B" "--orphan")) (setq skip t))
               ((member a '("-q" "--quiet" "-d" "--detach" "-t" "--track"
-                           "--track=direct" "--no-track" "-f" "--force")))
+                           "--track=direct" "--track=inherit" "--no-track" "-f" "--force")))
               ((string-prefix-p "-" a) nil)
               (t (push a plain))))
       (setq plain (nreverse plain))

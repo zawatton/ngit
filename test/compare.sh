@@ -900,9 +900,17 @@ case $1 in
     WENV="GIT_REFLOG_ACTION=custom"
     wrun "$fx/hist" "" reset --soft HEAD~1
     WENV=
-    # Unsupported modes deliberately differ from git; verify rejection
+    # These modes change the work tree, so both runs start from a copied tree.
+    WTREE=1
+    for option in --merge --keep; do
+      wrun "$fx/hist" "" reset "$option" HEAD~1
+      wrun "$fx/hist" "printf 'local\\n' >> a.txt" reset "$option" HEAD~1
+      wrun "$fx/hist" "printf 'staged\\n' >> a.txt; git add a.txt" reset "$option" HEAD~1
+    done
+    WTREE=
+    # The patch mode deliberately differs from git; verify rejection
     # and that no index, ref, reflog or ORIG_HEAD changes occurred.
-    for option in --merge --keep -p; do
+    for option in -p; do
       w="$out/w"; rm -rf "$w"; cp -a "$fx/hist" "$w"
       wstate "$w" git
       "$ngit" -C "$w" reset "$option" >"$out/reject.out" 2>&1; ns=$?

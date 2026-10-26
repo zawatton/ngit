@@ -9,6 +9,9 @@ implementation; S5 was added after the independent audits to cover their fixes
 (three criteria after the first audit, S5.4 after the re-audit, S5.5 after the
 final audit, S5.6 after its fifth review round, S5.7 after
 the sixth, S5.8 after the seventh).  Original test sources remain unchanged.
+The test-source guard in S4.1 compares the baseline with this objective's
+commit 6a462c1 (changed on 2026-10-27: wave A later changed the shared suites
+test/compare.sh and test/patch-suite.sh).
 
 Each suite reports exact comparisons and intended differences separately.
 An intended difference is a named diagnostic or security divergence with a

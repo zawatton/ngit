@@ -294,22 +294,27 @@
             (setq current (plist-put current :new nil))))
          ((and current (string-prefix-p "new file mode " line))
           (setq current (plist-put current :is-new t))
+          (setq current (plist-put current :old nil))
           (setq current (plist-put current :mode-known t))
           (setq current (plist-put current :old-mode 0))
           (setq current (plist-put current :new-mode (string-to-number (substring line 14) 8))))
          ((and current (string-prefix-p "deleted file mode " line))
           (setq current (plist-put current :is-delete t))
+          (setq current (plist-put current :new nil))
           (setq current (plist-put current :mode-known t))
           (setq current (plist-put current :old-mode (string-to-number (substring line 18) 8)))
           (setq current (plist-put current :new-mode 0)))
          ((and current (string-prefix-p "old mode " line))
+          (setq current (plist-put current :mode-change t))
           (setq current (plist-put current :mode-known t))
           (setq current (plist-put current :old-mode (string-to-number (substring line 9) 8))))
          ((and current (string-prefix-p "new mode " line))
+          (setq current (plist-put current :mode-change t))
           (setq current (plist-put current :mode-known t))
           (setq current (plist-put current :new-mode (string-to-number (substring line 9) 8))))
          ((and current (or (string-prefix-p "rename from " line) (string-prefix-p "copy from " line)))
           (when (string-prefix-p "copy " line) (setq current (plist-put current :copy t)))
+          (when (string-prefix-p "rename " line) (setq current (plist-put current :rename t)))
           (setq current (plist-put current :old
                                    (ngit-patch--path line
                                                      (if (plist-get current :copy) "copy from " "rename from ")
@@ -370,22 +375,55 @@
          ((and current (string-prefix-p "@@ " line))
           (ngit-patch--check-header-name current (- (1+ i) no-newlines))
           (when hunk (plist-put current :hunks (append (plist-get current :hunks) (list hunk))))
-          (setq hunk (ngit-patch--hunk-header line)))
-         ((and hunk (string-prefix-p "\\ No newline at end of file" line))
-          ;; apply.c does not count this marker in its diagnostic linenr.
-          (setq no-newlines (1+ no-newlines))
-          (let* ((body (aref hunk 4)) (last (car (last body))))
-            (when (and last (string-suffix-p "\n" last))
-              (setcar (last body) (substring last 0 -1)))))
-         ((and hunk (> (length line) 0) (memq (aref line 0) '(?\s ?+ ?-)))
-          (if (and (= (aref hunk 5) (aref hunk 1))
-                   (= (aref hunk 6) (aref hunk 3)))
-              (progn
-                (plist-put current :hunks (append (plist-get current :hunks) (list hunk)))
-                (setq hunk nil))
-            (aset hunk 4 (append (aref hunk 4) (list line)))
-            (unless (= (aref line 0) ?+) (aset hunk 5 (1+ (aref hunk 5))))
-            (unless (= (aref line 0) ?-) (aset hunk 6 (1+ (aref hunk 6))))))))
+          (setq hunk (ngit-patch--hunk-header line))
+          ;; parse_fragment consumes exactly the two declared line counts.
+          ;; A header, EOF, or an unterminated body before then is corruption,
+          ;; never permission to replace bytes that were not in the preimage.
+          (unless (and hunk (string-suffix-p "\n" line))
+            (ngit--die-with 128 "error: corrupt patch at line %d" (- (1+ i) no-newlines)))
+          (let ((old (aref hunk 1)) (new (aref hunk 3))
+                (j (1+ i)) (changes 0) body)
+            (while (and (< j n) (or (/= old 0) (/= new 0)))
+              (let* ((text (aref lines j))
+                     (kind (and (> (length text) 0) (aref text 0))))
+                (unless (and (string-suffix-p "\n" text)
+                             (memq kind '(?\n ?\s ?- ?+ ?\\)))
+                  (ngit--die-with 128 "error: corrupt patch at line %d" (- (1+ j) no-newlines)))
+                (cond
+                 ((= kind ?\\)
+                  (unless (and (>= (length text) 12) (string-prefix-p "\\ " text))
+                    (ngit--die-with 128 "error: corrupt patch at line %d" (- (1+ j) no-newlines)))
+                  (when (and body (string-suffix-p "\n" (car body)))
+                    (setcar body (substring (car body) 0 -1))))
+                 (t
+                  ;; GNU diff omits the space on empty context lines.
+                  (when (= kind ?\n) (setq kind ?\s text " \n"))
+                  (unless (= kind ?+) (setq old (1- old)))
+                  (unless (= kind ?-) (setq new (1- new)))
+                  (unless (= kind ?\s) (setq changes (1+ changes)))
+                  (push text body))))
+              (setq j (1+ j)))
+            (unless (and (= old 0) (= new 0) (> changes 0))
+              (ngit--die-with 128 "error: corrupt patch at line %d" (- (1+ j) no-newlines)))
+            ;; The last no-newline marker is outside parse_fragment's loop,
+            ;; and unlike interior markers does not advance state->linenr.
+            (when (and (< j n) (> (length (aref lines j)) 12)
+                       (string-prefix-p "\\ " (aref lines j)))
+              (when (and body (string-suffix-p "\n" (car body)))
+                (setcar body (substring (car body) 0 -1)))
+              (setq j (1+ j) no-newlines (1+ no-newlines)))
+            (aset hunk 4 (nreverse body))
+            (aset hunk 5 (aref hunk 1))
+            (aset hunk 6 (aref hunk 3))
+            (setq i (1- j)))))
+        (when (and (plist-get current :git) (not hunk)
+                   (seq-some (lambda (prefix) (string-prefix-p prefix line))
+                             '("diff --git " "index " "old mode " "new mode "
+                               "new file mode " "deleted file mode "
+                               "similarity index " "dissimilarity index "
+                               "rename from " "rename to " "copy from " "copy to "
+                               "--- " "+++ ")))
+          (setq current (plist-put current :header-end (- (+ i 2) no-newlines)))))
       (setq i (1+ i)))
     (when current
       (ngit-patch--check-header-name current (- (1+ i) no-newlines))
@@ -393,6 +431,23 @@
       (push current patches))
     (when (and malformed-traditional (not patches))
       (ngit--die-with 128 "error: No valid patches in input (allow with \"--allow-empty\")"))
+    (dolist (patch (reverse patches))
+      (let ((old 0) (new 0))
+        (dolist (fragment (plist-get patch :hunks))
+          (setq old (+ old (aref fragment 1)) new (+ new (aref fragment 3))))
+        (when (and (not (plist-get patch :old)) (> old 0))
+          (ngit--die-with 128 "error: new file %s depends on old contents" (plist-get patch :new)))
+        (when (and (not (plist-get patch :new)) (> new 0))
+          (ngit--die-with 128 "error: deleted file %s still has contents" (plist-get patch :old))))
+      (when (and (plist-get patch :git) (not (plist-get patch :hunks))
+                 (not (plist-get patch :binary))
+                 (not (plist-get patch :is-new)) (not (plist-get patch :is-delete))
+                 (not (plist-get patch :copy))
+                 (not (plist-get patch :rename))
+                 (equal (plist-get patch :old) (plist-get patch :new))
+                 (= (plist-get patch :old-mode) (plist-get patch :new-mode)))
+        (ngit--die-with 128 "error: patch with only garbage at line %d"
+                        (or (plist-get patch :header-end) (plist-get patch :header-line)))))
     (nreverse patches)))
 
 (defun ngit-patch--source (repo patch cached reverse)
@@ -402,76 +457,150 @@
      ((null path) "")
      (cached
       (unless entry (ngit--die-with 1 "error: %s: does not exist in index" path))
-      (cdr (ngit-read-object repo (aref entry 1))))
+      (if (= (aref entry 2) #o160000)
+          (concat "Subproject commit " (ngit-hex (aref entry 1)) "\n")
+        (cdr (ngit-read-object repo (aref entry 1)))))
      (t
       (ngit-wt-setup (ngit-repo-toplevel repo))
       (let* ((file (expand-file-name (decode-coding-string path 'utf-8)
                                      (ngit-repo-toplevel repo)))
              (st (ngit-wt-lstat path)))
-        (unless st (ngit--die-with 1 "error: %s: No such file or directory" path))
+        (unless st
+          (ngit--die-with 1 "error: %s: %s" path
+                          (if (ngit-patch--blocked-parent path) "Not a directory"
+                            "No such file or directory")))
         (let* ((actual (logand (aref st 0) ngit-s-ifmt))
                (expected (if reverse (plist-get patch :new-mode)
                            (plist-get patch :old-mode))))
           (when (and (plist-get patch :mode-known)
-                     (= actual ngit-s-iflnk)
-                     (/= (logand expected #o170000) #o120000))
+                     (/= expected #o160000)
+                     (/= actual (logand expected #o170000)))
             (ngit--die-with 1 "error: %s: wrong type" path))
-          (if (= actual ngit-s-iflnk)
-              (encode-coding-string (file-symlink-p file) 'utf-8)
-            (ngit--read-file file))))))))
+          (cond
+           ((= expected #o160000) "")
+           ((= actual ngit-s-iflnk)
+            (encode-coding-string (file-symlink-p file) 'utf-8))
+           (t (let ((data (ngit--read-file file))
+                    (keep-crlf nil))
+		;; read_old_data uses KEEP_CRLF when the patch's preimage
+		;; contains CRLF; otherwise it renormalizes without an index.
+		(dolist (h (plist-get patch :hunks))
+                  (dolist (line (aref h 4))
+                    (when (and (memq (aref line 0) (if reverse '(?\s ?+) '(?\s ?-)))
+                               (string-suffix-p "\r\n" line))
+                      (setq keep-crlf t))))
+		(let ((action (ngit--crlf-action repo path)))
+                  (if (or keep-crlf (eq action 'binary)
+                          (and (memq action '(auto auto-input auto-crlf))
+                               (nth 3 (ngit--text-stats data))))
+                      data
+                    (ngit--strip-crlf data))))))))))))
 
 (defun ngit-patch--line-data (line) (substring line 1))
 
-(defun ngit-patch--match-at (source pos body reverse)
-  (let ((at pos) (ok t))
+(defun ngit-patch--match-at (source pos body reverse &optional patched ending)
+  (let ((at pos) (ok t) (different nil) preimage target)
     (dolist (line body)
       (let ((kind (aref line 0)))
         (when reverse (setq kind (cond ((= kind ?+) ?-) ((= kind ?-) ?+) (t kind))))
         (when (memq kind '(?\s ?-))
-          (if (or (>= at (length source))
-                  (not (string= (aref source at) (ngit-patch--line-data line))))
+          (if (or (>= at (length source)) (and patched (aref patched at)))
               (setq ok nil)
+            (let ((old (ngit-patch--line-data line)) (actual (aref source at)))
+              (push old preimage)
+              (push actual target)
+              (unless (string= old actual)
+                (setq different t)
+                ;; match_fragment first checks whitespace-insensitive line
+                ;; hashes, then memcmp over the preimage's byte length.
+                (let (hashes)
+                  (dolist (text (list old actual))
+                    (let ((hash 0) (i 0))
+                      (while (< i (length text))
+                        (let ((byte (aref text i)))
+                          (unless (memq byte '(9 10 11 12 13 32))
+                            (setq hash (logand #xffffffff (+ (* hash 3) byte)))))
+                        (setq i (1+ i)))
+                      (push hash hashes)))
+                  (unless (= (car hashes) (cadr hashes)) (setq ok nil)))))
             (setq at (1+ at))))))
-    ok))
+    (and ok
+         (or (not different)
+             (let ((old (apply #'concat (nreverse preimage)))
+                   (actual (apply #'concat (nreverse target))))
+               ;; An incomplete final preimage can match a prefix of its
+               ;; last line. update_image still removes that whole line.
+               (if ending (string= old actual) (string-prefix-p old actual)))))))
 
-(defun ngit-patch--find-hunk (source expected body reverse minimum)
-  (let ((distance 0) found (n (length source)))
+(defun ngit-patch--find-hunk (source expected body reverse beginning ending count patched)
+  "Find a fragment using apply.c's find_pos and match_fragment order."
+  (let* ((distance 0) found (n (length source))
+         (start (cond (beginning 0) (ending (- n count)) (t expected))))
+    (when (or (< start 0) (> start n)) (setq start n))
     (while (and (not found) (<= distance n))
-      (dolist (pos (if (= distance 0) (list expected)
-                     (list (- expected distance) (+ expected distance))))
-        (when (and (not found) (>= pos minimum) (<= pos n)
-                   (ngit-patch--match-at source pos body reverse))
+      ;; find_pos's even iteration advances forwards, then the odd one
+      ;; advances backwards.  The larger line number wins equal distances.
+      (dolist (pos (if (= distance 0) (list start)
+                     (list (+ start distance) (- start distance))))
+        (when (and (not found) (>= pos 0) (<= (+ pos count) n)
+                   (or (not beginning) (= pos 0))
+                   (or (not ending) (= (+ pos count) n))
+                   (ngit-patch--match-at source pos body reverse patched ending))
           (setq found (cons pos (- pos expected)))))
       (setq distance (1+ distance)))
     found))
 
 (defun ngit-patch--apply-one (source patch reverse)
-  (let ((lines (ngit-xdiff--split source)) (out nil) (cursor 0)
-        (hunks (plist-get patch :hunks)) (failed nil) (offsets nil))
+  (let* ((lines (ngit-xdiff--split source))
+         (patched (make-vector (length lines) nil))
+         (hunks (plist-get patch :hunks)) (failed nil) (offsets nil))
     (dolist (h hunks)
       (unless failed
         (let* ((start (if reverse (aref h 2) (aref h 0)))
-               (expected (if (= start 0) 0 (1- start)))
-               (found (ngit-patch--find-hunk lines expected (aref h 4) reverse cursor)))
-          (if (not found) (setq failed t)
-            (let ((pos (car found)))
+               (new-start (if reverse (aref h 0) (aref h 2)))
+               (expected (if (= new-start 0) 0 (1- new-start)))
+               (count (if reverse (aref h 3) (aref h 1)))
+               (trailing (let ((n 0))
+                           (dolist (line (aref h 4))
+                             (setq n (if (= (aref line 0) ?\s) (1+ n) 0))) n))
+               (found (ngit-patch--find-hunk lines expected (aref h 4) reverse
+                                             (<= start 1) (= trailing 0) count patched)))
+          (if (not found)
+              (progn (setq failed t) (plist-put patch :failed-start start))
+            (let ((pos (car found)) (replacement nil))
               (when (/= (cdr found) 0) (push (cons start (cdr found)) offsets))
-              (while (< cursor pos) (push (aref lines cursor) out) (setq cursor (1+ cursor)))
               (dolist (line (aref h 4))
                 (let ((kind (aref line 0)))
                   (when reverse (setq kind (cond ((= kind ?+) ?-) ((= kind ?-) ?+) (t kind))))
-                  (cond ((= kind ?\s) (push (aref lines cursor) out) (setq cursor (1+ cursor)))
-                        ((= kind ?-) (setq cursor (1+ cursor)))
-                        ((= kind ?+) (push (ngit-patch--line-data line) out))))))))))
+                  (unless (= kind ?-)
+                    (push (ngit-patch--line-data line) replacement))))
+              (setq replacement (vconcat (nreverse replacement))
+                    lines (vconcat (seq-subseq lines 0 pos) replacement
+                                   (seq-subseq lines (+ pos count)))
+                    patched (vconcat (seq-subseq patched 0 pos)
+                                     (make-vector (length replacement) t)
+                                     (seq-subseq patched (+ pos count)))))))))
     (if failed nil
-      (while (< cursor (length lines)) (push (aref lines cursor) out) (setq cursor (1+ cursor)))
-      (cons (apply #'concat (nreverse out)) (nreverse offsets)))))
+      (cons (mapconcat #'identity lines "") (nreverse offsets)))))
 
 (defun ngit-patch--target-path (patch reverse)
   (if reverse (plist-get patch :old) (plist-get patch :new)))
 
 (defun ngit-patch--target-mode (patch reverse)
-  (if reverse (plist-get patch :old-mode) (plist-get patch :new-mode)))
+  ;; reverse_patches swaps modes only when the original new_mode is set.
+  (if reverse (if (= (plist-get patch :new-mode) 0) #o100644
+                (plist-get patch :old-mode))
+    (plist-get patch :new-mode)))
+
+(defun ngit-patch--blocked-parent (path)
+  "Return a non-directory leading component of PATH, if any."
+  (let ((start 0) slash blocked)
+    (while (setq slash (ngit--byte-pos path ?/ start))
+      (let ((st (ngit-wt-lstat (substring path 0 slash))))
+        (when (and st (/= (ngit-wt-mode st) ngit-mode-tree))
+          (setq blocked (substring path 0 slash))))
+      (setq start (1+ slash)))
+    blocked))
 
 (defun ngit-patch--validate-path (path)
   "Require a single canonical spelling before path or symlink bookkeeping."
@@ -502,7 +631,9 @@
         (setq start (1+ slash))))))
 
 (defun ngit-patch--prepare (repo patches cached reverse index-check)
-  (let ((prepared nil) (modes (make-hash-table :test 'equal)))
+  (let ((prepared nil) (modes (make-hash-table :test 'equal))
+        (results (make-hash-table :test 'equal))
+        (removed (make-hash-table :test 'equal)) errors)
     ;; Inspect the whole post-patch tree before checking or writing any path.
     ;; A symlink introduced later in the input still protects its descendants.
     (dolist (patch patches)
@@ -512,96 +643,268 @@
         ;; contain no empty/dot components. All consumers use these names.
         (ngit-patch--validate-path old)
         (ngit-patch--validate-path path)
-        (when (and old (not (equal old path)) (not (plist-get patch :copy))
-                   (not (gethash old modes)))
-          (puthash old 0 modes))
+        (when (and old (not (equal old path)) (not (plist-get patch :copy)))
+          (puthash old t removed)
+          ;; A destination may already occupy this name in the postimage.
+          ;; It must not hide the independent removal of this preimage.
+          (unless (gethash old modes) (puthash old 0 modes)))
         (when (and path (= (logand (ngit-patch--target-mode patch reverse) #o170000) #o120000))
           (puthash path #o120000 modes))))
     (dolist (patch patches)
+      (condition-case err
       (let* ((old-path (if reverse (plist-get patch :new) (plist-get patch :old)))
              (path (ngit-patch--target-path patch reverse))
+             (mode (ngit-patch--target-mode patch reverse))
+             ;; previous_patch ignores copies and renames, whose sources
+             ;; describe the original tree rather than an incremental diff.
+             (previous (and old-path (not (plist-get patch :copy))
+                            (not (plist-get patch :rename))
+                            (or (not path) (equal old-path path))
+                            (gethash old-path results)))
              source result)
         (ngit-patch--safe-path repo old-path nil cached)
         (ngit-patch--safe-path repo path modes cached)
-        (setq source (ngit-patch--source
-                      repo patch (or cached (and index-check old-path
-                                                 (not (ngit-wt-lstat old-path)))) reverse))
-        (when (and (null old-path) path
-                   (or (ngit-index-lookup (ngit-index-entries repo) path)
-                       (and (not cached)
-                            (file-exists-p (expand-file-name (decode-coding-string path 'utf-8)
-                                                            (ngit-repo-toplevel repo))))))
-          (ngit--die-with 1 "error: %s: already exists in working directory" path))
-        (when (and path old-path (not (string= path old-path)) (not cached)
-                   (file-exists-p (expand-file-name (decode-coding-string path 'utf-8)
-                                                   (ngit-repo-toplevel repo))))
-          (ngit--die-with 1 "error: %s: already exists in working directory" path))
-        (when index-check
-          (let ((entry (and old-path (ngit-index-lookup (ngit-index-entries repo) old-path))))
-            (unless (or (and (null old-path) (null entry))
-                        (and entry (string= source (cdr (ngit-read-object repo (aref entry 1))))))
-              (ngit--die-with 1 "error: %s: does not match index" old-path))))
+        (when (and previous (not (plist-get previous :path)))
+          (ngit--die-with 1 "error: path %s has been renamed/deleted" old-path))
+        ;; verify_index_match runs before mode warnings and load_preimage.
+        ;; Once verified, --index always reads the index, retaining CRLF
+        ;; blobs stored before autocrlf was enabled.
+        (when (and index-check old-path (not previous))
+          (let* ((entry (ngit-index-lookup (ngit-index-entries repo) old-path))
+                 (st (and entry (not cached) (ngit-wt-lstat old-path))))
+            (unless entry
+              (ngit--die-with 1 "error: %s: does not exist in index" old-path))
+            (when st
+              (unless
+                  (if (= (aref entry 2) #o160000)
+                      (= (ngit-wt-mode st) ngit-mode-tree)
+                    (and (or (= (ngit-wt-mode st) (aref entry 2))
+                             (and (= (aref entry 2) ngit-mode-symlink)
+                                  (= (logand (ngit-wt-mode st) ngit-s-ifmt) #o100000)
+                                  (not (ngit-config-bool repo "core.symlinks" t)))
+                             (and (not (ngit-config-bool repo "core.filemode" t))
+                                  (= (logand (ngit-wt-mode st) ngit-s-ifmt) #o100000)
+                                  (= (logand (aref entry 2) ngit-s-ifmt) #o100000)))
+                         (string= (ngit-wt-content repo old-path st)
+                                  (cdr (ngit-read-object repo (aref entry 1))))))
+                (ngit--die-with 1 "error: %s: does not match index" old-path)))))
+        (setq source (if previous (plist-get previous :data)
+                       (ngit-patch--source repo patch (or cached index-check) reverse)))
+        (when (and path (not (equal path old-path)) (not (gethash path removed)))
+          (when (and (or cached index-check)
+                     (ngit-index-lookup (ngit-index-entries repo) path))
+            (ngit--die-with 1 "error: %s: already exists in index" path))
+          (let ((st (and (not cached) (ngit-wt-lstat path))))
+            (when (and st (/= (ngit-wt-mode st) ngit-mode-tree))
+              (ngit--die-with 1 "error: %s: already exists in working directory" path))))
+        (when old-path
+          (let* ((entry (and (or cached index-check)
+                             (ngit-index-lookup (ngit-index-entries repo) old-path)))
+                 (st (and (not cached) (not previous) (ngit-wt-lstat old-path)))
+                 (expected (if reverse (plist-get patch :new-mode) (plist-get patch :old-mode)))
+                 (actual (or (and previous (plist-get previous :mode))
+                             (and st (cond
+                                      ((and (= expected #o160000)
+                                            (= (ngit-wt-mode st) ngit-mode-tree)) #o160000)
+                                      ;; ce_mode_from_stat preserves an indexed
+                                      ;; symlink represented by a regular file.
+                                      ((and entry (= (aref entry 2) ngit-mode-symlink)
+                                            (= (logand (ngit-wt-mode st) ngit-s-ifmt) #o100000)
+                                            (not (ngit-config-bool repo "core.symlinks" t)))
+                                       ngit-mode-symlink)
+                                      (t (ngit-wt-mode st))))
+                             (and entry (aref entry 2)) expected)))
+            (when (and (= (logand actual ngit-s-ifmt) #o100000)
+                       (not (ngit-config-bool repo "core.filemode" t)))
+              (setq actual (if entry (aref entry 2) expected)))
+            (unless (plist-get patch :mode-known) (setq expected actual))
+            (when (and (plist-get patch :mode-known)
+                       (/= (logand actual ngit-s-ifmt) (logand expected ngit-s-ifmt)))
+              (ngit--die-with 1 "error: %s: wrong type" old-path))
+            (when (and (plist-get patch :mode-known) (/= actual expected))
+              (ngit-native-write-stderr
+               (format "warning: %s has type %s, expected %s\n"
+                       old-path (ngit--octal6 actual) (ngit--octal6 expected))))
+            (when (and path (not (plist-get patch :mode-change))) (setq mode actual))
+            (when (and path (/= (logand expected ngit-s-ifmt) (logand mode ngit-s-ifmt)))
+              (ngit--die-with 1
+                              (if (equal old-path path)
+                                  "error: new mode (%o) of %s does not match old mode (%o)"
+                                "error: new mode (%o) of %s does not match old mode (%o) of %s")
+                              mode path expected old-path))))
+        ;; Without an index Git deliberately ignores gitlink hunks.
+        (when (and old-path (not cached) (not index-check)
+                   (= (if reverse (plist-get patch :new-mode) (plist-get patch :old-mode)) #o160000))
+          (setq patch (plist-put patch :hunks nil)))
         (setq result (if (plist-get patch :binary)
                          (ngit-binary-patch-apply repo source patch reverse)
                        (ngit-patch--apply-one source patch reverse)))
         (unless result
           (unless (plist-get patch :binary)
             (ngit-native-write-stderr (format "error: patch failed: %s:%d\n"
-                                            (or old-path path) (aref (car (plist-get patch :hunks))
-                                                                     (if reverse 2 0)))))
+                                            (or old-path path) (or (plist-get patch :failed-start)
+                                                                  (aref (car (plist-get patch :hunks))
+                                                                        (if reverse 2 0))))))
           (ngit--die-with 1 "error: %s: patch does not apply" (or old-path path)))
-        (push (list :old old-path :path path :mode (ngit-patch--target-mode patch reverse)
-                    :data (car result) :offsets (cdr result) :patch patch)
-              prepared)))
+        (when (and (null path) (not (equal (car result) "")))
+          (ngit-native-write-stderr "error: removal patch leaves file contents\n")
+          (ngit--die-with 1 "error: %s: patch does not apply" old-path))
+        (let ((one (list :old old-path :path path :mode mode
+                         :data (car result) :offsets (cdr result) :patch patch)))
+          (when (and old-path (not (equal old-path path)) (not (plist-get patch :copy)))
+            (puthash old-path (list :path nil) results))
+          (when path (puthash path one results))
+          (push one prepared)))
+        (ngit-fatal
+         (ngit-native-write-stderr (concat (cadr err) "\n"))
+         (setq errors t))))
+    (when errors (ngit--die-with 1 ""))
     (nreverse prepared)))
+
+(defun ngit-patch--remove-or-warn (file path directory)
+  "Remove FILE, warning on failure as remove_or_warn does; return success."
+  ;; Use the native result: delete-file on the standalone runtime may return
+  ;; nil on failure, whereas host Emacs signals a file-error.
+  (let* ((bytes (encode-coding-string file 'utf-8))
+         (address (nl-ffi-memory-address (ngit-native--buffer 3 (1+ (length bytes))))))
+    (ngit-native--write-bytes address bytes)
+    (ptr-write-u8 address (length bytes) 0)
+    ;; Linux x86-64 rmdir/unlink, matching the native I/O substrate.
+    (let ((rc (syscall-direct (if directory 84 87) address 0 0 0 0 0)))
+      (if (or (= rc 0) (= rc -2)) t
+        (ngit-native-write-stderr
+         (format "warning: unable to %s '%s': %s\n" (if directory "rmdir" "unlink") path
+                 (or (cdr (assq (- rc) '((16 . "Device or resource busy")
+                                         (30 . "Read-only file system")
+                                         (39 . "Directory not empty"))))
+                     (ngit--config-access-message (- rc)))))
+        nil))))
 
 (defun ngit-patch--write-worktree (repo prepared)
   ;; Remove preimages before creating any result, including symlinks that
   ;; the post-patch path checks treated as removed ancestors.
   (dolist (one prepared)
     (let ((old (plist-get one :old)))
-      (when (and old (not (equal old (plist-get one :path)))
-                 (not (plist-get (plist-get one :patch) :copy)))
+      (when (and old (not (plist-get (plist-get one :patch) :copy)))
         (let ((file (expand-file-name (decode-coding-string old 'utf-8)
                                       (ngit-repo-toplevel repo))))
-          (when (or (file-exists-p file) (file-symlink-p file)) (delete-file file))))))
+          ;; remove_file only prunes empty parents for deletions/renames.
+          ;; Modifications must leave their existing directory modes intact.
+          (when (and (ngit-patch--remove-or-warn
+                      file old (and (file-directory-p file) (not (file-symlink-p file))))
+                     (not (equal old (plist-get one :path))))
+            (let ((dir (directory-file-name (file-name-directory file)))
+                  (top (directory-file-name (ngit-repo-toplevel repo)))
+                  (cwd (ngit--reset-original-cwd)))
+              (while (and (not (equal dir top)) (file-directory-p dir)
+                          (not (equal dir cwd))
+                          (null (ngit--dir-names (file-name-as-directory dir))))
+                ;; dir.c:remove_path stops on rmdir failure, ignoring it.
+                (condition-case nil
+                    (progn
+                      (delete-directory dir)
+                      (setq dir (if (file-directory-p dir) top
+                                  (directory-file-name (file-name-directory dir)))))
+                  (file-error (setq dir top))))))))))
   (dolist (one prepared)
     (let* ((path (plist-get one :path))
            (file (and path (expand-file-name (decode-coding-string path 'utf-8)
                                              (ngit-repo-toplevel repo)))))
-      (if (or (null path) (= (plist-get one :mode) 0))
-          (when file (delete-file file))
-        (ngit-make-directory (file-name-directory file) t)
-        (ngit-wt-setup (ngit-repo-toplevel repo))
-        (let* ((st (ngit-wt-lstat path))
-               (symlink (and st (= (logand (aref st 0) ngit-s-ifmt) ngit-s-iflnk)))
-               (target-symlink (= (logand (plist-get one :mode) #o170000) #o120000))
-               (existed (and st (not symlink)))
-               (perm (ngit-native-creation-mode
-                      (if (= (plist-get one :mode) #o100755) #o777 #o666))))
-          (when st (when (or symlink target-symlink) (delete-file file)))
-          (if target-symlink
-              (make-symbolic-link (decode-coding-string (plist-get one :data) 'utf-8) file)
-            (ngit-write-file file (plist-get one :data) nil nil (and (not existed) perm))
-            (when (and existed (/= (logand (file-modes file) #o111)
-                                    (logand perm #o111)))
-              (set-file-modes file perm))))))))
+      (when (and path (/= (plist-get one :mode) 0))
+	(if (= (plist-get one :mode) #o160000)
+            (ngit-make-directory file t)
+          (condition-case err
+              (progn
+		(let ((reason (and (ngit-patch--blocked-parent path) "Not a directory")))
+		  (when (file-directory-p file)
+		    (if (ngit--dir-names (file-name-as-directory file))
+			(setq reason "Directory not empty")
+		      (delete-directory file)))
+		  (when reason
+		    (ngit--die-with 1 "error: unable to write file '%s' mode %s: %s"
+				    path (ngit--octal6 (plist-get one :mode)) reason)))
+		(ngit-make-directory (file-name-directory file) t)
+		(ngit-wt-setup (ngit-repo-toplevel repo))
+		(let* ((st (ngit-wt-lstat path))
+		       (symlink (and st (= (logand (aref st 0) ngit-s-ifmt) ngit-s-iflnk)))
+		       (target-symlink (= (logand (plist-get one :mode) #o170000) #o120000))
+		       (existed (and st (not symlink)))
+		       (perm (ngit-native-creation-mode
+			      (if (= (plist-get one :mode) #o100755) #o777 #o666))))
+		  (when st (when (or symlink target-symlink) (delete-file file)))
+		  (if (and target-symlink (ngit-config-bool repo "core.symlinks" t))
+		      (make-symbolic-link (decode-coding-string (plist-get one :data) 'utf-8) file)
+		    (ngit-write-file file (ngit--checkout-smudge repo path (plist-get one :data))
+				     nil nil (and (not existed) perm))
+		    (when (and existed (/= (logand (file-modes file) #o111)
+					   (logand perm #o111)))
+		      (set-file-modes file perm)))))
+            (error
+             (if (eq (car err) 'ngit-fatal) (signal (car err) (cdr err))
+               ;; create_one_file probes lstat after EACCES, so a missing
+               ;; target reports ENOENT, even when its parent is unwritable.
+               (ngit--die-with 128 "error: unable to write file '%s' mode %o: %s"
+                               path (plist-get one :mode)
+                               (cond ((not (file-exists-p file)) "No such file or directory")
+                                     ((not (file-writable-p (file-name-directory file))) "Permission denied")
+                                     (t (error-message-string err))))))))))))
 
-(defun ngit-patch--write-index (repo prepared)
+(defun ngit-patch--write-index (repo prepared &optional worktree)
   (let* ((index (ngit-read-index repo)) (entries (aref index 0))
-         (targets nil) (dropped (make-hash-table :test 'equal))
+         (targets nil) (latest (make-hash-table :test 'equal))
+         (directories (make-hash-table :test 'equal))
+         (dropped (make-hash-table :test 'equal))
          (root (or (ngit-ct-root index) (ngit-ct-new))))
     (dolist (one prepared)
-      (let ((old (plist-get one :old)) (path (plist-get one :path))
-            (mode (plist-get one :mode)))
+      (let ((old (plist-get one :old)) (path (plist-get one :path)))
         (when (and old (not (plist-get (plist-get one :patch) :copy)))
           (puthash old t dropped) (ngit-ct-invalidate root old))
-        (when path (ngit-ct-invalidate root path))
+        (when path (ngit-ct-invalidate root path))))
+    ;; add_index_entry refuses D/F conflicts with surviving stage-zero
+    ;; entries. All removals precede additions; never let overlay silently
+    ;; discard an unrelated ancestor or descendant of a result.
+    (dolist (one prepared)
+      (let ((path (plist-get one :path)) (mode (plist-get one :mode)))
         (when (and path (/= mode 0))
-          (push (ngit-make-entry path (ngit-write-object repo "blob" (plist-get one :data)) mode
-                                 (concat (make-string 24 0) (ngit--be32-bytes mode)
-                                         (make-string 12 0)))
-                targets))))
+          (let* ((prefix (concat path "/")) (pos (ngit-index-find entries prefix))
+                 (start 0) slash (conflict (gethash path directories)))
+            (while (and (not conflict) (< pos (length entries))
+                        (string-prefix-p prefix (aref (aref entries pos) 0)))
+              (let ((entry (aref entries pos)))
+                (when (and (= (aref entry 3) 0) (not (gethash (aref entry 0) dropped)))
+                  (setq conflict t)))
+              (setq pos (1+ pos)))
+            (while (and (not conflict) (setq slash (ngit--byte-pos path ?/ start)))
+              (let* ((ancestor (substring path 0 slash))
+                     (entry (ngit-index-lookup entries ancestor)))
+                (when (or (gethash ancestor latest)
+                          (and entry (= (aref entry 3) 0) (not (gethash ancestor dropped))))
+                  (setq conflict t)))
+              (setq start (1+ slash)))
+            (when conflict
+              (ngit--die-with 128
+                              "error: '%s' appears as both a file and as a directory\nerror: unable to add cache entry for %s"
+                              path path))
+            (setq start 0)
+            (while (setq slash (ngit--byte-pos path ?/ start))
+              (puthash (substring path 0 slash) t directories)
+              (setq start (1+ slash))))
+          (let* ((data (plist-get one :data))
+                 (gitlink (= mode #o160000))
+                 (oid (if gitlink
+                          (progn
+                            (unless (string-match "\\`Subproject commit \\([0-9a-fA-F]\\{40\\}\\)" data)
+                              (ngit--die-with 1 "error: corrupt patch for submodule %s" path))
+                            (ngit-unhex (match-string 1 data)))
+                        (ngit-write-object repo "blob" data)))
+                 (stat (if (and worktree (not gitlink)
+                                (progn (ngit-wt-setup (ngit-repo-toplevel repo))
+                                       (ngit-wt-lstat path)))
+                           (ngit-wt-stat-block mode)
+                         (concat (make-string 24 0) (ngit--be32-bytes mode)
+                                 (make-string 12 0)))))
+            (puthash path (ngit-make-entry path oid mode stat) latest)))))
+    (maphash (lambda (_path entry) (push entry targets)) latest)
     (setq entries (ngit-index-overlay entries (sort targets #'ngit--entry-less) dropped))
     (ngit-write-index repo index entries root)))
 
@@ -709,7 +1012,7 @@
                count (if (= count 1) "" "s") (if (= count 1) "s" ""))))))
 
 ;;;###autoload
-(defun ngit-cmd-apply (repo args)
+(defun ngit-cmd-apply (repo args &optional input)
   (let ((check nil) (cached nil) (index nil) (reverse nil) (stat nil) (files nil) p-value
         (case-fold-search nil))
     (while args
@@ -726,9 +1029,10 @@
               ((string= arg "--") (setq files (append files args) args nil))
               ((string-prefix-p "-" arg) (ngit--die "ngit: apply: unsupported argument %s" arg))
               (t (setq files (append files (list arg)))))))
-    (let* ((data (ngit-patch--read-inputs files))
+    (let* ((data (or input (ngit-patch--read-inputs files)))
            (patches (ngit-patch--parse data p-value)))
       (unless patches (ngit--die-with 128 "error: No valid patches in input"))
+      (when reverse (setq patches (reverse patches)))
       (if stat (ngit-patch--stat patches reverse)
         (let ((prepared (ngit-patch--prepare repo patches cached reverse index)))
           (unless check
@@ -738,14 +1042,7 @@
           (unless check
             (unless cached (ngit-patch--write-worktree repo prepared))
             (when (or cached index)
-              (if index
-                  (ngit-cmd-add repo (delete-dups
-                                      (delq nil (apply #'append
-                                                       (mapcar (lambda (one)
-                                                                 (list (plist-get one :path)
-                                                                       (plist-get one :old)))
-                                                               prepared)))))
-                (ngit-patch--write-index repo prepared))))))
+              (ngit-patch--write-index repo prepared (not cached))))))
       0)))
 
 ;;;; am
@@ -890,13 +1187,7 @@
                                  (ngit--die-with 128 "error: No valid patches in input (allow with \"--allow-empty\")"))
                                (ngit-patch--prepare repo patches nil nil t))))
               (ngit-patch--write-worktree repo prepared)
-              (ngit-cmd-add repo
-                            (delete-dups
-                             (delq nil (apply #'append
-                                              (mapcar (lambda (one)
-                                                        (list (plist-get one :path)
-                                                              (plist-get one :old)))
-                                                      prepared)))))
+              (ngit-patch--write-index repo prepared t)
               ;; When pre-applypatch runs, git-am keeps its in-memory index
               ;; across the hook.  A hook may change the index file, but
               ;; write_index_as_tree writes the already loaded index back.
@@ -929,7 +1220,7 @@
                           (string-prefix-p "fatal: size_t overflow: " (cadr err))))
              (signal (car err) (cdr err)))
            (setq status 128)
-           (when (and (cdr err) (stringp (cadr err)))
+           (when (and (cdr err) (stringp (cadr err)) (not (equal (cadr err) "")))
              (ngit-native-write-stderr (concat (cadr err) "\n")))
            (ngit-patch--am-write repo "final-commit" message)
            (ngit--emit (format "Patch failed at %04d %s\n" number subject))
@@ -949,6 +1240,27 @@
   ;; remove_branch_state deletes AUTO_MERGE in both sequencer cleanup and
   ;; merge-state cleanup, even when the reference is already absent.
   (ngit-ref-delete-state repo "AUTO_MERGE"))
+
+(defun ngit-patch--am-refresh-index (repo)
+  "Refresh stat data before am's clean_index two-way reset."
+  (let* ((index (ngit-read-index repo)) (entries (aref index 0))
+         (checked (make-hash-table :test 'eql)))
+    (ngit--reset-refresh repo index entries checked t)
+    (ngit-write-index repo index entries (ngit-ct-root index) checked)))
+
+(defun ngit-patch--am-reset-index (repo tree head-tree rev)
+  "Refresh and reset for am, retaining clean_index's failure diagnostic."
+  (ngit-patch--am-refresh-index repo)
+  (condition-case err
+      (ngit--reset-preserving repo tree head-tree rev nil)
+    (ngit-fatal
+     (let* ((message (cadr err))
+            (tail (string-match
+                   "\nfatal: Could not reset index file to revision '.*'\\.\\'" message)))
+       (signal (car err)
+               (cons (if tail (concat (substring message 0 tail)
+                                     "\nfatal: failed to clean index") message)
+                     (cddr err)))))))
 
 (defun ngit-patch--am-control (repo control)
   (unless (file-directory-p (ngit-patch--am-dir repo))
@@ -970,14 +1282,18 @@
         (let ((target (string-trim-right
                        (ngit--read-file (expand-file-name "ORIG_HEAD"
                                                          (ngit-repo-gitdir repo))))))
-          (ngit--reset-hard repo (ngit-seq-tree repo target) target)
+          ;; clean_index uses a two-way merge, preserving unrelated dirty
+          ;; worktree paths whose index entries already match the target.
+          (ngit-patch--am-reset-index repo (ngit-seq-tree repo target)
+                                     (ngit-seq-tree repo current) target)
           (ngit-patch--am-clear-branch-state repo)
           (ngit-update-head repo target current (ngit-ident repo "COMMITTER")
                             "am --abort")))))
     (ngit--switch-delete-directory-tree (ngit-patch--am-dir repo)) 0)
    ((string= control "--skip")
     (let* ((cur (ngit-patch--am-current repo)) (head (ngit-resolve-ref repo "HEAD")))
-      (ngit--reset-hard repo (ngit-seq-tree repo head) head)
+      (ngit-patch--am-reset-index repo (ngit-seq-tree repo head)
+                                 (ngit-seq-tree repo head) head)
       (ngit-patch--am-clear-branch-state repo)
       (ngit-ref-delete-state repo "REBASE_HEAD")
       (ngit-patch--am-write repo "next" (format "%d\n" (1+ (car cur))))

@@ -13,7 +13,7 @@
 (defun ngit--restore-parse (repo args)
   "Return (TREE SOURCE STAGED WORKTREE QUIET PATHS) for restore ARGS."
   (let ((source nil) (staged nil) (worktree nil) (selected nil)
-        (quiet nil) (paths nil))
+        (quiet nil) (paths nil) (unmerged-options nil))
     (while args
       (let ((a (pop args)))
         (cond
@@ -32,6 +32,8 @@
             (ngit--die-with 129 "error: switch `%s' requires a value" a))
           (setq source (pop args)))
          ((string-prefix-p "--source=" a) (setq source (substring a 9)))
+         ((or (member a '("--ours" "--theirs" "-2" "-3" "-m" "--merge")) (string-prefix-p "--conflict=" a))
+          (push a unmerged-options))
          ((string-prefix-p "-" a)
           (ngit--die-with 129 "error: unknown option `%s'" a))
          (t (push a paths)))))
@@ -50,7 +52,13 @@
                 (condition-case nil
                     (ngit-unhex (ngit-peel repo hex 'tree))
                   (error (ngit--die "fatal: reference is not a tree: %s" source))))))
-      (list tree source staged worktree quiet paths))))
+      (when (and unmerged-options staged)
+        (ngit--die (if (seq-some (lambda (a) (member a '("--ours" "--theirs" "-2" "-3"))) unmerged-options)
+                       "fatal: '--ours' or '--theirs' cannot be used with --staged"
+                     "fatal: '--merge' or '--conflict' cannot be used with --staged")))
+      (when (and unmerged-options source)
+        (ngit--die "fatal: '--merge', '--ours', or '--theirs' cannot be used when checking out of a tree"))
+      (list tree source staged worktree quiet paths (nreverse unmerged-options)))))
 
 (defun ngit--restore-index-targets (entries items matched)
   "Return selected stage-zero ENTRIES, using direct ranges for literals."
@@ -180,9 +188,15 @@
     checked))
 
 (defun ngit-cmd-restore (repo args)
+  (catch 'ngit-restore-done
   (let* ((parsed (ngit--restore-parse repo args))
          (tree (nth 0 parsed)) (staged (nth 2 parsed))
          (worktree (nth 3 parsed)) (paths (nth 5 parsed))
+         (_ (when (and (not tree) (not staged)
+                       (nth 6 parsed))
+              (let ((ngit--checkout-as-restore t))
+                (ngit--checkout-path-command repo (append '("-q") (nth 6 parsed) '("--") paths)))
+              (throw 'ngit-restore-done 0)))
          (magic (ngit-pathspec-magic-p (ngit-pathspec-items repo paths)))
          (expanded (ngit-pathspec-write-items repo paths t tree))
          (items (mapcar (lambda (path) (if magic (cons path nil) (ngit--ps-item path))) expanded))
@@ -248,7 +262,7 @@
                   (setq lock nil)
                   (aset repo 6 nil))
                 0))))
-      (when lock (ngit-unlock lock)))))
+      (when lock (ngit-unlock lock))))))
 
 (provide 'ngit-restore)
 

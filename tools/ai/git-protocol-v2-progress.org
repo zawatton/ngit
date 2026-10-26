@@ -6,6 +6,9 @@ the first independent review.  Every suite mode compares
 ngit with Git 2.47.3 on recorded wire transcripts (request bytes sent by
 the client over ssh and smart HTTP), command output, refs, FETCH_HEAD,
 object sets and git fsck.
+The test-source guard in S0.1 compares the baseline with this objective's
+commit 5db0c7f (changed on 2026-10-27: wave A later changed the shared suites
+test/compare.sh and test/patch-suite.sh).
 
 Each suite reports exact comparisons and intended differences separately.
 An intended difference is a named diagnostic or security divergence with a

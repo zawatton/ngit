@@ -13,6 +13,9 @@ and --git-dir/--work-tree/--bare with status fail at 5db0c7f as well; they are
 kept ungraded in the config-deferred mode and listed in README.  S2.1 was split into S2.1
 and S2.4 (same suites) because the pull suites alone take up to 530 s and did
 not fit the 600 s limit beside the others on a loaded machine.
+The test-source guard in S0.1 compares the baseline with this objective's
+commit 60924e0 (changed on 2026-10-27: wave A later changed the shared suites
+test/compare.sh and test/patch-suite.sh).
 
 Each suite reports exact comparisons and intended differences separately.
 An intended difference is a named diagnostic or security divergence with a

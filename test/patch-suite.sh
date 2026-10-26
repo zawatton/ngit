@@ -79,6 +79,60 @@ wrun "$patch_repo" "$offset_setup" apply series.patch
 bad_context='git format-patch -1 --stdout HEAD~2 >series.patch; git reset -q --hard HEAD~3; sed -i "s/two/not-context/" alpha.txt'
 wrun "$patch_repo" "$bad_context" apply --check series.patch
 
+# Reverse the exact -U1 binary diff used by stash_staged.  These cases also
+# verify refusal leaves precious work-tree bytes and directory modes intact.
+f5_diff='git diff-tree -p -U1 --binary HEAD "$(git write-tree)" >f5.patch'
+for local in empty precious; do
+  f5_setup=": >f; git add f; $f5_diff"
+  [ "$local" = empty ] || f5_setup="$f5_setup; printf precious >f"
+  wrun "$patch_repo" "$f5_setup" apply -R f5.patch
+  wrun "$patch_repo" "$f5_setup" apply -R --check f5.patch
+done
+for edge in beginning end; do
+  if [ "$edge" = beginning ]; then
+    f5_base='old\nanchor\n'; f5_index='staged\nanchor\n'
+    f5_local='precious\nanchor\nstaged\nanchor\n'
+  else
+    f5_base='anchor\nold\n'; f5_index='anchor\nstaged\n'
+    f5_local='anchor\nstaged\nanchor\nprecious\n'
+  fi
+  f5_setup="printf '$f5_base' >f; git add f; git commit -qm f5-base; printf '$f5_index' >f; git add f; $f5_diff"
+  wrun "$patch_repo" "$f5_setup" apply -R f5.patch
+  wrun "$patch_repo" "$f5_setup; printf '$f5_local' >f" apply -R f5.patch
+done
+f5_setup="printf '*.txt text eol=crlf\\n' >.gitattributes; printf 'old\\r\\nanchor\\r\\n' >f.txt; git add .gitattributes f.txt; git commit -qm f5-crlf; printf 'staged\\r\\nanchor\\r\\n' >f.txt; git add f.txt; $f5_diff"
+wrun "$patch_repo" "$f5_setup" apply -R f5.patch
+wrun "$patch_repo" "$f5_setup" apply -R --index f5.patch
+for content in empty text binary; do
+  case "$content" in empty) bytes='' ;; text) bytes='old\n' ;; binary) bytes='old\000bytes\n' ;; esac
+  f5_setup="printf '$bytes' >f; git add f; git commit -qm f5-deletion; git rm -q f; $f5_diff"
+  wrun "$patch_repo" "$f5_setup" apply -R f5.patch
+  wrun "$patch_repo" "$f5_setup; printf precious >f" apply -R f5.patch
+done
+for kind in mode binary delete; do
+  f5_setup="mkdir -p d; chmod 700 d; printf 'old\\000bytes\\n' >d/f; git add d/f; git commit -qm f5-binary"
+  case "$kind" in
+    mode) f5_setup="$f5_setup; chmod +x d/f; git add d/f" ;;
+    binary) f5_setup="$f5_setup; printf 'new\\000bytes\\n' >d/f; git add d/f" ;;
+    delete) f5_setup="$f5_setup; git rm -q d/f; mkdir -p d; chmod 700 d" ;;
+  esac
+  wrun "$patch_repo" "$f5_setup; $f5_diff; printf kept >d/other" apply -R f5.patch
+done
+f5_setup="mkdir -p d; chmod 700 d; : >d/f; git add d/f; $f5_diff"
+wrun "$patch_repo" "$f5_setup" apply -R f5.patch
+wrun "$patch_repo" "$f5_setup; printf kept >d/other" apply -R f5.patch
+# find_pos checks the higher line number first when distances are equal.
+f5_setup="printf 'a\\nanchor\\nold\\nanchor\\nz\\n' >f; git add f; git commit -qm f5-search; printf 'a\\nanchor\\nstaged\\nanchor\\nz\\n' >f; git add f; $f5_diff; printf 'anchor\\nstaged\\nanchor\\nstaged\\nanchor\\n' >f"
+wrun "$patch_repo" "$f5_setup" apply -R f5.patch
+# Isolate the end constraint in a hunk which does not start at line one.
+f5_setup="printf 'prefix\\npadding\\nanchor\\nold\\n' >f; git add f; git commit -qm f5-end; printf 'prefix\\npadding\\nanchor\\nstaged\\n' >f; git add f; $f5_diff"
+wrun "$patch_repo" "$f5_setup; printf 'prefix\\npadding\\nanchor\\nstaged\\nanchor\\nprecious\\n' >f" apply -R f5.patch
+# Reverse a nonempty addition with a sibling which must survive pruning.
+f5_setup="mkdir -p d; chmod 700 d; printf 'added\\n' >d/f; git add d/f; $f5_diff; printf kept >d/other"
+wrun "$patch_repo" "$f5_setup" apply -R f5.patch
+f5_setup="printf 'old\\000bytes\\n' >f; git add f; git commit -qm f5-dirty-binary; printf 'new\\000bytes\\n' >f; git add f; $f5_diff; printf 'precious\\000bytes\\n' >f"
+wrun "$patch_repo" "$f5_setup" apply -R f5.patch
+
 whitespace_setup='printf "bad trailing   \n" >>alpha.txt; git diff >whitespace.patch; git checkout -q -- alpha.txt'
 wrun "$patch_repo" "$whitespace_setup" apply --check whitespace.patch
 wrun "$patch_repo" "$whitespace_setup" apply whitespace.patch

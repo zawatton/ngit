@@ -77,13 +77,15 @@
     (list hex n (if (and n (or (null args) (string-match "\\`[0-9]+\\'" arg)))
                     (format "refs/stash@{%d}" n) arg))))
 
-(defun ngit--stash-refresh (repo)
+(defun ngit--stash-refresh (repo &optional module-paths)
   (let* ((index (ngit-read-index repo)) (entries (aref index 0))
          (checked (make-hash-table :test 'eql)))
     (let ((i 0))
       (while (< i (length entries))
         (when (/= (aref (aref entries i) 3) 0)
           (ngit--die-with 1 "%s: needs merge" (aref (aref entries i) 0)))
+        (when (and module-paths (= (aref (aref entries i) 2) ngit-mode-gitlink))
+          (push (aref (aref entries i) 0) (car module-paths)))
         (setq i (1+ i))))
     (ngit--reset-refresh repo index entries checked t)
     (ngit-write-index repo index entries (ngit-ct-root index) checked)
@@ -122,8 +124,134 @@
             (aset repo 6 nil)))
       (when lock (ngit-unlock lock)))))
 
+(defun ngit--stash-binary-p (repo path data)
+  "Honor userdiff's binary tristate for stash_staged's internal diff."
+  (let* ((diff (cdr (assoc "diff" (ngit-attrs repo path '("diff")))))
+         ;; Unknown attributes fall back to default; configured subsections
+         ;; and built-in drivers retain their own automatic binary setting.
+         (driver (if (and (stringp diff)
+                          (or (member diff '("ada" "bash" "bibtex" "cpp" "csharp" "css"
+                                             "dts" "elixir" "fortran" "fountain" "golang"
+                                             "html" "java" "kotlin" "markdown" "matlab"
+                                             "objc" "pascal" "perl" "php" "python"
+                                             "ruby" "rust" "scheme" "tex" "default"))
+                              (seq-some
+                               (lambda (e)
+                                 (let ((prefix (concat "diff." diff ".")))
+                                   (and (string-prefix-p prefix (car e))
+                                        (not (string-search "." (car e) (length prefix))))))
+                               (ngit-config-entries repo))))
+                     diff "default"))
+         (key (concat "diff." driver ".binary"))
+         (binary (unless (memq diff '(set unset)) (ngit-config-get repo key))))
+    (cond ((eq diff 'unset) t)
+          ((eq diff 'set) nil)
+          ((and binary (not (and (stringp binary) (string= (downcase binary) "auto"))))
+           (ngit--config-boolean-value binary key))
+          (t (and (string-match-p "\0" (substring data 0 (min 8000 (length data)))) t)))))
+
+(defun ngit--stash-remove-staged (repo base changes paths keep quiet)
+  "Apply stash_staged's -U1 binary patch through the ordinary apply engine.
+The caller has already stored the stash; a failed removal must retain it."
+  (require 'ngit-patch)
+  (require 'ngit-binary-patch)
+  (let ((data (let ((ngit--out nil)
+                    (binary-function (symbol-function 'ngit--binary-p))
+                    (ngit-diff--binary-patch-function
+                     (lambda (old new) (ngit-binary-patch-emit old new 1))))
+                (unwind-protect
+                    (progn
+                      (fset 'ngit--binary-p #'ngit--stash-binary-p)
+                      (dolist (c changes) (ngit--emit-patch repo c 1)))
+                  (fset 'ngit--binary-p binary-function))
+                (apply #'concat (nreverse ngit--out)))))
+    (condition-case err
+        (ngit-cmd-apply repo '("-R") data)
+      (error
+       (let ((message (if (eq (car err) 'ngit-fatal) (cadr err)
+                        (error-message-string err))))
+         (unless (equal message "")
+           (ngit-native-write-stderr (concat message "\n"))))
+       (ngit--die-with 1 (if quiet "" "Cannot remove worktree changes"))))
+    ;; builtin/stash.c skips reset entirely with --keep-index, including
+    ;; when the saved index tree is empty.
+    (unless keep (ngit--reset-index repo base paths t))))
+
+(defun ngit--stash-gitlink-change-p (change)
+  (and (memq (aref change 2) '(0 #o160000))
+       (memq (aref change 4) '(0 #o160000))))
+
+(defun ngit--stash-modules (repo entries base)
+  "Read UTF-8 module settings from the worktree, index, then HEAD."
+  (let* ((file (expand-file-name ".gitmodules" (ngit-repo-toplevel repo)))
+         (entry (ngit-index-lookup entries ".gitmodules"))
+         (head-entry (and (not entry) (ngit--literal-entry repo base ".gitmodules")))
+         (oid (or (and entry (aref entry 1)) (cdr head-entry)))
+         (modules (ngit--config-parse
+                   (decode-coding-string
+                    (or (and (file-exists-p file) (ngit--read-file file))
+                        (and oid (cdr (ngit-read-object repo oid))) "") 'utf-8)))
+         (out nil))
+    ;; submodule-config.c warns while parsing, even if config overrides the
+    ;; invalid value or an ordinary path makes the change check succeed.
+    (dolist (setting modules)
+      (if (and (string-prefix-p "submodule." (car setting))
+               (string-suffix-p ".ignore" (car setting))
+               (stringp (cdr setting))
+               (not (member (cdr setting) '("all" "dirty" "untracked" "none"))))
+          (ngit-native-write-stderr
+           (format "warning: Invalid parameter '%s' for config option '%s'\n"
+                   (cdr setting) (car setting)))
+        (push setting out)))
+    (nreverse out)))
+
+(defun ngit--stash-submodule-change-p (repo change modules)
+  "Apply the per-module override to stash's initial ignore-all setting."
+  (let ((path (decode-coding-string (aref change 0) 'utf-8)) key)
+    (dolist (entry modules)
+      (when (and (string-prefix-p "submodule." (car entry))
+                 (string-suffix-p ".path" (car entry))
+                 (equal (cdr entry) path))
+        (setq key (concat (substring (car entry) 0 -5) ".ignore"))))
+    (let ((configured nil))
+      (when key
+        (dolist (entry (ngit-config-entries repo))
+          (when (equal (decode-coding-string (car entry) 'utf-8) key)
+            (setq configured (cdr entry)))))
+      (let ((ignore (or configured (cdr (assoc key (reverse modules))) "all"))
+            (flags (aref change 6)))
+        (unless (member ignore '("all" "dirty" "untracked" "none"))
+          (ngit--die "fatal: bad --ignore-submodules argument: %s" ignore))
+        (and (not (string= ignore "all"))
+             (or (not (equal (aref change 3) (aref change 5)))
+                 (and (string= ignore "none")
+                      (or (memq 'modified flags) (memq 'untracked flags)))
+                 (and (string= ignore "untracked") (memq 'modified flags))))))))
+
+(defun ngit--stash-module-candidates (index paths items changes &optional staged)
+  "Include clean gitlinks in diff-files order for ignore config validation."
+  (if (and (null paths) (null staged)) changes
+   (let ((out (copy-sequence changes)) (known (make-hash-table :test 'equal))
+        (entries (aref index 0)) (raw (aref index 1)) (added nil))
+    (dolist (c changes) (puthash (aref c 0) t known))
+    (dolist (c staged)
+      (let ((path (aref c 0)))
+        (when (and (not (gethash path known)) (ngit--stash-covered-p items path))
+          (puthash path t known)
+          (push c out)
+          (setq added t))))
+    (dolist (path paths)
+      (when (and (not (gethash path known)) (ngit--stash-covered-p items path))
+        (let* ((e (ngit-index-lookup entries path)) (pos (aref e 4)))
+          (unless (or (memq 'skip-worktree (aref e 5))
+                      (and pos (/= 0 (logand (aref raw (+ pos 60)) #x80))))
+            (push (ngit-change path ?M ngit-mode-gitlink (aref e 1)
+                               ngit-mode-gitlink (aref e 1)) out)
+            (setq added t)))))
+    (if added (sort out (lambda (a b) (string< (aref a 0) (aref b 0)))) out))))
+
 (defun ngit--stash-push (repo args)
-  (let ((message nil) (keep nil) (untracked nil) (quiet nil) (paths nil))
+  (let ((message nil) (keep nil) (untracked nil) (quiet nil) (paths nil) (all nil) (staged-only nil))
     (while args
       (let ((a (pop args)))
         (cond ((string= a "--") (setq paths args args nil))
@@ -131,10 +259,14 @@
                (setq message (or (pop args) (ngit--die-with 129 "error: switch `m' requires a value"))))
               ((string-prefix-p "--message=" a) (setq message (substring a 10)))
               ((member a '("-k" "--keep-index")) (setq keep t))
-              ((member a '("-u" "--include-untracked")) (setq untracked t))
+              ((member a '("-a" "--all")) (setq all t untracked t))
+              ((member a '("-S" "--staged")) (setq staged-only t))
+              ((member a '("-u" "--include-untracked")) (setq untracked t all nil))
               ((member a '("-q" "--quiet")) (setq quiet t))
               ((string-prefix-p "-" a) (ngit--die-with 129 "error: stash option '%s' is not supported" a))
               (t (setq paths (cons a args) args nil)))))
+    (when (and staged-only untracked)
+      (ngit--die-with 1 "Can't use --staged and --include-untracked or --all at the same time"))
     (when (member "" paths)
       (ngit--die "fatal: empty string is not a valid pathspec. please use . instead if you meant to match all paths"))
     (let* ((head (or (ngit-resolve-ref repo "HEAD")
@@ -143,10 +275,16 @@
            (items (ngit-command-path-items repo paths))
            (selectors (mapcar #'car items))
            (ngit--untracked-pathspecs (and (ngit-pathspec-attr-p selectors) selectors))
-           (index (ngit--stash-refresh repo)) (old (aref index 0))
+           (module-paths (list nil))
+           (index (ngit--stash-refresh repo module-paths)) (old (aref index 0))
+           (visible nil)
            (staged (ngit-diff-tree-index repo base))
-           (wt (seq-filter (lambda (c) (ngit--stash-covered-p items (aref c 0)))
-                           (ngit-wt-changes repo t)))
+           (wt (unless staged-only (seq-filter (lambda (c) (ngit--stash-covered-p items (aref c 0)))
+                           (ngit-wt-changes repo t))))
+           (staged-wt (and staged-only
+                           (seq-filter (lambda (c) (ngit--stash-covered-p items (aref c 0)))
+                                       (ngit-wt-changes repo t))))
+           (ngit--no-excludes all)
            (unames (and untracked
                         (seq-filter (lambda (p) (ngit--stash-covered-p items p))
                                     (car (ngit-add-untracked repo '("") (ngit--tracked-set old)))))))
@@ -157,8 +295,48 @@
               (ngit--die-with 1 "error: pathspec '%s' did not match any file(s) known to git\nDid you forget to 'git add'?"
                              (ngit-command-path-origin repo p)))
             (setq remaining (cdr remaining)))))
-      (if (not (or wt unames
-                   (seq-some (lambda (c) (ngit--stash-covered-p items (aref c 0))) staged)))
+      ;; Git checks staged changes first, then diff-files (including clean
+      ;; gitlinks).  Both quick diffs stop at the first visible change.
+      (let* ((modules 'unread)
+             (settings (lambda ()
+                         (when (eq modules 'unread)
+                           (setq modules (ngit--stash-modules repo old base)))
+                         modules))
+             (changed (lambda (c)
+                        (or (not (ngit--stash-gitlink-change-p c))
+                            (ngit--stash-submodule-change-p repo c (funcall settings)))))
+             (work (if staged-only staged-wt wt))
+             (candidates nil))
+        (setq visible
+              (seq-some (lambda (c) (and (ngit--stash-covered-p items (aref c 0))
+                                        (funcall changed c))) staged))
+        (unless visible
+          (setq candidates (ngit--stash-module-candidates index (car module-paths) items work)
+                visible (seq-some changed candidates)))
+        (when (and staged-only (null staged) visible)
+          (ngit--die-with 1 "No staged changes"))
+        (when (or unames visible)
+          (if staged-only
+              ;; stash_staged's diff-tree child has its own submodule cache
+              ;; and no pathspec, so it can emit a second parse warning.
+              (when (seq-some #'ngit--stash-gitlink-change-p staged)
+                (condition-case err
+                    (let ((child-modules (ngit--stash-modules repo old base)))
+                      (dolist (c staged)
+                        (when (ngit--stash-gitlink-change-p c)
+                          (ngit--stash-submodule-change-p repo c child-modules))))
+                  (ngit-fatal
+                   (ngit-native-write-stderr (concat (cadr err) "\n"))
+                   (ngit--die-with 1 (if quiet "" "Cannot save the current staged state")))))
+            ;; Saving the worktree runs a non-quick diff after the initial
+            ;; check, validating even clean gitlinks later in path order.
+            (let ((links (seq-filter #'ngit--stash-gitlink-change-p staged)))
+              (when (or (car module-paths) links)
+                (dolist (c (or candidates
+                               (ngit--stash-module-candidates
+                                index (car module-paths) items work links)))
+                  (when (ngit--stash-gitlink-change-p c) (funcall changed c))))))))
+      (if (not (or unames visible))
           (unless quiet (ngit--emit "No local changes to save\n"))
         (let* ((ref (ngit-read-ref repo "HEAD"))
                (branch (if (and ref (string-prefix-p "ref: refs/heads/" ref))
@@ -205,13 +383,15 @@
             (dolist (p unames)
               (unless (string-suffix-p "/" p)
                 (ngit--unlink-entry repo (ngit--switch-entry p #o100644 nil nil))))
+            (if staged-only
+                (ngit--stash-remove-staged repo base staged paths keep quiet)
             (if paths
                 (ngit--stash-restore-paths repo base (append names unames))
               (if (and ref (string-prefix-p "ref: " ref))
                   (ngit-cmd-reset repo '("--hard" "-q"))
                 (ngit--reset-hard repo base "HEAD")
-                (ngit--write-ref repo "ORIG_HEAD" head (ngit-resolve-ref repo "ORIG_HEAD") nil)))
-            (when (and keep (not (equal itree ngit-empty-tree-bin)))
+                (ngit--write-ref repo "ORIG_HEAD" head (ngit-resolve-ref repo "ORIG_HEAD") nil))))
+            (when (and keep (not staged-only) (not (equal itree ngit-empty-tree-bin)))
               (if paths (ngit--stash-restore-paths repo itree names)
                 (ngit--reset-hard repo itree head)))))))
     0))
@@ -396,11 +576,12 @@ equally distant candidates prefer the forward match."
                      (string-search text ours (1+ pos)))))
     best))
 
-(defun ngit--stash-patch-data (base target ours)
-  "Apply BASE-to-TARGET text hunks to OURS, with Git's three-line context.
+(defun ngit--stash-patch-data (base target ours &optional context)
+  "Apply BASE-to-TARGET text hunks to OURS, with CONTEXT lines (default three).
 Return (t . DATA) on success, or nil when a hunk cannot be found."
   (require 'ngit-xdiff)
-  (let* ((before (ngit-xdiff--split base))
+  (let* ((context (or context 3))
+         (before (ngit-xdiff--split base))
          (after (ngit-xdiff--split target))
          (current (ngit-xdiff--split ours))
          (starts (make-vector (1+ (length current)) 0))
@@ -411,14 +592,14 @@ Return (t . DATA) on success, or nil when a hunk cannot be found."
       (setq i (1+ i)))
     (while (and script (not failed))
       (let* ((first (pop script)) (last first)
-             (begin (max 0 (- (aref first 0) 3)))
+             (begin (max 0 (- (aref first 0) context)))
              (end nil) (new-begin nil) (new-end nil)
              (old-text nil) (new-text nil) (match nil) (pos nil))
         (while (and script
                     (<= (aref (car script) 0)
-                        (+ (aref last 0) (aref last 2) 6)))
+                        (+ (aref last 0) (aref last 2) (* 2 context))))
           (setq last (pop script)))
-        (setq end (min (length before) (+ (aref last 0) (aref last 2) 3))
+        (setq end (min (length before) (+ (aref last 0) (aref last 2) context))
               new-begin (- (aref first 1) (- (aref first 0) begin))
               new-end (+ (aref last 1) (aref last 3)
                          (- end (aref last 0) (aref last 2)))
@@ -645,16 +826,27 @@ Return (t . DATA) on success, or nil when a hunk cannot be found."
             (ngit--emit (format "stash@{%d}: " i) (decode-coding-string (substring line (1+ tab)) 'utf-8) "\n"))
           (setq i (1+ i)))) 0)
      ((string= command "show")
-      (let ((patch nil) (stat nil) (revs nil))
+      (let ((patch nil) (stat nil) (revs nil)
+            (include (ngit-config-bool repo "stash.showincludeuntracked" nil)) (only nil))
         (dolist (a args)
           (cond ((member a '("-p" "--patch")) (setq patch t))
                 ((string= a "--stat") (setq stat t))
+                ((member a '("-u" "--include-untracked")) (setq include t))
+                ((string= a "--only-untracked") (setq include t only t))
+                ((string= a "--no-include-untracked") (setq include nil only nil))
                 (t (push a revs))))
         (let* ((selected (ngit--stash-select repo (nreverse revs)))
                (hex (car selected)) (commit (ngit--commit-of repo hex))
-               (changes (ngit-detect-renames
-                         (ngit-diff-trees repo (ngit--switch-tree repo (car (ngit--stash-parents repo commit)))
-                                          (ngit--switch-tree repo hex)))))
+               (parents (ngit--stash-parents repo commit))
+               (utree (and include (nth 2 parents) (ngit--switch-tree repo (nth 2 parents))))
+               (changes (sort
+                         (append
+                          (unless only
+                            (ngit-detect-renames
+                             (ngit-diff-trees repo (ngit--switch-tree repo (car parents))
+                                              (ngit--switch-tree repo hex))))
+                          (and utree (ngit-diff-trees repo nil utree)))
+                         (lambda (a b) (string< (aref a 0) (aref b 0))))))
           (when (or stat (not patch)) (ngit--emit-stat (ngit--stat-entries repo changes)))
           (when patch
             (when (and stat changes) (ngit--emit "\n"))

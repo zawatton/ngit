@@ -405,20 +405,115 @@ On success, leave `ngit-wt--stat' holding ENTRY's lstat result."
   "Overlay sorted TARGETS on OLD, removing only topology conflicts."
   (ngit-index-overlay old targets nil removed))
 
+(defvar ngit--checkout-as-restore nil)
+(defvar ngit--checkout-stage-removals nil)
+
+(defun ngit--checkout-unresolve (repo index items)
+  "Recreate selected conflict stages from resolve-undo, consuming their records."
+  (let* ((undo (aref index 8)) (old (aref index 0))
+         (root (ngit-ct-root index))
+         (pos 0) (limit (length (or undo "")))
+         (targets nil) (kept nil) (drop (make-hash-table :test 'equal)))
+    (while (< pos limit)
+      (let* ((start pos) (nul (ngit--byte-pos undo 0 pos))
+             (name (substring undo pos nul)) (current (ngit-index-lookup old name))
+             (selected (and (or (null current) (= (aref current 3) 0))
+                            (ngit--checkout-match-p items name)))
+             (modes (make-vector 4 0)))
+        (setq pos (1+ nul))
+        (dotimes (i 3)
+          (setq nul (ngit--byte-pos undo 0 pos))
+          (aset modes (1+ i) (string-to-number (substring undo pos nul) 8))
+          (setq pos (1+ nul)))
+        (dotimes (i 3)
+          (let* ((stage (1+ i)) (mode (aref modes stage)))
+            (unless (= mode 0)
+              (when selected
+                (let ((entry (ngit-make-entry name (substring undo pos (+ pos 20)) mode
+                                               (concat (make-string 24 0) (ngit--be32-bytes mode)
+                                                       (make-string 12 0)))))
+                  (aset entry 3 stage)
+                  (push entry targets)))
+              (setq pos (+ pos 20)))))
+        (if selected (progn (puthash name t drop) (when root (ngit-ct-invalidate root name)))
+          (push (substring undo start pos) kept))))
+    (when targets
+      (aset index 8 (apply #'concat (nreverse kept)))
+      (aset index 0 (ngit-index-overlay old targets drop)))
+    (aref index 0)))
+
+(defun ngit--checkout-conflict-entry (repo path stages style)
+  "Recreate a work-tree conflict from the index's three versions."
+  (require 'ngit-merge-file)
+  (let* ((base (aref stages 1)) (ours (aref stages 2)) (theirs (aref stages 3))
+         (attrs (ngit-attrs repo path '("conflict-marker-size" "merge")))
+         (marker (cdr (assoc "conflict-marker-size" attrs)))
+         (b (if base (ngit--checkout-entry-data repo base) ""))
+         (o (ngit--checkout-entry-data repo ours))
+         (tdata (ngit--checkout-entry-data repo theirs))
+         (binary (or (eq (cdr (assoc "merge" attrs)) 'unset)
+                     (equal (cdr (assoc "merge" attrs)) "binary")
+                     (ngit--byte-pos b 0 0) (ngit--byte-pos o 0 0) (ngit--byte-pos tdata 0 0)))
+         (data (if binary o
+                 (car (ngit-merge-file b o tdata :labels '("base" "ours" "theirs")
+                                      :favor (if (equal (cdr (assoc "merge" attrs)) "union") 'union 'none)
+                                      :style (intern style)
+                                      :marker-size (if (and (stringp marker) (> (string-to-number marker) 0))
+                                                       (string-to-number marker) 7))))))
+    (when binary (ngit-native-write-stderr (concat "warning: Cannot merge binary files: " path " (ours vs. theirs)\n")))
+    (ngit-make-entry path (ngit-write-object repo "blob" data) (aref ours 2) (make-string 40 0))))
+
+(defun ngit--checkout-unmerged-targets (repo old items matched stage merge style overlay)
+  "Preflight selected unmerged entries and return their work-tree versions."
+  (let ((i 0) (targets nil) (errors nil))
+    (while (< i (length old))
+      (let* ((e (aref old i)) (path (aref e 0)))
+        (if (= (aref e 3) 0) (setq i (1+ i))
+          (let* ((group (ngit-index-group old i)) (stages (cdr group)))
+            (setq i (car group))
+            (when (ngit--checkout-match-p items path)
+              (ngit--checkout-item-matches items path matched)
+              (cond
+               (stage
+                (if (aref stages stage) (push (aref stages stage) targets)
+                  (if (or ngit--checkout-as-restore (not overlay))
+                      (push e ngit--checkout-stage-removals)
+                    (push (format "error: path '%s' does not have %s version\n" path (if (= stage 2) "our" "their")) errors))))
+               (merge
+                (if (and (aref stages 2) (aref stages 3))
+                    (push (ngit--checkout-conflict-entry repo path stages style) targets)
+                  (push (format "error: path '%s' does not have all necessary versions\n" path) errors)))
+               (t (push (format "error: path '%s' is unmerged\n" path) errors))))))))
+    (when errors
+      (ngit-native-write-stderr (apply #'concat (nreverse errors)))
+      (ngit--die-with 1 ""))
+    (nreverse targets)))
+
 (defun ngit--checkout-parse (repo args)
   "Return (TREE SOURCE PATHS EXPLICIT QUIET) for checkout ARGS."
-  (let ((quiet nil) (before nil) (after nil) (explicit nil))
+  (let ((quiet nil) (before nil) (after nil) (explicit nil) (overlay t) (stage nil) (merge nil) (force nil) (style (or (ngit-config-get repo "merge.conflictstyle") "merge")))
     (while args
       (let ((a (pop args)))
         (cond ((string= a "--") (setq explicit t after args args nil))
               ((member a '("-q" "--quiet")) (setq quiet t))
-              ((member a '("-f" "--force")) nil)
+              ((string= a "--overlay") (setq overlay t))
+              ((string= a "--no-overlay") (setq overlay nil))
+              ((member a '("-2" "--ours")) (setq stage 2))
+              ((member a '("-3" "--theirs")) (setq stage 3))
+              ((member a '("-m" "--merge")) (setq merge t))
+              ((string-prefix-p "--conflict=" a) (setq merge t style (substring a 11)))
+              ((member a '("-f" "--force")) (setq force t))
               ((member a '("--guess" "--no-guess")) nil)
               ((string-prefix-p "-" a)
                (ngit--die-with 129 "error: checkout option '%s' is not supported" a))
               (t (push a before)))))
+    (when (or (and stage merge) (and force (or stage merge)))
+      (ngit--die "fatal: %s: --ours/--theirs, --force and --merge are incompatible when\nchecking out of the index."
+                 (if ngit--checkout-as-restore "git restore" "git checkout")))
+    (unless (member style '("merge" "diff3" "zdiff3"))
+      (ngit--die "fatal: unknown style '%s' given for 'merge.conflictstyle'" style))
     (setq before (nreverse before))
-    (if explicit
+    (let ((result (if explicit
         (if before
             (let ((tree (condition-case nil
                             (ngit-unhex (ngit-peel repo (ngit-rev-parse repo (car before)) 'tree))
@@ -434,11 +529,16 @@ On success, leave `ngit-wt--stat' holding ENTRY's lstat result."
                (ngit--die "fatal: checkout branch switching is not supported"))
               (tree (list tree (ngit-hex tree) (cdr before) nil quiet))
               (t (list nil nil before nil quiet)))))))
+      (when (and (car result) (or stage merge))
+        (ngit--die "fatal: '%s' cannot be used with switching branches" (if stage "--ours/--theirs" "--merge")))
+      (append result (list overlay stage merge style)))))
 
 (defun ngit--checkout-path-command (repo args)
   (let* ((parsed (ngit--checkout-parse repo args))
          (tree (nth 0 parsed)) (source (nth 1 parsed))
-         (paths (nth 2 parsed)) (explicit (nth 3 parsed)) (quiet (nth 4 parsed)))
+         (paths (nth 2 parsed)) (explicit (nth 3 parsed)) (quiet (nth 4 parsed))
+         (overlay (nth 5 parsed)) (stage (nth 6 parsed)) (merge (nth 7 parsed)) (style (nth 8 parsed))
+         (ngit--checkout-stage-removals nil))
     (when (member "" paths)
       (ngit--die "fatal: empty string is not a valid pathspec. please use . instead if you meant to match all paths"))
     (unless paths (ngit--die-with 1 "fatal: you must specify path(s) to restore"))
@@ -446,11 +546,17 @@ On success, leave `ngit-wt--stat' holding ENTRY's lstat result."
            (matched (vconcat (mapcar (lambda (item)
                                        (and (not tree) (vectorp (car item))
                                             (aref (car item) 4))) items)))
-           (index (ngit-read-index repo)) (old (aref index 0))
+           (index (ngit-read-index repo))
+           (old (if (and merge (not tree) (aref index 8))
+                    (ngit--checkout-unresolve repo index items)
+                  (aref index 0)))
            (targets (if tree
                         (ngit--checkout-source-entries repo tree items matched)
                       (ngit--checkout-index-entries old items matched)))
+           (selected (and tree (not overlay) (ngit--checkout-index-entries old items matched)))
            (mi 0) (misses nil))
+      (unless tree
+        (setq targets (append targets (ngit--checkout-unmerged-targets repo old items matched stage merge style overlay))))
       (dolist (path paths)
         (unless (aref matched mi)
           (push (format "error: pathspec '%s' did not match any file(s) known to git\n" path) misses))
@@ -458,21 +564,27 @@ On success, leave `ngit-wt--stat' holding ENTRY's lstat result."
       (when misses
         (ngit-native-write-stderr (apply #'concat (nreverse misses)))
         (ngit--die-with 1 ""))
-      (let* ((removed nil)
+      (let* ((removed ngit--checkout-stage-removals)
+             (drop (and tree (not overlay) (make-hash-table :test 'equal)))
+             (_ (when drop
+                  (dolist (e selected)
+                    (unless (seq-find (lambda (target) (string= (aref target 0) (aref e 0))) targets)
+                      (puthash (aref e 0) t drop)
+                      (push e removed)))))
              (entries (if tree
-                          (ngit--checkout-overlay old targets
-                                                  (lambda (e) (push e removed)))
+                          (ngit-index-overlay old targets drop (lambda (e) (push e removed)))
                         old))
              (root (ngit-ct-root index))
              (checked (make-hash-table :test 'eql))
-             (updates nil) (count 0)
+             (updates nil) (count (if drop (hash-table-count drop) 0))
              (lock (ngit-lock (ngit-index-file repo)))
              (ngit--checkout-attr-cache (make-hash-table :test 'equal)))
         (unwind-protect
             (progn
               ;; Topology conflicts disappear from the overlay.  Remove
               ;; their tracked work-tree paths before creating replacements.
-              (dolist (e (sort removed #'ngit--entry-less))
+              (dolist (e (sort (delete-dups removed) #'ngit--entry-less))
+                (when root (ngit-ct-invalidate root (aref e 0)))
                 (ngit--unlink-entry repo e))
               (aset index 0 entries)
               (dolist (target targets)
@@ -496,13 +608,14 @@ On success, leave `ngit-wt--stat' holding ENTRY's lstat result."
                                       (setq count (1+ count))))
                                 (setq count (1+ count))
                                 (ngit-checkout-entry repo target))))
+                  (if (and (not tree) old-e (/= (aref old-e 3) 0)) nil
                   (if (and same (aref old-e 4))
                       (progn
                         (push (cons (aref old-e 4) (aref fresh 6)) updates)
                         (puthash (aref old-e 4) t checked)
                         (aset entries pos old-e))
                     (aset entries pos fresh)
-                    (when root (ngit-ct-invalidate root name)))))
+                    (when root (ngit-ct-invalidate root name))))))
               (ngit--checkout-update-index-stat index updates)
               (ngit-commit-lock lock (ngit-index-bytes repo index entries root checked))
               (setq lock nil)
@@ -514,9 +627,9 @@ On success, leave `ngit-wt--stat' holding ENTRY's lstat result."
                    (if (= count 1) "path" "paths")
                    (if tree (ngit-abbrev repo source) "the index"))))
         (let ((head (ngit-resolve-ref repo "HEAD")))
-          (ngit-hook-run repo "post-checkout"
+          (unless ngit--checkout-as-restore (ngit-hook-run repo "post-checkout"
                          (list (or head (make-string 40 ?0))
-                               (or head (make-string 40 ?0)) "0")))))))
+                               (or head (make-string 40 ?0)) "0"))))))))
 
 (defun ngit-cmd-checkout (repo args)
   "Run checkout, loading branch switching only when this command needs it."

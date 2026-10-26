@@ -1,0 +1,155 @@
+#+TITLE: ngit daily use: the README "Not supported yet" list
+
+Requested on 2026-10-25 ("implement the unsupported parts quickly"), which
+overrides the earlier exclusion of editor/TTY-driven commands, signing and
+submodules.  Baseline: 5db0c7f.  The denominator is README.org's "Not
+supported yet" list as of 5db0c7f plus the protocol-v2 follow-ups, one item
+per line below, each tagged with its wave.  Wave A covers daily commands,
+wave B history rewriting and merge machinery, wave C TTY-interactive
+commands, signing, submodules and shallow/partial transfers; items tagged
+"infra" are storage or transport internals with no daily-use effect and are
+not planned.  Stages and criteria are added per wave before its lanes start;
+stage SA's criteria were defined before implementation (SA.10-SA.14 before
+the third wave-A lane started).
+Criteria SA.16-SA.21 were added at integration (calibration and regression
+split to fit the 600 s limit; the apply engine suite after three review
+rounds).  apply/am divergences that exist at 60924e0 and are reachable only
+through apply --cached, am or mail parsing are kept as failing cases in the
+ungraded mode `sh test/apply-gen.sh deferred` and listed in README.
+On 2026-10-26 the user ended ngit development after wave A: waves B and C
+are not planned and their items stay in README's "Not supported yet" list.
+
+Each suite compares ngit with Git 2.47.3 on fresh fixtures (output, exit
+code, repository state) and reports exact comparisons and intended
+differences separately; an intended difference is a named diagnostic or
+security divergence and never counts as exact.  The verifier enforces a
+floor per mode, Git-vs-Git calibration and a red 5db0c7f baseline.
+
+README items:
+- A: an editor for commit messages (commit, commit --amend, merge, tag -a)
+- A: commit with paths
+- A: guessed identities
+- A: date formats other than raw and ISO 8601 in GIT_*_DATE
+- A: log --follow
+- A: log -m/--cc, --simplify-merges, --ancestry-path, --boundary, --left-right
+- A: log %(trailers), %w(), padding and color placeholders
+- A: --date=relative/human and approximate dates
+- A: mailmap
+- A: -uall/ignored listings
+- A: branch --format, --column, --edit-description, -t inherit and colors
+- A: tag --format/--column/--edit
+- A: reset --merge/--keep
+- A: checkout/switch --merge/--conflict/--overlay
+- A: restore --ours/--theirs
+- A: stash --all/--staged
+- B: interactive rebase (and its hooks) and merge-preserving rebase
+- B: octopus merges, multi-head pulls
+- B: rerere
+- B: custom merge drivers, custom attribute macros and diff drivers
+- B: strategy-specific rename thresholds, copy detection
+- B: push.default=matching/nothing, --force-if-includes
+- B: blame -M/-C, grep -P, name-rev --all, log -L, notes
+- B: global options beyond -c/-C/--config-env/-P/--git-dir/--work-tree/--bare
+- B: git config value patterns and --replace-all/--unset-all on multi-valued variables
+- B: subdirectory path handling in the remaining commands
+- C: add -p, restore -p, reset -p, checkout/switch -p, stash -p
+- C: commit and tag signing
+- C: submodules beyond gitlink entries
+- C: shallow/partial clones and fetches
+- C: interactive credential prompts
+- C: template copying
+- infra: Dumb HTTP, OAuth, git://, packfile-uris, bundle-uri, object-info
+- infra: alternates, multi-pack-index, reftable, split or sparse indexes,
+  sparse checkouts, rm/mv --sparse, SHA-256, index.version
+- infra: delta search depth, --fix-thin, delta-encoded binary hunks in output
+- infra: general MIME mail in am/apply, traditional patches with +++ body lines
+
+* SA Wave A: daily commands
+
+** SA.0 The ux-commit suite is calibrated: Git against itself passes, every graded mode fails on 5db0c7f by compared cases, and the suites are new files
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py controls ux-commit
+
+** SA.16 The ux-log suite is calibrated as SA.0 (split from SA.0 at integration so each run fits the 600 s limit)
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py controls ux-log
+
+** SA.17 The ux-cmds suite is calibrated as SA.0 (split from SA.0 at integration)
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py controls ux-cmds
+
+** SA.1 commit, commit --amend, merge and tag -a open GIT_EDITOR/core.editor/VISUAL/EDITOR with Git's template, comment stripping, cleanup modes, abort on an empty message and editor failure, as Git
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-commit editor
+
+** SA.2 Identities are guessed (user.useConfigOnly, EMAIL, host name forms) and GIT_*_DATE accepts Git's date formats (RFC 2822, ISO variants, relative and approximate forms git accepts)
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-commit identity
+
+** SA.3 commit with paths (--only, --include, -a with paths, pathspec magic) commits exactly what Git commits and leaves the index as Git does
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-commit paths
+
+** SA.4 log --follow follows renames (and copies with -C where ngit detects them) as Git
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-log follow
+
+** SA.5 --date=relative/human/local/short/format: and approximate --since/--until dates print and select as Git
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-log dates
+
+** SA.6 Pretty formats: %(trailers...), %w(), %<(..)/%>(..)/%><(..) padding, %C color placeholders and --color/color.ui, and mailmap (%aN/%aE, .mailmap, mailmap.file, log --use-mailmap, shortlog) as Git
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-log format
+
+** SA.7 History options -m, --cc, --simplify-merges, --ancestry-path, --boundary, --left-right as Git
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-log history
+
+** SA.8 End to end: an editor-driven session (commit, amend, merge, tag -a) and a log review session on a repository with renames, merges and a mailmap equal Git
+#+TIMEOUT: 600
+cmd: sh -c 'python3 tools/ux-verify.py mode ux-commit e2e && python3 tools/ux-verify.py mode ux-log e2e'
+
+** SA.10 status -uall/--untracked-files=all, --ignored(=matching|traditional|no) and ls-files/status ignored listings as Git
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-cmds status
+
+** SA.11 branch --format, --column, --edit-description, -t inherit/--track=inherit and --color/color.branch; tag --format, --column, --edit (tag -a -m -e) as Git
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-cmds refs
+
+** SA.12 reset --merge/--keep, checkout/switch --merge/-m and --conflict=merge|diff3|zdiff3, checkout --overlay/--no-overlay, restore --ours/--theirs (and --merge/--conflict) as Git
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-cmds worktree
+
+** SA.13 stash --all/--include-untracked/--staged and their apply/pop/show as Git
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-cmds stash
+
+** SA.14 End to end: a working session using these options (untracked listing, branch/tag formatting, a conflicted checkout -m with restore --ours, stash --staged/--all) equals Git
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-cmds e2e
+
+** SA.18 ngit apply, apply -R, --index, --cached and --check (the engine behind am and stash --staged) equal Git on the review cases: corrupt and miscounted hunks, blank-line context, match at beginning and end, creation and removal checks, mode and type changes, gitlinks, eol conversion, parents that cannot be removed (added at integration after three review rounds)
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode apply-gen review
+
+** SA.19 ngit apply equals Git on at least 448 cases generated from a fixed seed (added at integration; 372 when added, raised with the final review fixes)
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode apply-gen apply-gen
+
+** SA.20 The apply-gen suite is calibrated as SA.0 (added at integration)
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py controls apply-gen
+
+** SA.9 Existing suites that touch messages, history and status stay green
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py regression compare
+
+** SA.21 The existing pull suite (audit-reaudit round4-pull) stays green (split from SA.9 at integration: alone it takes about 520 s)
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py regression pull
+
+** SA.15 README no longer lists the wave A items as unsupported and names the three ux suites (added at integration)
+#+TIMEOUT: 60
+cmd: sh -c '! grep -qE "an editor for commit messages|commit with$|guessed identities|log.s --follow|stash -p/--all/--staged|reset --merge/--keep" README.org && grep -q "test/ux-cmds.sh" README.org && grep -q "test/ux-log.sh" README.org && grep -q "test/ux-commit.sh" README.org'

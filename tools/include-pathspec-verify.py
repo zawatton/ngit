@@ -237,7 +237,9 @@ def baseline():
 
 def controls():
     names = run(["git", "ls-tree", "-r", "--name-only", BASE, "test"], ROOT, suite_environment())[1].decode().split()
-    changed = run(["git", "diff", "--name-only", BASE, "--", *names], ROOT, suite_environment())[1].decode().split()
+    # The guard covers this objective's commit 6a462c1; later objectives may
+    # change shared suites such as test/compare.sh.
+    changed = run(["git", "diff", "--name-only", BASE, "6a462c1", "--", *names], ROOT, suite_environment())[1].decode().split()
     if not names or changed:
         fail("original test sources changed: %s" % changed)
     old = baseline()

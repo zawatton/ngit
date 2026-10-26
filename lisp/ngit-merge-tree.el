@@ -15,6 +15,9 @@
 
 (defvar ngit-merge-ancestor-label "merged common ancestors")
 (defvar ngit-merge-marker-extra 0)
+(defvar ngit-merge-unique-worktree-root nil
+  "When bound by checkout, avoid existing work-tree paths in conflict names.
+Other merge callers retain their tree-only naming policy.")
 
 (defun ngit-merge-tree-entries (repo tree)
   "Return sorted stage-zero entries of binary TREE, or an empty vector."
@@ -45,7 +48,12 @@
 (defun ngit-merge--unique (path label names)
   (let* ((stem (concat path "~" (string-replace "/" "_" label)))
          (out stem) (n 0))
-    (while (gethash out names)
+    (while (or (gethash out names)
+               (and ngit-merge-unique-worktree-root
+                    (let ((file (expand-file-name
+                                 (decode-coding-string out 'utf-8)
+                                 ngit-merge-unique-worktree-root)))
+                      (or (file-exists-p file) (file-symlink-p file)))))
       (setq out (concat stem "_" (number-to-string n)) n (1+ n)))
     (puthash out t names)
     out))

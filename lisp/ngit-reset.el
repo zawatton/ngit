@@ -45,7 +45,8 @@ If CANDIDATES is a cons, collect unverified paths in its car for a later diff."
     (ngit-wt-setup (ngit-repo-toplevel repo))
     (while (< i (length entries))
       (let* ((e (aref entries i)) (pos (aref e 4)) (mode (aref e 2))
-             (valid (or (memq 'skip-worktree (aref e 5))
+             (valid (or (/= (aref e 3) 0)
+                        (memq 'skip-worktree (aref e 5))
                         (and pos (/= 0 (logand (aref raw (+ pos 60)) #x80)))))
              (skipped valid) (status nil))
         (unless valid
@@ -311,6 +312,197 @@ protected entry checks and before the first work-tree deletion or write."
           (aset repo 6 nil))
       (ngit-unlock lock))))
 
+(defun ngit--reset-uptodate-p (repo index entry)
+  "Check unpack-trees' stat contract without refreshing the index first."
+  (or (not (ngit-wt-lstat (aref entry 0)))
+      (let* ((pos (aref entry 4)) (mode (aref entry 2))
+             (filemode (ngit-config-bool repo "core.filemode" t))
+             (st (and pos (ngit-entry-lstat index entry))))
+        ;; The reference Git build does not enable USE_NSEC.  A refresh can
+        ;; retain old ctime nanoseconds when every checked stat field agrees.
+        (and st (ngit--checkout-leading-clear-p (aref entry 0))
+             (let ((wmode (ngit-wt-mode st)))
+               (when (or (and (not filemode) (= (logand mode #o170000) #o100000)
+                              (= (logand wmode #o170000) #o100000))
+                         (and (= mode ngit-mode-symlink) (= wmode #o100644)
+                              (not (ngit-config-bool repo "core.symlinks" t)))
+                         (and (= mode ngit-mode-gitlink) (= wmode ngit-mode-tree)))
+                 (setq wmode mode))
+               (and (= wmode mode)
+                    (ngit--stat-match-p (aref index 1) pos st)
+                    (not (ngit--racily-modified-p repo index entry filemode))))))))
+
+(defun ngit--reset-original-cwd ()
+  "Read the inherited process cwd, unaffected by the CLI's Lisp-only -C."
+  (let* ((buffer (ngit-native--buffer 3 4096))
+         (address (nl-ffi-memory-address buffer))
+         ;; Linux getcwd includes the terminating NUL in its return value.
+         (size (syscall-direct 79 address 4096 0 0 0 0)))
+    (unless (> size 0)
+      (ngit--die "fatal: Unable to read current working directory"))
+    (directory-file-name
+     (file-truename (decode-coding-string (ptr-read-bytes address (1- size)) 'utf-8)))))
+
+(defun ngit--reset-protect-untracked (repo changes old rev)
+  "Preflight every destination and its leading components before reset writes."
+  (let ((untracked nil) (collisions nil) (dirs nil)
+        (tracked (ngit--tracked-set old)))
+    ;; An unmerged index pathname can now be a directory containing entirely
+    ;; untracked files.  Do not let its stages hide that directory from the walk.
+    (dotimes (i (length old))
+      (let* ((entry (aref old i)) (path (aref entry 0))
+             (st (and (/= (aref entry 3) 0) (ngit-wt-lstat path))))
+        (when (and st (= (ngit-wt-mode st) ngit-mode-tree))
+          (remhash path tracked))))
+    (ngit--walk-untracked
+     repo (file-name-as-directory (ngit-repo-toplevel repo))
+     tracked "" (ngit-ignore-global-patterns repo)
+     (lambda (path) (push path untracked)) nil t)
+    (dolist (c changes)
+      (let ((path (aref c 0)))
+        (dolist (name untracked)
+          (when (string-prefix-p (concat path "/") name) (push path dirs)))
+        (dolist (name (ngit--switch-untracked-conflicts untracked path))
+          (push (cons name (if (= (aref c 2) 0) "removed" "overwritten")) collisions))))
+    (cond
+     (dirs
+      (ngit--die "error: Updating '%s' would lose untracked files in it\nfatal: Could not reset index file to revision '%s'."
+                 (car (sort dirs #'string<)) rev))
+     ((seq-some
+       (lambda (c)
+         (let* ((path (aref c 0)) (st (ngit-wt-lstat path))
+                (file (expand-file-name (decode-coding-string path 'utf-8)
+                                        (ngit-repo-toplevel repo))))
+           (when (and st (= (ngit-wt-mode st) ngit-mode-tree)
+                      (equal (ngit--reset-original-cwd)
+                             (directory-file-name (file-truename file))))
+             (ngit--die "error: Refusing to remove '%s' since it is the current working directory.\nfatal: Could not reset index file to revision '%s'."
+                        path rev)))) changes))
+     (collisions
+      (let ((first (car (sort collisions (lambda (a b) (string< (car a) (car b)))))))
+        (ngit--die "error: Untracked working tree file '%s' would be %s by merge.\nfatal: Could not reset index file to revision '%s'."
+                   (car first) (cdr first) rev))))))
+
+(defun ngit--reset-preserving (repo tree head-tree rev keep)
+  "Reset to TREE with unpack-trees merge/keep safety checks before writes."
+  (let* ((index (ngit-read-index repo)) (old (aref index 0))
+         (changes (ngit-diff-tree-index repo tree))
+         (head-changes (and keep (ngit-diff-trees repo head-tree tree)))
+         (head-diff (make-hash-table :test 'equal))
+         (destinations (make-hash-table :test 'equal))
+         (parents (make-hash-table :test 'equal))
+         (write-changes nil)
+         (drop (make-hash-table :test 'equal))
+         (targets nil) (writes nil) (deletes nil)
+         (root (ngit-ct-root index)) (i 0))
+    ;; The ordinary diff omits ITA additions.  Two-way unpack-trees must
+    ;; still verify/remove them, even when both trees lack their paths.
+    ;; Fold this into the existing stage cleanup scan to avoid another pass
+    ;; over ordinary indexes.
+    (let ((added nil) (known nil))
+      (while (< i (length old))
+        (let ((e (aref old i)))
+          (when (/= (aref e 3) 0) (puthash (aref e 0) t drop))
+          (when (memq 'ita (aref e 5))
+            (unless known
+              (setq known (make-hash-table :test 'equal))
+              (dolist (c changes) (puthash (aref c 0) t known)))
+            (unless (gethash (aref e 0) known)
+              (puthash (aref e 0) t known)
+              (push (ngit-change (aref e 0) ?A 0 nil (aref e 2) (aref e 1) 'ita) changes)
+              (setq added t))))
+        (setq i (1+ i)))
+      (when added
+        (setq changes (sort changes (lambda (a b) (string< (aref a 0) (aref b 0)))))))
+    (ngit-wt-setup (ngit-repo-toplevel repo))
+    (when keep
+      (when (or (file-exists-p (expand-file-name "MERGE_HEAD" (ngit-repo-gitdir repo)))
+                (seq-some (lambda (e) (/= (aref e 3) 0)) old))
+        (ngit--die "fatal: Cannot do a keep reset in the middle of a merge."))
+      (dolist (c head-changes) (puthash (aref c 0) c head-diff)))
+    (setq write-changes (if keep
+                            (seq-filter (lambda (c) (gethash (aref c 0) head-diff)) changes)
+                          changes))
+    (ngit--reset-protect-untracked
+     repo (append write-changes
+                  (and keep
+                       ;; --keep also checks HEAD paths absent from the index,
+                       ;; including deletions with no destination to write.
+                       (mapcar (lambda (c)
+                                 (vector (aref c 0) (aref c 1)
+                                         (aref c 4) (aref c 5) (aref c 2) (aref c 3)))
+                               head-changes))) old rev)
+    (dolist (c write-changes)
+      (when (/= (aref c 2) 0)
+        (let ((path (aref c 0)) (start 0) (slash nil))
+          (puthash path t destinations)
+          (while (setq slash (ngit--byte-pos path ?/ start))
+            (puthash (substring path 0 slash) t parents)
+            (setq start (1+ slash))))))
+    ;; Check even entries that already equal the target: --keep first merges
+    ;; HEAD -> target, then resets the remaining staged changes without writing.
+    (let ((check (lambda (path current mode bin changed)
+                   (when changed
+                     (let ((error-kind nil))
+                       (cond
+                        ((and keep (null current) (/= mode 0)
+                              (let ((h (ngit--literal-entry repo head-tree path)))
+                                (and h (/= (car h) ngit-mode-tree))))
+                         (setq error-kind "would be overwritten by merge. Cannot merge"))
+                        ((and keep current
+                              (not (ngit--switch-same-entry-p current mode bin))
+                              (let ((h (ngit--literal-entry repo head-tree path)))
+                                (not (and h (ngit--switch-same-entry-p current (car h) (cdr h))))))
+                         (setq error-kind "would be overwritten by merge. Cannot merge"))
+                        ((and current (= (aref current 3) 0)
+                              (not (ngit--switch-same-entry-p current mode bin))
+                              (not (ngit--reset-uptodate-p repo index current)))
+                         (setq error-kind "not uptodate. Cannot merge")))
+                       (when error-kind
+                         (ngit--die "error: Entry '%s' %s.\nfatal: Could not reset index file to revision '%s'."
+                                    path error-kind rev)))))))
+      (when keep
+        (dolist (c head-changes)
+          (funcall check (aref c 0) (ngit-index-lookup old (aref c 0)) (aref c 4) (aref c 5) t)))
+      (dolist (c changes)
+        (let* ((path (aref c 0)) (current (ngit-index-lookup old path))
+               (unmerged (and current (/= (aref current 3) 0)))
+               (write (or unmerged (not keep) (gethash path head-diff)))
+               (target (and (/= (aref c 2) 0)
+                            (ngit--switch-entry path (aref c 2) (aref c 3) nil))))
+          (unless keep (funcall check path current (aref c 2) (aref c 3) t))
+          (when keep
+            (let ((topology (gethash path parents)) (start 0) (slash nil))
+              (while (and (not topology) (setq slash (ngit--byte-pos path ?/ start)))
+                (setq topology (gethash (substring path 0 slash) destinations)
+                      start (1+ slash)))
+              (when (and topology current (not (ngit--reset-uptodate-p repo index current)))
+                (ngit--die "error: Entry '%s' not uptodate. Cannot merge.\nfatal: Could not reset index file to revision '%s'."
+                           path rev))))
+          (puthash path t drop)
+          (when root (ngit-ct-invalidate root path))
+          (when target (push target targets))
+          (when write
+            (if target (push target writes) (when current (push current deletes)))))))
+    (let* ((entries (ngit-index-overlay old targets drop))
+           (lock (ngit-lock (ngit-index-file repo)))
+           (checked (make-hash-table :test 'eql))
+           (ngit--checkout-attr-cache (make-hash-table :test 'equal)))
+      (unwind-protect
+          (progn
+            (aset index 0 entries)
+            (dolist (e deletes) (ngit--unlink-entry repo e))
+            (ngit--switch-clear-target-directories repo (vconcat writes))
+            (dolist (e writes)
+              (let ((fresh (ngit-checkout-entry repo e)))
+                (aset entries (ngit-index-find entries (aref e 0)) fresh)))
+            (ngit--reset-refresh repo index entries checked t)
+            (aset index 8 nil)
+            (aset index 9 nil)
+            (ngit-commit-lock lock (ngit-index-bytes repo index entries root checked))
+            (setq lock nil) (aset repo 6 nil) (aset repo 7 nil))
+        (when lock (ngit-unlock lock))))))
+
 (defun ngit-cmd-reset (repo args)
   (let ((mode nil) (quiet nil) (rest nil) (rev "HEAD") (paths nil) (explicit nil))
     (while args
@@ -318,8 +510,8 @@ protected entry checks and before the first work-tree deletion or write."
         (cond
          ((string= a "--") (setq rest (append (nreverse rest) (cons a args)) args nil explicit t))
          ((member a '("-q" "--quiet")) (setq quiet t))
-         ((member a '("--soft" "--mixed" "--hard")) (setq mode a))
-         ((member a '("--merge" "--keep" "-p" "--patch"))
+         ((member a '("--soft" "--mixed" "--hard" "--merge" "--keep")) (setq mode a))
+         ((member a '("-p" "--patch"))
           (ngit--die "fatal: reset %s is not supported" a))
          ((string-prefix-p "-" a) (ngit--die-with 129 "error: reset option '%s' is not supported" a))
          (t (push a rest)))))
@@ -357,6 +549,8 @@ protected entry checks and before the first work-tree deletion or write."
       (when paths
         (cond ((equal mode "--soft") (ngit--die "fatal: Cannot do soft reset with paths."))
               ((equal mode "--hard") (ngit--die "fatal: Cannot do hard reset with paths."))
+              ((member mode '("--merge" "--keep"))
+               (ngit--die "fatal: Cannot do %s reset with paths." (substring mode 2)))
               ((equal mode "--mixed")
                (ngit-native-write-stderr
                 "warning: --mixed with paths is deprecated; use 'git reset -- <paths>' instead.\n"))))
@@ -369,8 +563,11 @@ protected entry checks and before the first work-tree deletion or write."
                          "fatal: this operation must be run in a work tree"
                        "fatal: mixed reset is not allowed in a bare repository")))
         (let ((tree (and hex (ngit-unhex (ngit-peel repo hex 'tree)))))
-          (if (equal mode "--hard") (ngit--reset-hard repo tree rev)
-            (ngit--reset-index repo tree paths quiet))))
+          (cond ((equal mode "--hard") (ngit--reset-hard repo tree rev))
+                ((member mode '("--merge" "--keep"))
+                 (require 'ngit-switch)
+                 (ngit--reset-preserving repo tree (and head (ngit-unhex (ngit-peel repo head 'tree))) rev (equal mode "--keep")))
+                (t (ngit--reset-index repo tree paths quiet)))))
       (unless (or paths unborn)
         (let* ((action (getenv "GIT_REFLOG_ACTION"))
                (orig (ngit-resolve-ref repo "ORIG_HEAD"))

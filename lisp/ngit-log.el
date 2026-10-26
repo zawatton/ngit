@@ -418,10 +418,246 @@ parsed entry by entry."
 
 (defun ngit--tree-bin (c) (ngit-unhex (ngit--c-tree c)))
 
+(defvar ngit--rv-follow nil)
+(defvar ngit--rv-follow-paths nil)
+(defvar ngit--rv-follow-changes nil)
+(defvar ngit--rv-simplify-merges nil)
+(defvar ngit--rv-ancestry nil)
+(defvar ngit--rv-left-right nil)
+(defvar ngit--rv-cherry nil)
+(defvar ngit--rv-boundary-list nil)
+(defvar ngit--rv-boundary-phase nil)
+(defvar ngit--ld-merge nil)
+(defvar ngit--ld-parent nil)
+
+(defun ngit--follow-copy (repo parent change changes)
+  "Find CHANGE's source among PARENT's files, using tree-diff's follow pass.
+CHANGES identifies deleted, modified and unchanged sources.  Exact copies
+compete with exact renames before any inexact candidate is considered."
+  (let ((sources nil) (by-path (make-hash-table :test 'equal))
+        (target (ngit--spec (aref change 0) (aref change 4) (aref change 5)))
+        (best nil) (best-score -1) (score nil) (matches 0))
+    (dolist (ch changes) (puthash (aref ch 0) (aref ch 1) by-path))
+    (ngit--flatten-tree
+     repo (ngit--tree-bin parent) ""
+     (lambda (path mode bin)
+       (push (vector (ngit--spec path mode bin) (gethash path by-path)) sources)))
+    (setq sources (nreverse sources))
+    ;; find_identical_files: unused (deleted) sources and matching basenames
+    ;; each get one point. Equal scores retain source path order.
+    (dolist (source sources)
+      (let ((spec (aref source 0)))
+        (when (and (< matches 100) (< best-score 2)
+                   (equal (aref spec 2) (aref target 2))
+                   (or (and (ngit--regular-p (aref spec 1))
+                            (ngit--regular-p (aref target 1)))
+                       (= (aref spec 1) (aref target 1))))
+          (setq matches (1+ matches))
+          (let ((rank (+ (if (eq (aref source 1) ?D) 1 0)
+                         (ngit--basename-same (aref spec 0) (aref target 0)))))
+            (when (> rank best-score)
+              (setq best source best-score rank score ngit-max-score))))))
+    (unless best
+      (let* ((limit (or (ngit-config-int repo "diff.renameLimit" nil) 1000))
+             (candidates sources)
+             (matrix (vector (vector 0 0 nil -1) (vector 0 0 nil -1)
+                             (vector 0 0 nil -1) (vector 0 0 nil -1))))
+        ;; find_copies_harder degrades to changed sources if only that
+        ;; smaller matrix fits the rename limit. Exact matches are unlimited.
+        (when (and (> limit 0) (> (length sources) (* limit limit)))
+          (setq candidates (seq-filter (lambda (src) (aref src 1)) sources))
+          (when (> (length candidates) (* limit limit))
+            (setq ngit-rename-limit-warning (length sources) candidates nil)))
+        ;; Copy detection skips the basename shortcut. Keep the same four
+        ;; best candidates per destination as diffcore-rename's matrix.
+        (dolist (source candidates)
+          (let* ((spec (aref source 0))
+                 (entry (vector (ngit--estimate-similarity repo spec target ngit--default-rename-score)
+                                (ngit--basename-same (aref spec 0) (aref target 0)) source 0))
+                 (worst 0))
+            ;; record_if_better replaces the first worst slot, even for
+            ;; scores below the threshold. Slot order breaks later ties.
+            (dotimes (i 4)
+              (when (< (ngit--score-compare (aref matrix worst) (aref matrix i)) 0)
+                (setq worst i)))
+            (when (> (ngit--score-compare (aref matrix worst) entry) 0)
+              (aset matrix worst entry))))
+        (setq matrix (seq-filter (lambda (entry) (and (>= (aref entry 3) 0)
+                                                     (>= (aref entry 0) ngit--default-rename-score)))
+                                 (sort (append matrix nil) (lambda (a b) (< (ngit--score-compare a b) 0)))))
+        ;; find_renames runs first for unused sources, then for copies.
+        (let ((chosen (or (seq-find (lambda (entry) (eq (aref (aref entry 2) 1) ?D)) matrix)
+                          (car matrix))))
+          (when chosen (setq best (aref chosen 2) score (aref chosen 0))))))
+    (if (null best) change
+      (let ((found (vconcat change (vector score))) (spec (aref best 0)))
+        (aset found 1 (if (eq (aref best 1) ?D) ?R ?C))
+        (aset found 2 (aref spec 1))
+        (aset found 3 (aref spec 2))
+        (aset found 8 (aref spec 0))
+        found))))
+
+(defun ngit--follow-simplify (c)
+  "Follow one path through C's parent edges, retaining its rename diff."
+  (let* ((repo ngit--rv-repo)
+         (path (or (gethash c ngit--rv-follow-paths) ngit--rv-follow))
+         (parents (ngit--c-parents c)) (same nil) (result nil))
+    (puthash c path ngit--rv-follow-paths)
+    (dolist (p (or parents '(nil)))
+      (when p (ngit--parse p))
+      (let* ((changes (ngit-diff-trees repo (and p (ngit--tree-bin p)) (ngit--tree-bin c)))
+             (selected nil) (old-path path))
+        (dolist (ch changes)
+          (when (string= (aref ch 0) path)
+            (when (and p (= (aref ch 1) ?A))
+              (setq ch (ngit--follow-copy repo p ch changes)))
+            (push ch selected)
+            (when (memq (aref ch 1) '(?R ?C)) (setq old-path (aref ch 8)))))
+        (setq selected (nreverse selected))
+        (when (and p (not (gethash p ngit--rv-follow-paths)))
+          (puthash p old-path ngit--rv-follow-paths))
+        (when (null result) (setq result selected))
+        (when (and p (null selected) (null same)) (setq same p))))
+    (cond
+     (same (aset c 2 (list same)) (ngit--set c ngit-treesame))
+     ((null result) (ngit--set c ngit-treesame)))
+    (puthash c result ngit--rv-follow-changes)))
+
+(defun ngit--history-reaches (c target)
+  "Whether C reaches TARGET through original parents, without walk flags."
+  (let ((todo (list c)) (seen (make-hash-table :test 'eq)) (found nil))
+    (while (and todo (not found))
+      (let ((next (pop todo)))
+        (cond ((eq next target) (setq found t))
+              ((not (gethash next seen))
+               (puthash next t seen) (ngit--parse next)
+               (setq todo (append (ngit--c-orig-parents next) todo))))))
+    found))
+
+(defun ngit--history-ancestry (starts)
+  "Restrict a limited walk to the ancestry corridors selected in STARTS."
+  (when ngit--rv-ancestry
+    (let ((anchors nil) (explicit (not (eq ngit--rv-ancestry t))))
+      (if explicit (setq anchors ngit--rv-ancestry)
+        (dolist (s starts)
+          (when (/= 0 (logand (cdr s) ngit-uninteresting)) (push (car s) anchors))))
+      (unless anchors (ngit--die "fatal: --ancestry-path given but there are no bottom commits"))
+      (setq ngit--rv-commits
+            (seq-filter (lambda (c)
+                          (seq-some (lambda (anchor)
+                                      (or (ngit--history-reaches c anchor)
+                                          (and explicit (ngit--history-reaches anchor c)))) anchors))
+                        ngit--rv-commits)))))
+
+(defun ngit--history-simplify-merges ()
+  "Simplify full-history parent lists in parent-before-child order."
+  (when (and ngit--rv-simplify-merges ngit--rv-paths)
+    (let ((replacements (make-hash-table :test 'eq))
+          (ordered (ngit--topo-sort (copy-sequence ngit--rv-commits))))
+      (dolist (c (reverse ordered))
+        (let ((parents nil))
+          (dolist (p (ngit--c-parents c))
+            (let ((replacement (gethash p replacements p)))
+              (when (and replacement (not (memq replacement parents))) (push replacement parents))))
+          (setq parents (nreverse parents))
+          ;; Mark redundant ancestors and irrelevant roots, but preserve a
+          ;; TREESAME parent when every such parent was marked for removal
+          ;; (revision.c:leave_one_treesame_to_parent).
+          (let ((marked nil) (same nil))
+            (dolist (p parents)
+              (when (not (ngit--ps-trees-differ ngit--rv-repo
+                                              (ngit--tree-bin p) (ngit--tree-bin c) ""))
+                (push p same))
+              (when (or (and (null (ngit--c-parents p)) (ngit--has p ngit-treesame))
+                        (seq-some (lambda (other)
+                                    (and (not (eq p other)) (ngit--history-reaches other p))) parents))
+                (push p marked)))
+            (when (and same (not (seq-some (lambda (p) (not (memq p marked))) same)))
+              (setq marked (delq (car (last same)) marked)))
+            (setq parents (seq-filter (lambda (p) (not (memq p marked))) parents)))
+          (aset c 2 parents)
+          (ngit--clear c ngit-treesame)
+          (when (if parents
+                    (seq-some (lambda (p) (not (ngit--ps-trees-differ ngit--rv-repo
+                                                                 (ngit--tree-bin p) (ngit--tree-bin c) ""))) parents)
+                  (not (ngit--ps-tree-has-match ngit--rv-repo (ngit--tree-bin c) "")))
+            (ngit--set c ngit-treesame))
+          (puthash c (if (and (ngit--has c ngit-treesame) (not (cdr parents))
+                              (not (ngit--has c ngit-uninteresting))) (car parents) c) replacements)))
+      (setq ngit--rv-commits (seq-filter (lambda (c) (eq (gethash c replacements) c)) ngit--rv-commits)))))
+
+(defun ngit--history-patch-key (c)
+  "Whitespace-insensitive patch identity used for cherry comparisons."
+  (when (= (length (ngit--c-orig-parents c)) 1)
+    (let ((p (car (ngit--c-orig-parents c))) (parts nil))
+      (ngit--parse p)
+      (dolist (ch (ngit-diff-trees ngit--rv-repo (ngit--tree-bin p) (ngit--tree-bin c)))
+        (push (concat (aref ch 0) (number-to-string (aref ch 2)) (number-to-string (aref ch 4))) parts)
+        (let* ((old (ngit--diff-blob ngit--rv-repo (aref ch 2) (aref ch 3)))
+               (new (ngit--diff-blob ngit--rv-repo (aref ch 4) (aref ch 5)))
+               (diff (cdr (assoc "diff" (ngit-attrs ngit--rv-repo (aref ch 0) '("diff")))))
+               ;; userdiff_find_by_path returns NULL for an unknown name;
+               ;; diff_filespec_load_driver then selects the default driver.
+               ;; Built-ins and any configured subsection are real drivers,
+               ;; even if their binary tristate has not been configured.
+               (driver (if (and (stringp diff)
+                                (or (member diff '("ada" "bash" "bibtex" "cpp" "csharp" "css"
+                                                   "dts" "elixir" "fortran" "fountain" "golang"
+                                                   "html" "java" "kotlin" "markdown" "matlab"
+                                                   "objc" "pascal" "perl" "php" "python"
+                                                   "ruby" "rust" "scheme" "tex" "default"))
+                                    (seq-some (lambda (e)
+                                                (let ((prefix (concat "diff." diff ".")))
+                                                  (and (string-prefix-p prefix (car e))
+                                                       (not (string-search "." (car e) (length prefix))))))
+                                              (ngit-config-entries ngit--rv-repo))))
+                           diff "default"))
+               (binary-key (concat "diff." driver ".binary"))
+               (driver-binary (unless (memq diff '(set unset))
+                                (ngit-config-get ngit--rv-repo binary-key)))
+               (binary (cond ((eq diff 'unset) t)
+                             ((eq diff 'set) nil)
+                             ;; userdiff's binary tristate overrides content
+                             ;; detection; patch IDs never run textconv.
+                             ((and driver-binary
+                                   (not (and (stringp driver-binary)
+                                             (string= (downcase driver-binary) "auto"))))
+                              (ngit--config-boolean-value driver-binary binary-key))
+                             ;; An unconfigured driver (even "binary") or
+                             ;; binary=auto uses ordinary content detection.
+                             (t (or (string-match-p "\0" (substring old 0 (min 8000 (length old))))
+                                    (string-match-p "\0" (substring new 0 (min 8000 (length new)))))))))
+          (if binary
+              ;; diff_get_patch_id hashes both object IDs for binary files,
+              ;; including a zero ID for a missing side. Do not strip bytes.
+              (push (concat "\0binary\0"
+                            (if (aref ch 3) (ngit-hex (aref ch 3)) (make-string 40 ?0))
+                            (if (aref ch 5) (ngit-hex (aref ch 5)) (make-string 40 ?0))) parts)
+            ;; Patch IDs omit hunk ranges, but include three lines of context.
+            (dolist (line (split-string (ngit-xdiff-unified old new 3) "\n"))
+              (when (and (> (length line) 0) (memq (aref line 0) '(?+ ?- ?\s)))
+                (push (replace-regexp-in-string "[ \t\r\n]" "" line) parts))))))
+      (and parts (apply #'concat (nreverse parts))))))
+
+(defun ngit--history-cherry ()
+  "Mark patch-equivalent commits on opposite sides of a symmetric walk."
+  (when ngit--rv-cherry
+    (let ((left (make-hash-table :test 'equal)) (right (make-hash-table :test 'equal)))
+      (dolist (c ngit--rv-commits)
+        (let ((key (ngit--history-patch-key c)))
+          (when key (puthash key (cons c (gethash key (if (ngit--has c ngit-symmetric-left) left right)))
+                            (if (ngit--has c ngit-symmetric-left) left right)))))
+      (maphash (lambda (key cs)
+                 (when (gethash key right)
+                   (dolist (c (append cs (gethash key right))) (ngit--set c ngit-patchsame)))) left)
+      (when (eq ngit--rv-cherry 'pick)
+        (setq ngit--rv-commits (seq-filter (lambda (c) (not (ngit--has c ngit-patchsame))) ngit--rv-commits))))))
+
 ;;;; Simplification (try_to_simplify_commit)
 
 (defun ngit--try-to-simplify (c)
-  (when ngit--rv-paths
+  (if ngit--rv-follow (ngit--follow-simplify c)
+   (when ngit--rv-paths
     (let ((repo ngit--rv-repo))
       (if (null (ngit--c-parents c))
           (unless (ngit--ps-tree-has-match repo (ngit--tree-bin c) "")
@@ -451,7 +687,7 @@ parsed entry by entry."
                     (setq rest (cdr rest) nth (1+ nth))))))
             (unless done
               (when (if (> relevant-parents 0) (not relevant-change) (not irrelevant-change))
-                (ngit--set c ngit-treesame)))))))))
+                (ngit--set c ngit-treesame))))))))))
 
 ;;;; Parents (process_parents)
 
@@ -652,15 +888,33 @@ parsed entry by entry."
           (ngit--set c ngit-seen)
           (push c list))))
     (setq ngit--rv-commits (ngit--sort-by-date (nreverse list))))
-  (when ngit--rv-topo (setq ngit--rv-limited t))
+  (when (or ngit--rv-topo ngit--rv-ancestry ngit--rv-cherry) (setq ngit--rv-limited t))
   (when ngit--rv-limited
     (ngit--limit-list)
+    (ngit--history-ancestry starts)
+    (ngit--history-cherry)
+    (ngit--history-simplify-merges)
     (when ngit--rv-topo
       (setq ngit--rv-commits (ngit--topo-sort ngit--rv-commits)))))
 
+(defun ngit--boundary-next ()
+  "Emit the parents of shown commits after the normal walk is exhausted."
+  (unless ngit--rv-boundary-phase
+    (setq ngit--rv-boundary-phase t
+          ngit--rv-boundary-list (ngit--topo-sort
+            (seq-filter (lambda (p) (not (ngit--has p ngit-shown))) ngit--rv-boundary-list))))
+  (let ((c (pop ngit--rv-boundary-list)))
+    (when c (ngit--set c ngit-boundary) (ngit--set c ngit-shown)) c))
+
 (defun ngit-walk-next ()
   "Return the next commit of the walk, or nil."
-  (ngit--get-revision-internal))
+  (if (not ngit--rv-boundary) (ngit--get-revision-internal)
+    (let ((c (and (not ngit--rv-boundary-phase) (ngit--get-revision-internal))))
+      (if (null c) (ngit--boundary-next)
+        (dolist (p (ngit--c-parents c))
+          (ngit--parse p)
+          (unless (or (ngit--has p ngit-shown) (memq p ngit--rv-boundary-list))
+            (push p ngit--rv-boundary-list))) c))))
 
 ;;;; Grep filter (--author, --committer, --grep)
 
@@ -709,10 +963,9 @@ Emacs regexp."
          (committers (plist-get opts :committer))
          (greps (plist-get opts :grep))
          (header-ok (and (or (null authors)
-                             (funcall hit authors (car (ngit--split-ident (ngit--c-author c)))))
+                             (funcall hit authors (ngit--grep-ident (ngit--c-author c))))
                          (or (null committers)
-                             (funcall hit committers
-                                      (car (ngit--split-ident (ngit--c-committer c)))))))
+                             (funcall hit committers (ngit--grep-ident (ngit--c-committer c))))))
          (body-ok
           (cond ((null greps) t)
                 ((plist-get opts :all-match)
@@ -724,6 +977,13 @@ Emacs regexp."
     (when (and greps (plist-get opts :invert))
       (setq body-ok (not (funcall hit greps (ngit--c-message c)))))
     (and header-ok body-ok)))
+
+(defun ngit--grep-ident (ident)
+  "Search the displayed identity, after optional mailmap rewriting."
+  (when ngit--pp-mailmap
+    (require 'ngit-mailmap)
+    (setq ident (ngit-mailmap-ident ngit--rv-repo ident)))
+  (car (ngit--split-ident ident)))
 
 ;;;; Dates
 
@@ -797,6 +1057,110 @@ Emacs regexp."
             (setq i (+ i 2))))))
     (apply #'concat (nreverse out))))
 
+(defun ngit--date-now ()
+  "Current seconds, honouring Git's deterministic date test hook."
+  (let ((test (getenv "GIT_TEST_DATE_NOW")))
+    (if test (string-to-number test) (floor (float-time)))))
+
+(defun ngit--date-unit (n unit)
+  (concat (number-to-string n) " " unit (if (= n 1) "" "s")))
+
+(defun ngit--relative-date (stamp)
+  "Git's rounded relative date, including the year/month transition."
+  (let ((diff (- (ngit--date-now) stamp)))
+    (cond
+     ((< diff 0) "in the future")
+     ((< diff 90) (concat (ngit--date-unit diff "second") " ago"))
+     (t
+      (setq diff (/ (+ diff 30) 60))
+      (cond
+       ((< diff 90) (concat (ngit--date-unit diff "minute") " ago"))
+       (t
+        (setq diff (/ (+ diff 30) 60))
+        (cond
+         ((< diff 36) (concat (ngit--date-unit diff "hour") " ago"))
+         (t
+          (setq diff (/ (+ diff 12) 24))
+          (concat
+           (cond
+            ((< diff 14) (ngit--date-unit diff "day"))
+            ((< diff 70) (ngit--date-unit (/ (+ diff 3) 7) "week"))
+            ((< diff 365) (ngit--date-unit (/ (+ diff 15) 30) "month"))
+            ((< diff 1825)
+             (let* ((months (/ (+ (* diff 24) 365) 730))
+                    (years (/ months 12)) (rest (% months 12)))
+               (concat (ngit--date-unit years "year")
+                       (if (= rest 0) "" (concat ", " (ngit--date-unit rest "month"))))))
+            (t (ngit--date-unit (/ (+ diff 183) 365) "year")))
+           " ago")))))))))
+
+(defun ngit--human-date (stamp tz local)
+  "Human date using local current time and the commit's original zone."
+  (let* ((now (ngit--date-now))
+         (now-off (ngit-local-offset now))
+         (tm (ngit--broken-down stamp (ngit--tz-seconds tz)))
+         (today (ngit--broken-down now now-off))
+         (same-year (= (aref tm 0) (aref today 0)))
+         (same-month (and same-year (= (aref tm 1) (aref today 1))))
+         (same-day (and same-month (= (aref tm 2) (aref today 2))))
+         (recent (and same-month (<= (aref tm 2) (aref today 2))
+                      (> (+ (aref tm 2) 5) (aref today 2)))))
+    (if same-day (ngit--relative-date stamp)
+      (concat
+       (if same-year (concat (aref ngit--days (aref tm 6)) " ") "")
+       (if recent "" (concat (aref ngit--months (1- (aref tm 1))) " "
+                                   (number-to-string (aref tm 2))))
+       (if same-year (concat (if recent "" " ") (ngit--pad2 (aref tm 3)) ":"
+                            (ngit--pad2 (aref tm 4)))
+         (concat " " (number-to-string (aref tm 0))))
+       (if (and recent (not local) (/= (ngit--tz-seconds tz) now-off))
+           (concat " " tz) "")))))
+
+(defun ngit--approximate-seconds (s)
+  "Parse relative date words in local civil time, as approxidate."
+  (let* ((s (downcase (string-trim s)))
+         (now (ngit--date-now)) (off (ngit-local-offset now))
+         (tm (ngit--broken-down now off))
+         (words (split-string s "[ .]+" t))
+         (units '(("second" . 1) ("minute" . 60) ("hour" . 3600)
+                  ("day" . 86400) ("week" . 604800)))
+         (numbers '("zero" "one" "two" "three" "four" "five" "six" "seven" "eight" "nine" "ten"))
+         (amount 0) (touched nil) (stamp now))
+    (cond
+     ((member s '("now" "never")) (if (string= s "never") 0 now))
+     ((string= s "yesterday") (- now 86400))
+     ((member s '("midnight" "noon" "tea"))
+      (- (+ (* (ngit--days-from-civil (aref tm 0) (aref tm 1) (aref tm 2)) 86400)
+            (cond ((string= s "noon") 43200) ((string= s "tea") 61200) (t 0))) off))
+     ((string-match "\\`\\(?:last \\)?\\(sunday\\|monday\\|tuesday\\|wednesday\\|thursday\\|friday\\|saturday\\)\\'" s)
+      (let* ((day (match-string 1 s))
+             (wd 0) (delta 0))
+        (while (not (string= day (downcase (aref ngit--full-days wd)))) (setq wd (1+ wd)))
+        (setq delta (mod (- (aref tm 6) wd) 7))
+        (- now (* (if (= delta 0) 7 delta) 86400))))
+     (t
+      (while words
+        (let* ((word (pop words))
+               (unit (assoc (string-remove-suffix "s" word) units))
+               (num (cl-position word numbers :test #'string=)))
+          (cond
+           ((string-match-p "\\`[0-9]+\\'" word) (setq amount (string-to-number word)))
+           (num (setq amount num))
+           ((string= word "last") (setq amount 1))
+           (unit (setq stamp (- stamp (* amount (cdr unit))) touched t amount 0))
+           ((member word '("month" "months" "year" "years"))
+            ;; Each calendar unit continues from the previous relative
+            ;; adjustment, including any intervening day/week subtraction.
+            (setq off (ngit-local-offset stamp) tm (ngit--broken-down stamp off))
+            (let* ((months (if (string-prefix-p "year" word) (* amount 12) amount))
+                   (total (- (+ (* (aref tm 0) 12) (1- (aref tm 1))) months))
+                   (year (floor total 12)) (month (1+ (mod total 12))))
+              (setq stamp (- (+ (* 86400 (ngit--days-from-civil year month (aref tm 2)))
+                                 (* 3600 (aref tm 3)) (* 60 (aref tm 4)) (aref tm 5)) off)
+                    touched t amount 0))))))
+      ;; Git uses the current time when no recognised date word was touched.
+      (if touched stamp now)))))
+
 (defun ngit-show-date (stamp tz mode)
   "Format STAMP (with zone string TZ) in date MODE, a cons (TYPE . LOCAL)
 with TYPE one of normal, iso, iso-strict, rfc, short, raw, unix or a
@@ -806,6 +1170,8 @@ strftime format string."
          (tz (if local (ngit--tz-string (ngit-local-offset stamp)) tz))
          (off (ngit--tz-seconds tz)))
     (cond
+     ((eq type 'relative) (ngit--relative-date stamp))
+     ((eq type 'human) (ngit--human-date stamp tz local))
      ((eq type 'unix) (number-to-string stamp))
      ((eq type 'raw) (concat (number-to-string stamp) " " tz))
      ((eq type 'normal)
@@ -845,8 +1211,6 @@ strftime format string."
       (when (and (null type) (string-prefix-p (car pair) s))
         (setq type (cdr pair) rest (substring s (length (car pair))))))
     (unless type (ngit--die "fatal: unknown date format %s" spec))
-    (when (memq type '(relative human))
-      (ngit--die "fatal: ngit does not support --date=%s" spec))
     (let ((local (string-prefix-p "-local" rest)))
       (when local (setq rest (substring rest 6)))
       (if (eq type 'format)
@@ -890,6 +1254,10 @@ strftime format string."
         ((string-prefix-p "refs/remotes/" name) (substring name 13))
         (t name)))
 
+(defun ngit--pretty-color (s color)
+  "Wrap S in an SGR COLOR when automatic pretty coloring is active."
+  (if (and ngit--pp-auto-color (not (string= s ""))) (concat "\e[" color "m" s "\e[m") s))
+
 (defun ngit-format-decorations (repo c prefix suffix)
   "Return C's decorations as git's format_decorations, or \"\"."
   (let ((decos (and ngit--decorations (gethash (ngit--c-hex c) ngit--decorations))))
@@ -905,15 +1273,183 @@ strftime format string."
              (parts nil))
         (dolist (d decos)
           (unless (eq d current)
-            (push (concat (if (eq (car d) 'tag) "tag: " "")
-                          (ngit--short-refname (cdr d))
-                          (if (and current (eq (car d) 'head))
-                              (concat " -> " (ngit--short-refname (cdr current)))
-                            ""))
-                  parts)))
-        (concat prefix (mapconcat #'identity (nreverse parts) ", ") suffix)))))
+            (push (concat
+                   (if (eq (car d) 'tag) (ngit--pretty-color "tag: " "1;33") "")
+                   (ngit--pretty-color
+                    (ngit--short-refname (cdr d))
+                    (pcase (car d) ('head "1;36") ('local "1;32") ('remote "1;31") ('tag "1;33") (_ "1;35")))
+                   (if (and current (eq (car d) 'head))
+                       (concat (ngit--pretty-color " -> " "33")
+                               (ngit--pretty-color (ngit--short-refname (cdr current)) "1;32")) "")) parts)))
+        (concat (ngit--pretty-color prefix "33")
+                (mapconcat #'identity (nreverse parts) (ngit--pretty-color ", " "33"))
+                (ngit--pretty-color suffix "33"))))))
 
 ;;;; Pretty printing
+
+(defvar ngit--pp-color nil)
+(defvar ngit--pp-auto-color nil)
+(defvar ngit--pp-mailmap nil)
+(defvar ngit--mailmap-cache nil)
+
+(defun ngit--format-color (spec)
+  "Return the ANSI SGR for Git's space separated color SPEC."
+  (let ((words (split-string spec " +" t)) (codes nil) (background nil))
+    (dolist (word words)
+      (let ((code (cdr (assoc word '(("normal" . -1) ("black" . 0) ("red" . 1)
+                                     ("green" . 2) ("yellow" . 3) ("blue" . 4)
+                                     ("magenta" . 5) ("cyan" . 6) ("white" . 7))))))
+        (cond
+         (code
+          (when (>= code 0) (push (number-to-string (+ (if background 40 30) code)) codes))
+          (setq background t))
+         ((string= word "reset") nil)
+         ((assoc word '(("bold" . "1") ("dim" . "2") ("italic" . "3")
+                       ("ul" . "4") ("blink" . "5") ("reverse" . "7") ("strike" . "9")))
+          (push (cdr (assoc word '(("bold" . "1") ("dim" . "2") ("italic" . "3")
+                                   ("ul" . "4") ("blink" . "5") ("reverse" . "7") ("strike" . "9")))) codes))
+         ((string-match-p "\\`[0-9]+\\'" word)
+          (push (concat (if background "48;5;" "38;5;") word) codes) (setq background t))
+         ((string-match-p "\\`#[0-9a-fA-F]\\{6\\}\\'" word)
+          (push (format "%s;2;%d;%d;%d" (if background "48" "38")
+                        (string-to-number (substring word 1 3) 16)
+                        (string-to-number (substring word 3 5) 16)
+                        (string-to-number (substring word 5 7) 16)) codes)
+          (setq background t))
+         (t (ngit--die "error: invalid color value: %s\nfatal: unable to parse --pretty format" spec)))))
+    (concat "\e[" (mapconcat #'identity (nreverse codes) ";") "m")))
+
+(defun ngit--format-unhex (s)
+  "Expand %xNN in a trailer separator."
+  (replace-regexp-in-string "%x\\([0-9a-fA-F][0-9a-fA-F]\\)"
+                            (lambda (m) (string (string-to-number (substring m 2) 16))) s t t))
+
+(defun ngit--format-trailers (c options)
+  "Format the final trailer paragraph, with Git's trailer options."
+  (let ((keys nil) (only nil) (unfold nil) (keyonly nil) (valueonly nil)
+        (separator nil) (kv ": ") (valid t) (out nil))
+    (dolist (option (and options (split-string options ",")))
+      (let* ((eq (string-search "=" option)) (key (if eq (substring option 0 eq) option))
+             (value (if eq (substring option (1+ eq)) "true"))
+             (bool (not (member value '("false" "no" "off" "0")))))
+        (pcase key
+          ("key" (push (downcase (string-remove-suffix ":" value)) keys) (setq only t))
+          ("only" (setq only bool)) ("unfold" (setq unfold bool))
+          ("keyonly" (setq keyonly bool)) ("valueonly" (setq valueonly bool))
+          ("separator" (setq separator (ngit--format-unhex value)))
+          ("key_value_separator" (setq kv (ngit--format-unhex value)))
+          (_ (setq valid nil)))))
+    (when valid
+      (let* ((message (ngit--c-message c))
+             ;; A patch separator ends the log message for trailer parsing.
+             (cut (string-search "\n---\n" message))
+             (lines (ngit--message-lines (string-trim-right (if cut (substring message 0 cut) message))))
+             (block nil) (trailers nil) (count 0) (total 0))
+        (while (and lines (not (string= (car (last lines)) "")))
+          (push (car (last lines)) block) (setq lines (butlast lines)))
+        ;; The subject alone is never a trailer block.
+        (when lines
+          (dolist (line block)
+            (setq total (1+ total))
+            (cond
+             ((string-match "\\`\\([^: \t]+\\)[ \t]*:[ \t]*\\(.*\\)\\'" line)
+              (push (cons (match-string 1 line) (match-string 2 line)) trailers)
+              (setq count (1+ count)))
+             ((and trailers (car (car trailers)) (string-match-p "\\`[ \t]" line))
+              (setcdr (car trailers) (concat (cdr (car trailers)) "\n" line)))
+             (t (push (cons nil line) trailers))))
+          (when (and (> count 0) (>= (* count 4) total))
+            (dolist (trailer (nreverse trailers))
+              (let ((key (car trailer)) (value (cdr trailer)))
+                (when (and (or key (not only))
+                           (or (null keys) (and key (member (downcase key) keys))))
+                  (when unfold
+                    (setq value (replace-regexp-in-string "\n[ \t]+" " " value)))
+                  (push (cond ((null key) value) (keyonly key) (valueonly value)
+                              (t (concat key kv value))) out))))))
+        (concat (mapconcat #'identity (nreverse out) (or separator "\n"))
+                (if (and out (null separator)) "\n" ""))))))
+
+(defun ngit--format-space-p (ch)
+  (and ch (memq ch '(?\s ?\t ?\n ?\r ?\f ?\v))))
+
+(defun ngit--format-wrap (text width indent1 indent2)
+  "Port strbuf_add_wrapped_text, including whitespace at joined newlines."
+  (let ((out nil) (pos 0) (n (length text)))
+    (if (<= width 0)
+        (let ((indent indent1))
+          (while (< pos n)
+            (let ((end (or (string-search "\n" text pos) n)))
+              (when (< end n) (setq end (1+ end)))
+              (push (concat (make-string (max 0 indent) ?\s) (substring text pos end)) out)
+              (setq pos end indent indent2))))
+      (let ((bol 0) (space nil) (indent indent1) (w (abs indent1)) (done nil))
+        (when (< indent1 0) (setq space 0))
+        (while (not done)
+          ;; ANSI display sequences do not consume columns.
+          (when (and (< pos n) (= (aref text pos) 27)
+                     (string-match "\\`\e\\[[0-9;]*m" (substring text pos)))
+            (setq pos (+ pos (match-end 0))))
+          (let ((ch (and (< pos n) (aref text pos))) (newline nil))
+            (if (or (null ch) (ngit--format-space-p ch))
+                (if (or (<= w width) (null space))
+                    (let ((start (or space bol)))
+                      (if (and (null ch) (= pos start)) (setq done t)
+                        (when (null space) (push (make-string (max 0 indent) ?\s) out))
+                        (push (substring text start pos) out)
+                        (if (null ch) (setq done t)
+                          (setq space pos)
+                          (cond
+                           ((= ch ?\t) (setq w (logior w 7)))
+                           ((= ch ?\n)
+                            (setq space (1+ space))
+                            (let ((next (and (< space n) (aref text space))))
+                              (cond ((eq next ?\n) (push "\n" out) (setq newline t))
+                                    ((not (and next (or (and (>= next ?a) (<= next ?z))
+                                                       (and (>= next ?A) (<= next ?Z))
+                                                       (and (>= next ?0) (<= next ?9)))))
+                                     (setq newline t))
+                                    (t (push " " out))))))
+                          (unless newline (setq w (1+ w) pos (1+ pos))))))
+                  (setq newline t))
+              (let* ((end (+ pos (cond ((< ch 128) 1) ((< ch 224) 2) ((< ch 240) 3) (t 4))))
+                     (end (min end n)))
+                (setq w (+ w (ngit--display-width (substring text pos end))) pos end)))
+            (when newline
+              (push "\n" out)
+              (setq pos (+ space (if (ngit--format-space-p (and (< space n) (aref text space))) 1 0))
+                    bol pos space nil w indent2 indent indent2))))))
+    (apply #'concat (nreverse out))))
+
+(defun ngit--format-replace-columns (s start width)
+  "Replace WIDTH columns at START with dots, retaining UTF-8 and ANSI SGR."
+  (let ((out nil) (pos 0) (column 0) (n (length s)) (dots nil))
+    (while (< pos n)
+      (if (and (= (aref s pos) 27) (string-match "\\`\e\\[[0-9;]*m" (substring s pos)))
+          (let ((end (+ pos (match-end 0))))
+            (push (substring s pos end) out) (setq pos end))
+        (let* ((ch (aref s pos))
+               (end (min n (+ pos (cond ((< ch 128) 1) ((< ch 224) 2) ((< ch 240) 3) (t 4)))))
+               (part (substring s pos end)) (columns (ngit--display-width part)))
+          (if (and (> columns 0) (>= column start) (< column (+ start width)))
+              (unless dots (push ".." out) (setq dots t))
+            (push part out))
+          (setq pos end column (+ column columns)))))
+    (apply #'concat (nreverse out))))
+
+(defun ngit--format-pad (s align width trunc)
+  "Pad or truncate S to WIDTH display columns."
+  (let* ((len (ngit--display-width (replace-regexp-in-string "\e\\[[0-9;]*m" "" s)))
+         (extra (- width len)))
+    (cond
+     ((>= extra 0)
+      (let ((left (cond ((string= align ">") extra) ((string= align "><") (/ extra 2)) (t 0))))
+        (concat (make-string left ?\s) s (make-string (- extra left) ?\s))))
+     ((and trunc (>= width 2))
+      (ngit--format-replace-columns
+       s (pcase trunc ("ltrunc" 0) ("mtrunc" (/ (- width 2) 2)) (_ (- width 2)))
+       (+ (- len width) 2)))
+     (t s))))
 
 (defvar ngit--pp-abbrev nil "Abbreviation length for %h etc., or nil for full names.")
 
@@ -985,6 +1521,9 @@ strftime format string."
     (apply #'concat (nreverse out))))
 
 (defun ngit--pp-user (what ident fmt date-mode)
+  (when ngit--pp-mailmap
+    (require 'ngit-mailmap)
+    (setq ident (ngit-mailmap-ident ngit--rv-repo ident)))
   (let* ((split (ngit--split-ident ident))
          (out (concat what ": " (if (eq fmt 'fuller) "    " "") (nth 0 split) "\n")))
     (pcase fmt
@@ -1024,6 +1563,9 @@ oneline) for commit C, as git's pretty_print_commit."
 
 (defun ngit--person-part (ident part date-mode)
   "Expand %aX / %cX for IDENT; return (STRING . CONSUMED) or nil."
+  (when (memq part '(?N ?E ?L))
+    (require 'ngit-mailmap)
+    (setq ident (ngit-mailmap-ident ngit--rv-repo ident)))
   (let* ((split (ngit--split-ident ident))
          (ne (nth 0 split))
          (lt (ngit--byte-pos ne ?< 0))
@@ -1033,6 +1575,7 @@ oneline) for commit C, as git's pretty_print_commit."
       ((or ?n ?N) name)
       ((or ?e ?E) mail)
       ((or ?l ?L) (let ((at (ngit--byte-pos mail ?@ 0))) (if at (substring mail 0 at) mail)))
+      (?r (ngit--relative-date (nth 1 split)))
       (?t (number-to-string (nth 1 split)))
       (?d (ngit-show-date (nth 1 split) (nth 2 split) date-mode))
       (?D (ngit-show-date (nth 1 split) (nth 2 split) '(rfc)))
@@ -1089,8 +1632,8 @@ oneline) for commit C, as git's pretty_print_commit."
               (let ((v (string-to-number (substring fmt (1+ i) (+ i 3)) 16)))
                 (cons (string v) 3))
             nil))
-      (?H (cons (ngit--c-hex c) 1))
-      (?h (cons (ngit-abbrev ngit--rv-repo (ngit--c-hex c) ngit--pp-abbrev-format) 1))
+      (?H (cons (ngit--pretty-color (ngit--c-hex c) "33") 1))
+      (?h (cons (ngit--pretty-color (ngit-abbrev ngit--rv-repo (ngit--c-hex c) ngit--pp-abbrev-format) "33") 1))
       (?T (cons (ngit--c-tree c) 1))
       (?t (cons (ngit-abbrev ngit--rv-repo (ngit--c-tree c) ngit--pp-abbrev-format) 1))
       (?P (cons (mapconcat (lambda (p) (ngit--c-hex p)) (ngit--c-parents c) " ") 1))
@@ -1101,6 +1644,7 @@ oneline) for commit C, as git's pretty_print_commit."
       (?D (cons (ngit-format-decorations ngit--rv-repo c "" "") 1))
       (?m (cons (cond ((ngit--has c ngit-boundary) "-")
                       ((ngit--has c ngit-uninteresting) "^")
+                      ((ngit--has c ngit-patchsame) "=")
                       ((ngit--has c ngit-symmetric-left) "<")
                       (t ">"))
                 1))
@@ -1118,22 +1662,34 @@ oneline) for commit C, as git's pretty_print_commit."
                    (or (car lines) "")))
                 1))
       (?b (cons (ngit--body-text c) 1))
-      (?C (cond ((string-prefix-p "(auto)" (substring fmt (1+ i))) '("" . 7))
-                ((string-prefix-p "reset" (substring fmt (1+ i))) '("" . 6))
-                ((string-prefix-p "red" (substring fmt (1+ i))) '("" . 4))
-                ((string-prefix-p "green" (substring fmt (1+ i))) '("" . 6))
-                ((string-prefix-p "blue" (substring fmt (1+ i))) '("" . 5))
-                ((and next (= next ?\())
-                 (let ((close (ngit--byte-pos fmt ?\) i)))
-                   (and close (cons "" (- close i -1)))))
-                (t nil)))
+      (?\( (when (string-prefix-p "(trailers" (substring fmt i))
+              (let ((close (string-search ")" fmt i)))
+                (when close
+                  (let* ((spec (substring fmt (+ i 9) close))
+                         (value (and (or (string= spec "") (string-prefix-p ":" spec))
+                                     (ngit--format-trailers c (and (> (length spec) 0) (substring spec 1))))))
+                    (and value (cons value (- close i -1))))))))
+      (?C (let ((spec nil) (consumed nil) (force nil))
+            (cond
+             ((and next (= next ?\())
+              (let ((close (string-search ")" fmt i)))
+                (when close (setq spec (substring fmt (+ i 2) close) consumed (- close i -1)))))
+             (t (dolist (name '("reset" "red" "green" "blue"))
+                  (when (string-prefix-p name (substring fmt (1+ i)))
+                    (setq spec name consumed (1+ (length name)))))))
+            (when spec
+              (cond ((string-prefix-p "always," spec) (setq force t spec (substring spec 7)))
+                    ((string-prefix-p "auto," spec) (setq spec (substring spec 5))))
+              (setq ngit--pp-auto-color (and (string= spec "auto") ngit--pp-color))
+              (cons (if (or (string= spec "auto") (not (or force ngit--pp-color))) ""
+                      (ngit--format-color spec)) consumed))))
       (_ nil))))
 
 (defvar ngit--pp-abbrev-format nil "Abbreviation length for user formats (nil = default).")
 
 (defun ngit-format-user (c fmt date-mode)
-  "Expand user format FMT for commit C, as git's repo_format_commit_message."
-  (let ((out nil) (i 0) (n (length fmt)))
+  "Expand a user pretty format, including stateful wrapping and padding."
+  (let ((out nil) (finished nil) (i 0) (n (length fmt)) (wrap nil) (pad nil) (ngit--pp-auto-color nil))
     (while (< i n)
       (let ((pct (ngit--byte-pos fmt ?% i)))
         (if (null pct)
@@ -1143,6 +1699,19 @@ oneline) for commit C, as git's pretty_print_commit."
           (cond
            ((>= i n) (push "%" out))
            ((= (aref fmt i) ?%) (push "%" out) (setq i (1+ i)))
+           ((string-match "\\`w(\\([0-9]*\\)\\(?:,\\([0-9]*\\)\\)?\\(?:,\\([0-9]*\\)\\)?)" (substring fmt i))
+            (let* ((spec (substring fmt i))
+                   (consumed (match-end 0))
+                   (width (match-string 1 spec)) (one (match-string 2 spec)) (two (match-string 3 spec))
+                   (text (apply #'concat (nreverse out))))
+              (push (if wrap (apply #'ngit--format-wrap text wrap) text) finished)
+              (setq out nil wrap (list (if (string= width "") 0 (string-to-number width))
+                                       (string-to-number (or one "0")) (string-to-number (or two "0")))
+                    i (+ i consumed))))
+           ((string-match "\\`\\(<\\|><\\|>\\)(\\([0-9]+\\)\\(?:,\\(trunc\\|ltrunc\\|mtrunc\\)\\)?)" (substring fmt i))
+            (let ((spec (substring fmt i)) (consumed (match-end 0)))
+              (setq pad (list (match-string 1 spec) (string-to-number (match-string 2 spec)) (match-string 3 spec))
+                    i (+ i consumed))))
            (t
             (let* ((magic (and (memq (aref fmt i) '(?+ ?- ?\s)) (< (1+ i) n) (aref fmt i)))
                    (at (if magic (1+ i) i))
@@ -1150,11 +1719,16 @@ oneline) for commit C, as git's pretty_print_commit."
               (if (null r)
                   (push "%" out)
                 (let ((s (car r)))
+                  (when (and ngit--pp-auto-color (= (aref fmt at) ?C)
+                             (string-prefix-p "C(auto)" (substring fmt at))
+                             (or finished (seq-some (lambda (part) (> (length part) 0)) out)))
+                    (setq s "\e[m"))
+                  (when (and pad (/= (aref fmt at) ?C))
+                    (setq s (apply #'ngit--format-pad s pad) pad nil))
                   (cond
                    ((null magic) (push s out))
                    ((= magic ?-)
                     (if (string= s "")
-                        ;; Delete the line feeds before an empty expansion.
                         (let ((acc (apply #'concat (nreverse out))))
                           (while (and (> (length acc) 0) (= (aref acc (1- (length acc))) ?\n))
                             (setq acc (substring acc 0 -1)))
@@ -1164,7 +1738,9 @@ oneline) for commit C, as git's pretty_print_commit."
                    ((= magic ?+) (push (concat "\n" s) out))
                    (t (push (concat " " s) out)))
                   (setq i (+ at (cdr r)))))))))))
-    (apply #'concat (nreverse out))))
+    (let ((text (apply #'concat (nreverse out))))
+      (push (if wrap (apply #'ngit--format-wrap text wrap) text) finished))
+    (apply #'concat (nreverse finished))))
 
 ;;;; Merge bases (commit-reach.c)
 
@@ -1553,7 +2129,11 @@ the new PENDING, or the symbol `not-a-rev'."
   (unless (ngit--g-needs-pre-commit-line) (ngit--g-update-state 'commit)))
 
 (defun ngit--g-output-commit-char ()
-  (ngit--gl-addstr (if (ngit--has ngit--g-commit ngit-boundary) "o" "*")))
+  (ngit--gl-addstr (cond ((ngit--has ngit--g-commit ngit-boundary) "o")
+                         ((ngit--has ngit--g-commit ngit-patchsame) "=")
+                         (ngit--rv-left-right (if (ngit--has ngit--g-commit ngit-symmetric-left) "<" ">"))
+                         ((eq ngit--rv-cherry 'mark) "+")
+                         (t "*"))))
 
 (defun ngit--g-draw-octopus-merge ()
   (let ((dashed (ngit--g-num-dashed-parents)))
@@ -1757,8 +2337,9 @@ the new PENDING, or the symbol `not-a-rev'."
 
 (defun ngit--log-changes (repo c)
   "The changes log shows for commit C, or nil when it shows no diff."
-  (let* ((parents (ngit--c-parents c))
-         (base (cond ((null parents) (if ngit--ld-show-root 'root 'none))
+  (if ngit--rv-follow (gethash c ngit--rv-follow-changes)
+   (let* ((parents (ngit--c-parents c))
+         (base (cond (ngit--ld-parent ngit--ld-parent) ((null parents) (if ngit--ld-show-root 'root 'none))
                      ((and (cdr parents) (not ngit--rv-first-parent)) 'none)
                      (t (car parents)))))
     (unless (eq base 'none)
@@ -1772,7 +2353,7 @@ the new PENDING, or the symbol `not-a-rev'."
                                     changes)))
         (when ngit--ld-renames
           (setq changes (ngit-diffcore-rename repo changes)))
-        changes))))
+        changes)))))
 
 (defun ngit--decimal-width (n)
   (length (number-to-string n)))
@@ -1808,7 +2389,7 @@ cases: combining marks are zero and East Asian wide characters two."
       w)))
 
 (defun ngit--stat-print-name (c)
-  (if (= (aref c 1) ?R)
+  (if (memq (aref c 1) '(?R ?C))
       (ngit--pprint-rename (aref c 8) (aref c 0))
     (ngit-quote-path (aref c 0))))
 
@@ -1924,7 +2505,8 @@ cases: combining marks are zero and East Asian wide characters two."
       (pcase status
         (?A (ngit--emit (format " create mode %06o %s\n" nm (ngit-quote-path path))))
         (?D (ngit--emit (format " delete mode %06o %s\n" om (ngit-quote-path path))))
-        (?R (ngit--emit (format " rename %s (%d%%)\n" (ngit--pprint-rename (aref c 8) path)
+        ((or ?R ?C) (ngit--emit (format " %s %s (%d%%)\n" (if (= status ?C) "copy" "rename")
+                                (ngit--pprint-rename (aref c 8) path)
                                 (ngit-similarity-percent c)))
             (unless (= om nm)
               (ngit--emit (format " mode change %06o => %06o\n" om nm))))
@@ -1938,8 +2520,8 @@ cases: combining marks are zero and East Asian wide characters two."
     (when (or (memq 'name-only fmts) (memq 'name-status fmts))
       (dolist (c changes)
         (if (memq 'name-status fmts)
-            (ngit--emit (if (= (aref c 1) ?R)
-                            (format "R%03d\t%s\t" (ngit-similarity-percent c)
+            (ngit--emit (if (memq (aref c 1) '(?R ?C))
+                            (format "%c%03d\t%s\t" (aref c 1) (ngit-similarity-percent c)
                                     (ngit-quote-path (aref c 8)))
                           (concat (string (aref c 1)) "\t"))
                         (ngit-quote-path (aref c 0)) "\n")
@@ -1959,15 +2541,64 @@ cases: combining marks are zero and East Asian wide characters two."
             (ngit--emit (ngit--stat-summary-line (length entries) adds dels)))))
       (setq sep (1+ sep)))
     (when (and (memq 'summary fmts)
-               (seq-find (lambda (c) (or (memq (aref c 1) '(?A ?D ?R)) (/= (aref c 2) (aref c 4))))
+               (seq-find (lambda (c) (or (memq (aref c 1) '(?A ?D ?R ?C)) (/= (aref c 2) (aref c 4))))
                          changes))
       (ngit--emit-summary changes)
       (setq sep (1+ sep)))
     (when (memq 'patch fmts)
       (when (> sep 0) (ngit--emit "\n"))
-      (dolist (c changes) (ngit--emit-patch repo c ngit--ld-context)))))
+      (dolist (c changes)
+        (if (/= (aref c 1) ?C) (ngit--emit-patch repo c ngit--ld-context)
+          ;; The shared patch emitter handles rename file pairs. Only the
+          ;; extended header wording differs for a followed copy.
+          (let* ((renamed (copy-sequence c))
+                 (text (let ((ngit--out nil))
+                         (aset renamed 1 ?R)
+                         (ngit--emit-patch repo renamed ngit--ld-context)
+                         (apply #'concat (nreverse ngit--out)))))
+            (ngit--emit (replace-regexp-in-string "^rename \\(from\\|to\\) " "copy \\1 " text))))))))
 
 ;;;; log
+
+(defun ngit--color-log-diff (text)
+  "Apply the default Git colors to log's patch and stat output."
+  (if (not ngit--pp-color) text
+    (let ((patch nil) (parents 2) (out nil))
+      (dolist (line (split-string text "\n"))
+        (push
+         (cond
+          ((string-prefix-p "diff --" line)
+           (setq patch (if (or (string-prefix-p "diff --cc " line) (string-prefix-p "diff --combined " line)) 'combined t))
+           (concat "\e[1m" line "\e[m"))
+          ((and patch (string-match-p "\\`\\(?:index \\|old mode \\|new mode \\|deleted file mode \\|new file mode \\|similarity index \\|dissimilarity index \\|rename from \\|rename to \\|copy from \\|copy to \\|--- \\|+++ \\)" line))
+           (concat "\e[1m" line "\e[m"))
+          ((and patch (string-match "\\`\\(@@+[^@]+@@+\\)\\(.*\\)\\'" line))
+           (let ((range (match-string 1 line)) (tail (match-string 2 line)))
+             (when (eq patch 'combined)
+               (setq parents (1- (or (string-search " " range) 3))))
+             (concat "\e[36m" range "\e[m"
+                     (if (string= tail "") ""
+                       (concat (substring tail 0 1) "\e[m" (substring tail 1) "\e[m")))))
+          ((and (eq patch 'combined) (string-prefix-p "mode " line)) (concat line "\e[m"))
+          ((and (eq patch 'combined) (>= (length line) parents)
+                (string-match-p "\\`[ +-]+\\'" (substring line 0 parents)))
+           (let* ((prefix (substring line 0 parents))
+                  (color (cond ((string-search "-" prefix) "\e[31m")
+                               ((string-search "+" prefix) "\e[32m") (t ""))))
+             (concat color line "\e[m")))
+          ((and patch (> (length line) 0) (memq (aref line 0) '(?+ ?-)))
+           (let ((color (if (= (aref line 0) ?+) "\e[32m" "\e[31m")))
+             (concat color (substring line 0 1) "\e[m"
+                     (if (> (length line) 1) (concat color (substring line 1) "\e[m") ""))))
+          ((and patch (string-prefix-p " " line)) (concat line "\e[m"))
+          ((and (not patch) (string-match "\\`\\(.* | +[0-9]+ +\\)\\([+-]+\\)\\'" line))
+           (let ((prefix (match-string 1 line)) (graph (match-string 2 line)))
+             (concat prefix
+                     (replace-regexp-in-string
+                      "-+" (lambda (run) (concat "\e[31m" run "\e[m"))
+                      (replace-regexp-in-string "[+]+" (lambda (run) (concat "\e[32m" run "\e[m")) graph t t) t t))))
+          (t line)) out))
+      (mapconcat #'identity (nreverse out) "\n"))))
 
 (defun ngit--log-opt-value (a name args)
   "Value of option NAME given as A (\"NAME=V\" or \"NAME\" V); return
@@ -1979,9 +2610,11 @@ cases: combining marks are zero and East Asian wide characters two."
          (cons (car args) (cdr args)))))
 
 (defun ngit--parse-approxidate (s)
-  "Parse a --since/--until value: \"@STAMP\", \"STAMP [TZ]\" or ISO 8601 with a time."
-  (let ((parsed (ngit--parse-date (if (string-prefix-p "@" s) (substring s 1) s))))
-    (string-to-number (car (split-string parsed " ")))))
+  "Parse absolute and approximate revision date limits."
+  (condition-case nil
+      (let ((parsed (ngit--parse-date (if (string-prefix-p "@" s) (substring s 1) s))))
+        (string-to-number (car (split-string parsed " "))))
+    (ngit-fatal (ngit--approximate-seconds s))))
 
 (defun ngit--log-pathspec (repo paths)
   "Pathspec items for PATHS given relative to the current directory."
@@ -2021,7 +2654,16 @@ cases: combining marks are zero and East Asian wide characters two."
                           (t nil))))
         (decorate-given nil)
         (grep nil) (grep-mode 'basic)
-        (print-parents nil) (graph nil))
+        (print-parents nil) (graph nil)
+        (ngit--rv-follow nil) (ngit--rv-follow-paths nil)
+        (ngit--rv-follow-changes nil)
+        (ngit--rv-simplify-merges nil) (ngit--rv-ancestry nil)
+        (ngit--rv-left-right nil) (ngit--rv-cherry nil)
+        (ngit--rv-boundary nil) (ngit--rv-boundary-list nil) (ngit--rv-boundary-phase nil)
+        (ngit--ld-merge (and ngit--log-show-state 'dense)) (ngit--ld-parent nil)
+        (ngit--pp-color (member (ngit-config-get repo "color.ui") '("always")))
+        (ngit--pp-mailmap (ngit-config-bool repo "log.mailmap" t))
+        (ngit--mailmap-cache nil))
     (setq ngit--rv-repo repo
           ngit--rv-no-walk (and ngit--log-show-state (aref ngit--log-show-state 1))
           ngit--rv-commits nil ngit--rv-limited nil ngit--rv-first-parent nil
@@ -2045,6 +2687,31 @@ cases: combining marks are zero and East Asian wide characters two."
           (setq ngit--rv-max-count (string-to-number (car v)) args (cdr v)))
          ((setq v (ngit--log-opt-value a "--skip" args))
           (setq ngit--rv-skip (string-to-number (car v)) args (cdr v)))
+         ((string= a "--follow") (setq ngit--rv-follow t))
+         ((string= a "--no-follow") (setq ngit--rv-follow nil))
+         ((member a '("--use-mailmap" "--mailmap")) (setq ngit--pp-mailmap t))
+         ((member a '("--no-use-mailmap" "--no-mailmap")) (setq ngit--pp-mailmap nil))
+         ((or (string= a "--color") (string-prefix-p "--color=" a) (string= a "--no-color"))
+          (let ((value (cond ((string= a "--color") "always") ((string= a "--no-color") "never")
+                             (t (substring a 8)))))
+            (unless (member value '("always" "never" "auto")) (ngit--die "fatal: option `color' expects \"always\", \"auto\", or \"never\""))
+            (setq ngit--pp-color (string= value "always"))))
+         ((string= a "-m") (setq ngit--ld-merge 'separate ngit--rv-simplify-history nil))
+         ((member a '("--cc" "-c"))
+          (require 'ngit-show)
+          (setq ngit--ld-merge (if (string= a "--cc") 'dense 'combined)))
+         ((string= a "--simplify-merges")
+          (setq ngit--rv-simplify-merges t ngit--rv-simplify-history nil ngit--rv-rewrite-parents t)
+          (unless ngit--rv-topo (setq ngit--rv-topo 'graph)))
+         ((string= a "--ancestry-path") (unless ngit--rv-ancestry (setq ngit--rv-ancestry t)))
+         ((string-prefix-p "--ancestry-path=" a)
+          (let ((c (ngit--rev-commit repo (substring a 16))))
+            (unless c (ngit--die "fatal: bad revision '%s'" (substring a 16)))
+            (setq ngit--rv-ancestry (cons c (and (listp ngit--rv-ancestry) ngit--rv-ancestry)))))
+         ((string= a "--boundary") (setq ngit--rv-boundary t))
+         ((string= a "--left-right") (setq ngit--rv-left-right t))
+         ((member a '("--cherry-pick" "--cherry-mark"))
+          (setq ngit--rv-cherry (if (string= a "--cherry-pick") 'pick 'mark)))
          ((string= a "--reverse") (setq ngit--rv-reverse t))
          ;; log accepts revision object-walk flags but only displays commits.
          ((string= a "--objects") nil)
@@ -2156,6 +2823,8 @@ cases: combining marks are zero and East Asian wide characters two."
                        (ngit--die "fatal: %s: no such path in the working tree.\nUse 'git <command> -- <path>...' to specify paths that do not exist locally." rest)))
                    (setq paths (append paths (delete "--" args)) args nil))
                   (t (ngit--bad-revision a))))))))
+    (when (and (memq ngit--ld-merge '(dense combined)) (not ngit--ld-formats) (not no-output))
+      (push 'patch ngit--ld-formats))
     (when (or (memq 'name-only ngit--ld-formats) (memq 'name-status ngit--ld-formats))
       (when (or no-output (and (memq 'name-only ngit--ld-formats) (memq 'name-status ngit--ld-formats)))
         (ngit--die "fatal: options '--name-only', '--name-status', '--check', and '-s' cannot be used together"))
@@ -2169,8 +2838,24 @@ cases: combining marks are zero and East Asian wide characters two."
       (setq ngit--rv-rewrite-parents t))
     (when grep
       (setq ngit--rv-grep (plist-put grep :mode grep-mode)))
+    (when ngit--pp-mailmap
+      (setq ngit--pp-mailmap
+            (or (ngit-config-get repo "mailmap.file") (ngit-config-get repo "mailmap.blob")
+                (not (ngit-repo-toplevel repo))
+                (file-exists-p (expand-file-name ".mailmap" (ngit-repo-toplevel repo))))))
+    (when ngit--rv-follow
+      (setq ngit--rv-follow-paths (make-hash-table :test 'eq)
+            ngit--rv-follow-changes (make-hash-table :test 'eq))
+      (unless (= (length paths) 1) (ngit--die "fatal: --follow requires exactly one pathspec")))
     (when paths
       (setq ngit--rv-paths (ngit--log-pathspec repo paths)))
+    (when ngit--rv-follow
+      (setq ngit--rv-follow
+            (if (eq (cdar ngit--rv-paths) 'magic)
+                (let ((items (caar ngit--rv-paths)))
+                  (unless (= (length items) 1) (ngit--die "fatal: --follow requires exactly one pathspec"))
+                  (aref (car items) 0))
+              (caar ngit--rv-paths))))
     ;; Default revision, unless a revision option was given (even one that
     ;; named no commits).
     (unless (or pending seen-rev)
@@ -2229,11 +2914,18 @@ cases: combining marks are zero and East Asian wide characters two."
                 (setq c (pop commits)))
             (setq c (ngit-walk-next)))
           (while c
-            (when ngit--graph (ngit-graph-update c))
-            (let* ((hex (ngit--c-hex c))
-                   (combined (and ngit--log-show-state ngit--ld-formats
+            (let ((entries (if (and (eq ngit--ld-merge 'separate) ngit--ld-formats
+                                          (not ngit--rv-first-parent)
+                                          (cdr (ngit--c-parents c)))
+                                     (ngit--c-parents c) (list nil))))
+             (dolist (parent entries)
+              (when ngit--graph (ngit-graph-update c))
+            (let* ((ngit--ld-parent parent)
+                   (hex (ngit--c-hex c))
+                   (combined (and (memq ngit--ld-merge '(dense combined)) ngit--ld-formats
                                   (cdr (ngit--c-parents c)) (not ngit--rv-first-parent)))
                    (changes (and ngit--ld-formats (ngit--log-changes repo c))))
+              (when (or (null parent) changes)
               ;; show_log
               (when (and shown-one (not terminator))
                 (unless missing-newline (ngit-graph-show-padding))
@@ -2243,7 +2935,14 @@ cases: combining marks are zero and East Asian wide characters two."
               (ngit-graph-show-commit)
               (unless user
                 (ngit--emit
+                 (if ngit--pp-color "\e[33m" "")
                  (if (eq pretty 'oneline) "" "commit ")
+                 (cond (ngit--graph "")
+                       ((ngit--has c ngit-boundary) "- ")
+                       ((ngit--has c ngit-patchsame) "= ")
+                       (ngit--rv-left-right (if (ngit--has c ngit-symmetric-left) "< " "> "))
+                       ((eq ngit--rv-cherry 'mark) "+ ")
+                       (t ""))
                  (if commit-abbrev (ngit-abbrev repo hex commit-abbrev) hex)
                  (if print-parents
                      (mapconcat (lambda (p) (concat " " (if commit-abbrev
@@ -2251,7 +2950,12 @@ cases: combining marks are zero and East Asian wide characters two."
                                                            (ngit--c-hex p))))
                                 (ngit--c-parents c) "")
                    "")
-                 (if decorate (ngit-format-decorations repo c " (" ")") ""))
+                 (if (and parent (not (eq pretty 'oneline)))
+                     (concat " (from " (if commit-abbrev (ngit-abbrev repo (ngit--c-hex parent) commit-abbrev)
+                                          (ngit--c-hex parent)) ")") "")
+                 (if ngit--pp-color "\e[m" "")
+                 (if decorate
+                     (let ((ngit--pp-auto-color ngit--pp-color)) (ngit-format-decorations repo c " (" ")")) ""))
                 (if (eq pretty 'oneline)
                     (ngit--emit " ")
                   (ngit--emit "\n")
@@ -2277,9 +2981,20 @@ cases: combining marks are zero and East Asian wide characters two."
                               (if combined (ngit--show-merge-diff repo c)
                                 (ngit--emit-log-diff repo changes))
                               (apply #'concat (nreverse ngit--out)))))
+                  (when ngit--pp-color (setq text (ngit--color-log-diff text)))
                   (if ngit--graph (ngit--graph-prefix-lines text) (ngit--emit text)))))
+              )))
             (setq c (if ngit--rv-reverse (pop commits) (ngit-walk-next)))))))
     0))
+
+(defun ngit--shortlog-with-mailmap (repo args)
+  "Load identity mapping only when shortlog is invoked."
+  (require 'ngit-mailmap)
+  (ngit-mailmap-shortlog repo args))
+
+;; Keep shortlog's existing parser/grouping in ngit-describe; its dispatcher
+;; wrapper scopes mapping to the identity accessor, leaving commit objects raw.
+(setcdr (assoc "shortlog" ngit--commands) #'ngit--shortlog-with-mailmap)
 
 (provide 'ngit-log)
 

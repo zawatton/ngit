@@ -146,19 +146,27 @@ def baseline(base=BASE):
                           capture_output=True, text=True).stdout.strip()
     if head != base:
         fail("baseline checkout is at %s, not %s" % (head, base))
-    # build-elc.sh finds nelisp beside the checkout, which a nested worktree
-    # lacks, so the baseline runs from source; the result does not depend on it.
+    # A nested worktree finds nelisp only through NGIT_NELISP_ROOT; byte code
+    # keeps the slow source mode from exhausting the deadline.
+    if run(["sh", "tools/build-elc.sh"], tree,
+           suite_environment(NGIT_NELISP_ROOT=str(ROOT.parent / "nelisp")), timeout=300)[0]:
+        fail("baseline byte compilation failed")
     return tree
 
 
-def controls(base=BASE, modes=MODES[:14], grown=GROWN):
+def controls(base=BASE, modes=MODES[:14], grown=GROWN, end="5db0c7f"):
     TASK.mkdir(parents=True, exist_ok=True)
-    changed = subprocess.run(["git", "diff", "--name-only", "--diff-filter=MDT", base, "--", "test"], cwd=ROOT,
+    # The guard covers the objective's own commit (END); later objectives
+    # may change shared suites such as test/compare.sh.
+    changed = subprocess.run(["git", "diff", "--name-only", "--diff-filter=MDT", base, end, "--", "test"], cwd=ROOT,
                              capture_output=True, text=True).stdout.split()
     # Deleted files count as changed, so a removed test cannot pass this check.
     if set(changed) - grown:
         fail("test sources present at the baseline changed: %s" % sorted(set(changed) - grown))
     old = str(baseline(base) / "bin/ngit")
+    # A nested baseline cannot find ../../nelisp, and the suites strip NGIT_*
+    # from their environment, so the root travels inside the command.
+    old = "env NGIT_NELISP_ROOT=%s %s" % (ROOT.parent / "nelisp", old)
     jobs = [(m, "git", {"NGIT_PV2_COMMAND": "git"}) for m in modes] + \
            [(m, "baseline", {"NGIT_PV2_COMMAND": old}) for m in modes]
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -177,7 +185,9 @@ def controls(base=BASE, modes=MODES[:14], grown=GROWN):
         # A red baseline must come from compared cases, not from a crashed
         # suite or command: it exits 1 having run every case the floor counts,
         # with no case ending in a crash or timeout.
-        if label == "baseline" and (r["rc"] != 1 or r["unexpected_errors"]
+        # Unexpected errors on the baseline can be the very defects fixed
+        # here; only a run whose failures are all crashes is rejected.
+        if label == "baseline" and (r["rc"] != 1 or r["failures"] <= r["unexpected_errors"]
                                     or r["comparisons"] < FLOORS.get(mode, 1)):
             bad.append("baseline %s: rc=%d with %d comparisons is not a compared failure"
                        % (mode, r["rc"], r["comparisons"]))
@@ -280,7 +290,8 @@ if __name__ == "__main__":
         {"controls": controls,
          "controls-followups": lambda: controls(FOLLOWUP_BASE, FOLLOWUP_MODES,
                                                 {"test/protocol-v2.py",
-                                                 "test/smart-http-fixture.py"}),
+                                                 "test/smart-http-fixture.py"},
+                                                "60924e0"),
          "differences": differences, "regression": lambda: regression(*sys.argv[2:3]),
          "e2e": e2e}.get(mode, lambda: fail("usage: protocol-v2-verify.py "
                                            "controls|mode MODE|differences|regression|e2e"))()

@@ -9,10 +9,12 @@
 (require 'ngit-status)
 (require 'ngit-add)
 
-(defun ngit-ls-files--walk (repo top entries dir stack standard ignored inherited &optional items)
-  "List untracked files below DIR, retaining inherited ignore decisions."
+(defun ngit-ls-files--walk (repo top entries dir stack standard ignored inherited
+                                     &optional items directory noempty matching)
+  "List other paths, preserving inherited exclusions and directory boundaries."
   (let* ((abs (concat top (decode-coding-string dir 'utf-8)))
-         (own (and standard (ngit-read-ignore-file (concat abs ".gitignore") dir t)))
+         (own (and standard (not inherited)
+                   (ngit-read-ignore-file (concat abs ".gitignore") dir t)))
          (stack (if own (cons (ngit-compile-ignore own) stack) stack))
          (out nil))
     (dolist (name (ngit--dir-names abs))
@@ -20,22 +22,37 @@
              (dirp (and st (= (logand (aref st 0) ngit-s-ifmt) ngit-s-ifdir)))
              (excluded (or inherited (and standard (ngit-excluded-p stack path (length dir) dirp)))))
         (when (and st (not (ngit-index-lookup entries path)))
-          (if dirp
-              (unless (or (and (not ignored) excluded)
-                          (and items (not excluded) (not (ngit-index-dir-p entries (concat path "/")))
-                               (not (ngit-pathspec-untracked-class items path))))
-                (if (ngit-wt-lstat (concat path "/.git"))
-                    (when (eq (and excluded t) (and ignored t)) (push (concat path "/") out))
-                  (setq out (append (ngit-ls-files--walk repo top entries (concat path "/")
-                                                        stack standard ignored excluded items) out))))
-            (when (eq (and excluded t) (and ignored t)) (push path out))))))
+          (if (not dirp)
+              (when (eq (and excluded t) (and ignored t)) (push path out))
+            (unless (or (and (not ignored) excluded)
+                        (and items (not excluded) (not (ngit-index-dir-p entries (concat path "/")))
+                             (not (ngit-pathspec-untracked-class items path))))
+              (let* ((tracked (ngit-index-dir-p entries (concat path "/")))
+                     (nested (ngit-wt-lstat (concat path "/.git")))
+                     (children (unless nested
+                                 (ngit-ls-files--walk repo top entries (concat path "/")
+                                                      stack standard ignored excluded items
+                                                      directory noempty matching))))
+                (cond
+                 ((and (not tracked) (eq (and excluded t) (and ignored t))
+                       (or nested
+                           (and directory (or (not items)
+                                              (eq (ngit-pathspec-untracked-class items path) 'full)))
+                           (and (eq matching t) excluded)))
+                  (when (or nested children (not noempty)) (push (concat path "/") out)))
+                 ((and directory ignored (eq matching 'traditional) (not tracked) children
+                       (not (ngit-ls-files--walk repo top entries (concat path "/") stack
+                                                standard nil excluded items nil t nil)))
+                  (push (concat path "/") out))
+                 ((and ignored directory noempty (not matching) (not tracked) (not excluded)) nil)
+                 (t (setq out (append children out))))))))))
     out))
 
 ;;;###autoload
 (defun ngit-cmd-list-files (repo args)
   "Implement ls-files selection and invocation-relative display."
   (let ((stage nil) (unmerged nil) (modified nil) (deleted nil) (others nil)
-        (cached nil) (standard nil) (ignored nil) (full nil) (nul nil) (paths nil))
+        (directory nil) (noempty nil) (cached nil) (standard nil) (ignored nil) (full nil) (nul nil) (paths nil))
     (while args
       (let ((arg (pop args)))
         (cond ((string= arg "--") (setq paths (append (nreverse paths) args) args nil))
@@ -46,6 +63,8 @@
               ((member arg '("-o" "--others")) (setq others t))
               ((member arg '("-c" "--cached")) (setq cached t))
               ((member arg '("-i" "--ignored")) (setq ignored t))
+              ((string= arg "--directory") (setq directory t))
+              ((string= arg "--no-empty-directory") (setq noempty t))
               ((string= arg "--exclude-standard") (setq standard t))
               ((string= arg "--full-name") (setq full t))
               ((string= arg "-z") (setq nul t))
@@ -75,7 +94,7 @@
                (stack (and standard (if ctx (car ctx) (ngit-ignore-global-patterns repo)))))
           (dolist (path (sort (ngit-ls-files--walk repo top entries dir stack standard ignored
                                                  (and ctx (cdr ctx))
-                                                 (and (ngit-pathspec-attr-p items) items)) #'string<))
+                                                 items directory noempty) #'string<))
             (push (cons path nil) names))))
       (let ((i 0))
         (while (< i (length entries))

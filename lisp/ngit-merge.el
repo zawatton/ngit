@@ -91,8 +91,9 @@
     (concat "Merge " kind " '" name "'"
             (if (member branch '("main" "master")) "" (concat " into " branch)) "\n")))
 
-(defun ngit--merge-message (repo name head remote messages log-count)
-  (let ((msg (if messages (ngit-stripspace (mapconcat #'identity messages "\n\n"))
+(defun ngit--merge-message (repo name head remote messages log-count &optional cleanup edit)
+  (let ((msg (if messages (let ((raw (mapconcat #'identity messages "\n\n")))
+                           (if (or edit (equal cleanup "verbatim")) raw (ngit-stripspace raw)))
                (ngit--merge-title repo name))))
     (when (> log-count 0)
       (let ((commits nil) (i 0))
@@ -107,6 +108,9 @@
             (setq msg (concat msg "  " (ngit--subject (ngit--c-message c)) "\n")))
           (setq i (1+ i)))
         (when (> i log-count) (setq msg (concat msg "  ...\n")))))
+    (when (and (or edit (equal cleanup "verbatim"))
+               (or (not messages) (> log-count 0)) (string-suffix-p "\n" msg))
+      (setq msg (substring msg 0 -1)))
     (if (multibyte-string-p msg) (encode-coding-string msg 'utf-8) msg)))
 
 (defun ngit--merge-squash-message (repo head remote)
@@ -135,9 +139,11 @@
     (ngit--emit-stat (ngit--stat-entries repo changes))
     (ngit--emit-summary changes)))
 
-(defun ngit--merge-commit (repo head remote tree message name no-ff no-verify)
+(defun ngit--merge-commit (repo head remote tree message name no-ff no-verify &optional edit cleanup)
   "Write an automatic two-parent merge commit and update HEAD."
-  (let* ((message (ngit-stripspace message))
+  (let* ((message (if (or edit (equal cleanup "verbatim")) message (ngit-stripspace message)))
+         (original-message (if edit (concat message "\n") message))
+         (ngit-commit-editing edit)
          (committer (ngit-ident repo "COMMITTER"))
          (author (ngit-ident repo "AUTHOR"))
          (index-file (ngit-index-file repo))
@@ -148,6 +154,8 @@
          (failed nil))
     ;; Merge hooks see the in-progress state and may update the real index.
     (ngit--merge-state repo remote message no-ff nil nil)
+    (when edit
+      (ngit-write-file message-file (ngit-editor-merge-template repo message cleanup)))
     (when (and pre-ran
                (/= (ngit-commit-run-hook repo "pre-merge-commit" index-file nil
                                           nil nil action) 0))
@@ -160,13 +168,22 @@
       (when (/= (ngit-commit-run-hook repo "prepare-commit-msg" index-file nil
                                       (list message-file "merge") nil action) 0)
         (setq failed t)))
+    (when (and (not failed) edit (/= (ngit-editor-run repo message-file) 0))
+      (setq failed t))
     (unless (or failed no-verify)
       (when (/= (ngit-commit-run-hook repo "commit-msg" index-file nil
                                       (list message-file) nil action) 0)
         (setq failed t)))
-    (if failed nil
-      (setq message (ngit-commit-clean-hook-message
-                     repo (ngit--read-file message-file) nil))
+    (unless failed
+      (setq message (if (or edit (not (equal cleanup "whitespace")))
+                        (progn (require 'ngit-editor)
+                               (ngit-editor-clean repo (ngit--read-file message-file) cleanup edit))
+                      (ngit-commit-clean-hook-message repo (ngit--read-file message-file) nil)))
+      (when (equal message "")
+        (ngit-native-write-stderr "error: Empty commit message.\n")
+        (setq failed t)))
+    (if failed
+        (progn (ngit-write-file message-file original-message) nil)
       (let* (
          (data (concat "tree " (ngit-hex tree) "\nparent " head "\nparent " remote
                        "\nauthor " author "\ncommitter " committer "\n\n" message))
@@ -248,7 +265,7 @@
   (let ((quiet nil) (messages nil) (ff 'yes) (squash nil) (no-commit nil)
         (stat (ngit-config-bool repo "merge.stat" t)) (log-count 0)
         (abort nil) (continue nil) (explicit-commit nil) (snapshot nil) (names nil)
-        (no-verify nil))
+        (no-verify nil) (edit 'default) (cleanup nil))
     (let ((config (ngit-config-get repo "merge.ff")))
       (cond ((equal config "false") (setq ff 'no))
             ((equal config "only") (setq ff 'only))))
@@ -273,11 +290,23 @@
          ((string= a "--abort") (setq abort t))
          ((string= a "--continue") (setq continue t))
          ((string= a "--no-verify") (setq no-verify t))
-         ((string= a "--no-edit") nil)
+         ((string= a "--no-edit") (setq edit nil))
+         ((member a '("-e" "--edit")) (setq edit t))
+         ((string-prefix-p "--cleanup=" a) (setq cleanup (substring a 10)))
+         ((string= a "--cleanup")
+          (setq cleanup (or (pop args) (ngit--die-with 129 "error: option `cleanup' requires a value"))))
          ((string= a "--") (setq names (append (nreverse names) args) args nil))
          ((string-prefix-p "-" a) (ngit--die-with 129 "error: merge option '%s' is not supported" a))
          (t (push a names)))))
     (setq names (nreverse names) messages (nreverse messages))
+    (when (eq edit 'default)
+      (if (and (not messages) (not (equal (getenv "GIT_MERGE_AUTOEDIT") "no")))
+          (progn (require 'ngit-editor) (setq edit (ngit-editor-merge-autoedit messages)))
+        (setq edit nil)))
+    (when edit (require 'ngit-editor))
+    (setq cleanup (if (or edit cleanup (ngit-config-get repo "commit.cleanup"))
+                      (progn (require 'ngit-editor)
+                             (ngit-editor-cleanup-mode repo cleanup edit)) "whitespace"))
     (cond
      (abort (ngit--merge-abort repo))
      (continue
@@ -337,7 +366,7 @@
               (ngit--die-with
                2 "error: Your local changes to the following files would be overwritten by merge:\n  %s\nMerge with strategy ort failed."
                (mapconcat (lambda (c) (ngit-quote-path (aref c 0))) staged " "))))
-          (let* ((message (ngit--merge-message repo name head remote messages log-count))
+          (let* ((message (ngit--merge-message repo name head remote messages log-count cleanup edit))
                  (base (ngit-merge-base-tree repo head remote))
                  (ngit-merge-ancestor-label
                   (if (= (length bases) 1) (ngit-abbrev repo (ngit--c-hex (car bases)))
@@ -364,7 +393,7 @@
                     0))
               (let ((tree (plist-get result :tree)))
                 (if (not (ngit--merge-commit repo head remote tree message name
-                                             (eq ff 'no) no-verify))
+                                             (eq ff 'no) no-verify edit cleanup))
                     (progn
                       (ngit-native-write-stderr "Not committing merge; use 'git commit' to complete the merge.\n")
                       1)

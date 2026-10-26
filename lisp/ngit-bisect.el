@@ -266,7 +266,7 @@ count, matching bisect.c's cheap path for ordinary history."
            (ngit-bisect--subject repo hex) "\n") t)
   (ngit--emit hex " is the first " term " commit\n")
   (let ((ngit--commit-table (make-hash-table :test 'equal)))
-    (ngit-cmd-log repo (list "--stat" "-1" hex))))
+    (ngit-cmd-log repo (list "--stat" "--summary" "-1" hex))))
 
 (defun ngit-bisect--checkout (repo hex)
   (ngit--write-ref repo "BISECT_EXPECTED_REV" hex

@@ -124,8 +124,9 @@
                 (string< (if icase (aref a 4) (aref a 0))
                          (if icase (aref b 4) (aref b 0)))))))))
 
-(defun ngit--tag-list (repo patterns lines keys icase filters)
-  (let ((items nil) (resolved nil))
+(defun ngit--tag-list (repo patterns lines keys icase filters &optional format column color)
+  (let ((items nil) (resolved nil)
+        (ngit--ref-color (if (eq color 'default) (equal (ngit-config-get repo "color.ui") "always") color)))
     (setq ngit--rv-repo repo)
     (dolist (key '(:contains :no-contains :merged :no-merged :points-at))
       (let ((values nil))
@@ -167,6 +168,11 @@
                                 (or keys (let ((v (ngit-config-get repo "tag.sort")))
                                            (and (stringp v) (list v)))
                                     '("refname")) icase))
+    (if (or format (and (null lines) (ngit--column-options repo "tag" column)))
+        (let ((output (mapcar (lambda (it) (if format (ngit--ref-format repo (concat "refs/tags/" (aref it 0)) (aref it 1) format) (aref it 0))) items))
+              (options (and (null lines) (ngit--column-options repo "tag" column))))
+          (if options (ngit--print-columns output options 2)
+            (dolist (line output) (ngit--emit line "\n"))))
     (dolist (it items)
       (if (or (null lines) (= lines 0))
           (ngit--emit (aref it 0) "\n")
@@ -190,7 +196,7 @@
               (push (substring msg start end) parts)
               (setq start (1+ end) count (1+ count))))
           (ngit--emit (ngit--pad-to (aref it 0) 15) " "
-                      (mapconcat #'identity (nreverse parts) "\n    ") "\n"))))
+                      (mapconcat #'identity (nreverse parts) "\n    ") "\n")))))
     0))
 
 ;;;; Writes
@@ -218,7 +224,7 @@
                             (ngit-abbrev repo (nth 2 it) (ngit-default-abbrev repo))))))
     status))
 
-(defun ngit--tag-create (repo names annotate given message file force cleanup)
+(defun ngit--tag-create (repo names annotate given message file force cleanup &optional edit)
   (when (cddr names) (ngit--die "fatal: too many arguments"))
   (when (and given file)
     (ngit--die "fatal: options '-F' and '-m' cannot be used together"))
@@ -240,22 +246,50 @@
       (if (or annotate given file) (ngit--die "fatal: bad object type.")
         (ngit--die "fatal: cannot update ref '%s': trying to write ref '%s' with nonexistent object %s"
                    ref ref hex)))
-    (when (or annotate given file)
-      (unless (or given file) (ngit--die "ngit: tag: no editor support; use -m or -F"))
+    (when (or annotate given file edit)
       (unless (member cleanup '("strip" "whitespace" "verbatim"))
         (ngit--die "fatal: Invalid cleanup mode %s" cleanup))
+      (let ((tagger (ngit-ident repo "COMMITTER"))
+            (message-path (expand-file-name "TAG_EDITMSG" (ngit-repo-gitdir repo)))
+            (editing (or edit (not (or given file)))))
+      (when editing
+        (require 'ngit-editor)
+        (let ((comment (ngit-editor-comment repo)))
+          (ngit-write-file
+           message-path
+           (cond ((or given file) (if (string-suffix-p "\n" message) message (concat message "\n")))
+                 ((and old (eq (ngit--object-type repo old) 'tag))
+                  (ngit--message-body (cdr (ngit-read-object repo (ngit-unhex old)))))
+                 (old "")
+                 (t (concat "\n" comment "\n" comment " Write a message for tag:\n"
+                            comment "   " name "\n" comment " Lines starting with '" comment "' "
+                            (if (equal cleanup "strip") "will be ignored.\n"
+                              "will be kept; you may remove them yourself if you want to.\n"))))))
+        (set-file-modes message-path #o600)
+        (when (/= (ngit-editor-run repo message-path) 0)
+          (ngit--die-with 1 "Please supply the message using either -m or -F option."))
+        (setq message (ngit--read-file message-path)))
       (setq message (if (multibyte-string-p message) (encode-coding-string message 'utf-8) message))
       (when (string= cleanup "strip")
-        (let ((comment (or (ngit-config-get repo "core.commentstring")
-                           (ngit-config-get repo "core.commentchar") "#")))
+        (let ((comment "#"))
+          ;; config.c's auto assignment sets a flag without replacing the
+          ;; previous comment string.  Tags never auto-select a new string.
+          ;; Keep non-editing tags on their existing lazy-load fast path.
+          (dolist (entry (ngit-config-entries repo))
+            (when (and (member (car entry) '("core.commentchar" "core.commentstring"))
+                       (not (and (stringp (cdr entry))
+                                 (equal (downcase (cdr entry)) "auto"))))
+              (setq comment (cdr entry))))
           (setq message (mapconcat #'identity
                                    (seq-remove (lambda (line) (string-prefix-p comment line))
                                                (split-string message "\n")) "\n"))))
       (unless (string= cleanup "verbatim") (setq message (ngit-stripspace message)))
+      (when (and (not (or given file)) (equal message ""))
+        (ngit--die "fatal: no tag message?"))
       (let* ((type (ngit--object-type repo hex))
              (data (concat "object " hex "\ntype " (symbol-name type)
                            "\ntag " (encode-coding-string name 'utf-8)
-                           "\ntagger " (ngit-ident repo "COMMITTER") "\n\n" message)))
+                           "\ntagger " tagger "\n\n" message)))
         (when (and (eq type 'tag) (not (equal (ngit-config-get repo "advice.nestedtag") "false")))
           (ngit-native-write-stderr
            (concat "hint: You have created a nested tag. The object referred to by your new tag is\n"
@@ -263,7 +297,7 @@
                    "hint:\n"
                    "hint: \tgit tag -f " name " " rev "^{}\n"
                    "hint: Disable this message with \"git config advice.nestedTag false\"\n")))
-        (setq hex (ngit-hex (ngit-write-object repo "tag" data)))))
+        (setq hex (ngit-hex (ngit-write-object repo "tag" data))))))
     (dolist (existing (ngit-list-refs repo "refs/tags/"))
       (let ((other (car existing)))
         (when (or (string-prefix-p (concat other "/") ref)
@@ -272,6 +306,9 @@
             (ngit-native-write-stderr "The tag message has been left in .git/TAG_EDITMSG\n"))
           (ngit--die "fatal: cannot lock ref '%s': '%s' exists; cannot create '%s'" ref other ref))))
     (ngit--write-ref repo ref hex old nil)
+    (when (and (or annotate given file edit)
+               (file-exists-p (expand-file-name "TAG_EDITMSG" (ngit-repo-gitdir repo))))
+      (delete-file (expand-file-name "TAG_EDITMSG" (ngit-repo-gitdir repo))))
     (when (and old force (not (string= old hex)))
       (ngit--emit (format "Updated tag '%s' (was %s)\n" name
                           (ngit-abbrev repo old (ngit-default-abbrev repo)))))
@@ -282,7 +319,7 @@
 (defun ngit-cmd-tag (repo args)
   (let ((list nil) (delete nil) (annotate nil) (force nil) (icase nil)
         (given nil) (message "") (file nil) (lines nil) (keys nil)
-        (filters nil) (names nil) (cleanup "strip"))
+        (filters nil) (names nil) (cleanup "strip") (edit nil) (format nil) (column nil) (color 'default))
     (while args
       (let ((a (pop args)))
         ;; Boolean short options may precede another option in one word.
@@ -295,6 +332,7 @@
          ((member a '("-l" "--list")) (setq list t))
          ((member a '("-d" "--delete")) (setq delete t))
          ((member a '("-a" "--annotate")) (setq annotate t))
+         ((member a '("-e" "--edit")) (setq edit t annotate t))
          ((member a '("-f" "--force")) (setq force t))
          ((member a '("-i" "--ignore-case")) (setq icase t))
          ((or (member a '("-m" "--message")) (string-prefix-p "--message=" a)
@@ -319,6 +357,17 @@
           (let ((v (if (string= a "--sort") (pop args) (substring a 7))))
             (unless v (ngit--die-with 129 "error: option `sort' requires a value"))
             (setq keys (append keys (list v)))))
+         ((or (string= a "--format") (string-prefix-p "--format=" a))
+          (setq format (if (string= a "--format") (pop args) (substring a 9)) list t)
+          (unless format (ngit--die-with 129 "error: option `format' requires a value")))
+         ((or (string= a "--column") (string-prefix-p "--column=" a))
+          (setq column (if (string= a "--column") "always" (concat "always," (substring a 9)))))
+         ((string= a "--no-column") (setq column "never"))
+         ((or (string= a "--color") (string-prefix-p "--color=" a))
+          (let ((v (if (string= a "--color") "always" (substring a 8))))
+            (unless (member v '("always" "never" "auto")) (ngit--die "fatal: bad color value '%s' for variable 'command line option'" v))
+            (setq color (equal v "always"))))
+         ((string= a "--no-color") (setq color nil))
          ((string-prefix-p "--cleanup=" a) (setq cleanup (substring a 10)))
          ((string-match "\\`--\\(contains\\|no-contains\\|merged\\|no-merged\\|points-at\\)\\(?:=\\(.*\\)\\)?\\'" a)
           (let* ((key (intern (concat ":" (match-string 1 a))))
@@ -327,6 +376,8 @@
             (setq filters (plist-put filters key (append (plist-get filters key) (list value))))))
          ((string-prefix-p "-" a) (ngit--die "ngit: tag: unsupported argument %s" a))
          (t (setq names (append names (list a)))))))
+    (when (and lines column (ngit--column-options repo "tag" column))
+      (ngit--die "fatal: options '--column' and '-n' cannot be used together"))
     (when (and (not delete) (or (null names) lines filters)) (setq list t))
     (cond
      (delete (when (or list annotate given file force lines filters)
@@ -334,8 +385,8 @@
              (ngit--tag-delete repo names))
      (list (when (or annotate given file force)
              (ngit--die "ngit: tag: incompatible options with --list"))
-           (ngit--tag-list repo names lines keys icase filters))
-     (t (ngit--tag-create repo names annotate given message file force cleanup)))))
+           (ngit--tag-list repo names lines keys icase filters format column color))
+     (t (ngit--tag-create repo names annotate given message file force cleanup edit)))))
 
 (provide 'ngit-tag)
 

@@ -355,6 +355,11 @@ sh test/protocol-v2.sh (select|lsrefs|e2e-ssh|http-discovery|http-fetch|e2e-http
 sh test/audit-fixes.sh (core|e2e|prefix|prefix-boundary|prefix-untracked|prefix-rm|prefix-e2e)
 python3 tools/include-pathspec-verify.py (controls|differences [GROUP]|regression|e2e)
 python3 tools/usability-verify.py (controls|regression|e2e)
+sh test/ux-commit.sh (editor|identity|paths|e2e)
+sh test/ux-log.sh (follow|dates|format|history|e2e)
+sh test/ux-cmds.sh (status|refs|worktree|stash|e2e)
+sh test/apply-gen.sh (review|apply-gen) # apply and apply -R against git, fixed-seed generated cases
+python3 tools/ux-verify.py (controls [SUITE]|mode SUITE MODE|regression [pull|compare])
 nelisp --load test/hash-chars-check.el -- x  # span hash vs reference copy
 NGIT_REAL_REPO=/path/to/repo sh test/compare.sh real
 bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Notes
@@ -375,7 +380,7 @@ rebase=interactive unless HEAD is up to date or fast-forwards, before
 installing fetched objects or updating any ref), rerere, =--fix-thin=, git's delta search depth
 (new deltas are limited to 4 KiB targets and 32 KiB per run; pack
 compression defaults to level 1), blame -M/-C, grep -P, name-rev --all,
-mailmap, general MIME mail in am/apply, traditional (non-git) patches
+general MIME mail in am/apply, traditional (non-git) patches
 whose body lines look like a =+++= header line,
 delta-encoded binary hunks in output (format-patch always writes
 =literal= binary bodies where Git picks the smaller of delta and literal;
@@ -388,18 +393,20 @@ config value patterns and --replace-all/--unset-all on multi-valued variables.
 
 Alternates, multi-pack-index, reftable, split or sparse
 indexes, SHA-256 repositories, copy detection, commit
-signing, an editor for commit messages (use -m or -F), commit with
-paths, guessed identities (user.name and user.email or the GIT_*
-variables must be set), date formats other than raw and ISO 8601 in
-GIT_*_DATE, index.version for new indexes, =-uall=/ignored listings,
+signing, index.version for new indexes,
 custom attribute macros and diff drivers, subdirectory path handling
 outside status/diff/add/restore/log/show/grep/blame/ls-tree/ls-files/clean/
-rm/mv/checkout/reset/stash,
-log's --follow, -L, -m/--cc (show has the default --cc), --simplify-merges,
---ancestry-path, --boundary, --left-right, notes, mailmap, %(trailers),
-%w(), padding and color placeholders, --date=relative/human and
-approximate dates (--since takes timestamps and ISO dates with a time),
-branch --format, --column, --edit-description, -t inherit and colors,
-tag signing/--format/--column/--edit, reset --merge/--keep/-p,
-checkout/switch --merge/--conflict/-p/--overlay options and sparse
-checkouts, restore -p/--ours/--theirs, rm/mv --sparse, stash -p/--all/--staged.
+rm/mv/checkout/reset/stash, log -L, notes, tag signing, reset -p,
+checkout/switch -p and sparse checkouts, restore -p, rm/mv --sparse,
+stash -p.
+
+apply and am still differ from Git on: patches against an unmerged index
+(Git refuses; ngit applies from stage 1), prose after a mail patch that looks
+like rename or mode lines, traditional diffs that add or delete a file
+without /dev/null, --cached additions (and --cached --check) over an
+intent-to-add entry, --cached additions next to conflict stages of a
+directory/file neighbour (ngit drops the stages), a file whose unlink fails
+(ngit overwrites it in place), rename records with incomplete headers, and
+am --abort after am --continue made a commit (ngit keeps that commit
+instead of returning to the original HEAD); =sh test/apply-gen.sh deferred=
+carries at least one case each.
