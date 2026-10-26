@@ -398,7 +398,7 @@ custom attribute macros and diff drivers, subdirectory path handling
 outside status/diff/add/restore/log/show/grep/blame/ls-tree/ls-files/clean/
 rm/mv/checkout/reset/stash, log -L, notes, tag signing, reset -p,
 checkout/switch -p and sparse checkouts, restore -p, rm/mv --sparse,
-stash -p.
+stash -p, add -p/-i/--patch (rejected as unsupported options).
 
 apply and am still differ from Git on: patches against an unmerged index
 (Git refuses; ngit applies from stage 1), prose after a mail patch that looks
