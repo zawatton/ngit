@@ -170,6 +170,10 @@
 
 (defvar ngit-patch--p-value 1)
 
+(defun ngit-patch--dev-null-p (line prefix)
+  "Test is_dev_null on the literal header, before C unquoting."
+  (string-match-p (concat "\\`" (regexp-quote prefix) "/dev/null[ \t\r\n]") line))
+
 (defun ngit-patch--tree-name (name)
   "Strip the selected number of tree components from NAME."
   (let ((start 0) (left ngit-patch--p-value) slash)
@@ -210,21 +214,49 @@
 (defun ngit-patch--path (line prefix &optional count fallback keep-tabs)
   "Read find_name's filename, component stripping and unquoted fallback."
   (let* ((text (substring (ngit-patch--strip-line line) (length prefix)))
-         (quoted (string-prefix-p "\"" text))
-         (tab (and (not quoted) (not keep-tabs) (string-search "\t" text)))
-         (left (or count ngit-patch--p-value)) (start 0) slash name)
-    (setq text (ngit-patch--unquote (if tab (substring text 0 tab) text)))
-    (unless (string= text "/dev/null")
+         (left (or count ngit-patch--p-value)) (start 0) slash name decoded gnu)
+    ;; find_name_gnu returns a successful empty string at -p0. If unquoting
+    ;; or component stripping fails, find_name_common reads the ORIGINAL
+    ;; header, including its quotes, and may use the default name.
+    (when (string-prefix-p "\"" text)
+      (require 'ngit-match)
+      (setq decoded (ngit--attr-unquote text))
+      (when decoded
+        (let* ((quoted (car decoded)) (nul (string-search (unibyte-string 0) quoted))
+               (strip left) (at 0))
+          ;; strchr and the consumers of the detached C buffer stop at NUL.
+          (when nul (setq quoted (substring quoted 0 nul)))
+          (while (and (> strip 0) (setq slash (string-search "/" quoted at)))
+            (setq at (1+ slash) strip (1- strip)))
+          (when (= strip 0)
+            (setq gnu t name (substring quoted at))))))
+    (unless gnu
+      (let ((tab (and (not keep-tabs) (string-search "\t" text))))
+        (when tab (setq text (substring text 0 tab))))
       (while (and (> left 0) (setq slash (string-search "/" text start)))
         (setq start (1+ slash) left (1- left)))
       (when (and (= left 0) (< start (length text)))
         (setq name (substring text start)))
-      (when (and (not quoted) fallback
+      (when (and fallback
                  (or (not name) (and (< (length fallback) (length name))
                                     (string-prefix-p fallback name))))
-        (setq name fallback))
-      ;; find_name squashes slashes; git_header_name deliberately does not.
-      (and name (replace-regexp-in-string "/+" "/" name)))))
+        (setq name fallback)))
+    ;; /dev/null is recognized only by is_dev_null on the literal header.
+    ;; find_name squashes slashes; git_header_name deliberately does not.
+    (and name (replace-regexp-in-string "/+" "/" name))))
+
+(defun ngit-patch--traditional-path (line prefix &optional count fallback)
+  "Read a traditional filename, excluding apply.c's diff_timestamp_len suffix."
+  (let* ((text (ngit-patch--strip-line line))
+         (stamp (string-match
+                      (concat "\\(?:\t\\| +\\)\\(?:[0-9][0-9]\\)?[0-9][0-9]-[0-9][0-9]-[0-9][0-9]"
+                              "\\(?: [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\\(?:\\.[0-9]+\\)?\\)?"
+                              "\\(?: [+-][0-9][0-9]:?[0-9][0-9]\\)?\\'")
+                      text (length prefix))))
+    ;; A recognized timestamp supplies an explicit end, so earlier tabs
+    ;; belong to the filename. Without one, find_name terminates at a tab.
+    (ngit-patch--path (if stamp (substring text 0 stamp) line)
+                      prefix count fallback (and stamp t))))
 
 (defun ngit-patch--check-header-name (patch line)
   "Reject a Git header missing a required name after component stripping."
@@ -258,7 +290,8 @@
       (= (- minutes zone) (if (equal day "1969-12-31") 1440 0)))))
 
 (defun ngit-patch--hunk-header (line)
-  (when (string-match "\\`@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? +\\+\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? @@" line)
+  (when (and (string-suffix-p "\n" line)
+             (string-match "\\`@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? \\+\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? @@" line))
     (vector (string-to-number (match-string 1 line))
             (string-to-number (or (match-string 2 line) "1"))
             (string-to-number (match-string 3 line))
@@ -285,7 +318,8 @@
           (setq current nil hunk nil))
         ;; parse_git_diff_header stops at the first non-header line. Once
         ;; hunks or binary data begin, trailing mail prose is never metadata.
-        (when (and (plist-get current :header-open) (not header-line))
+        (when (and (plist-get current :header-open)
+                   (or (not header-line) (not (string-suffix-p "\n" line))))
           (ngit-patch--check-header-name current (- (1+ i) no-newlines))
           (setq current (plist-put current :header-open nil)))
         (cond
@@ -362,7 +396,7 @@
           (when (string-prefix-p "rename " line) (setq current (plist-put current :rename t)))
           (setq current (plist-put current :old
                                    (ngit-patch--path line
-                                                     (cond ((plist-get current :copy) "copy from ")
+                                                     (cond ((string-prefix-p "copy from " line) "copy from ")
                                                            ((string-prefix-p "rename old " line) "rename old ")
                                                            (t "rename from "))
                                                      (max 0 (1- ngit-patch--p-value)) nil t))))
@@ -374,19 +408,20 @@
           (when (string-prefix-p "rename " line) (setq current (plist-put current :rename t)))
           (setq current (plist-put current :new
                                    (ngit-patch--path line
-                                                     (cond ((plist-get current :copy) "copy to ")
+                                                     (cond ((string-prefix-p "copy to " line) "copy to ")
                                                            ((string-prefix-p "rename new " line) "rename new ")
                                                            (t "rename to "))
                                                      (max 0 (1- ngit-patch--p-value)) nil t))))
          ((and (string-prefix-p "--- " line)
                (or (and (plist-get current :header-open) (not hunk)
                         (not (plist-get current :hunks)))
-                   (and (< (+ i 2) n)
+                   (and (>= (length line) 6) (< (+ i 2) n)
                         (string-prefix-p "+++ " (aref lines (1+ i)))
                         (string-prefix-p "@@ -" (aref lines (+ i 2))))))
           (if (and (plist-get current :header-open) (not hunk)
                    (not (plist-get current :hunks)))
-              (let ((name (ngit-patch--path line "--- ")))
+              (let ((name (and (not (ngit-patch--dev-null-p line "--- "))
+                               (ngit-patch--path line "--- "))))
                 (when (and name (plist-get current :old)
                            (not (equal name (plist-get current :old))))
                   (ngit--die-with 128 "error: git apply: bad git-diff - inconsistent old filename on line %d"
@@ -398,24 +433,29 @@
               (when hunk (plist-put current :hunks (append (plist-get current :hunks) (list hunk))))
               (push current patches))
             (let* ((second (and (< (1+ i) n) (aref lines (1+ i))))
-                   (first-name (ngit-patch--path line "--- " 0))
-                   (second-name (and second (ngit-patch--path second "+++ " 0)))
-                   (p (if (and first-name (not (string-search "/" first-name))) 0 -1))
-                   (q (if (and second-name (not (string-search "/" second-name))) 0 -1)))
+                   ;; is_dev_null tests the literal header, not find_name's
+                   ;; result: an empty name may still fall back to the old one.
+                   (old-null (ngit-patch--dev-null-p line "--- "))
+                   (new-null (and second (ngit-patch--dev-null-p second "+++ ")))
+                   (first-name (ngit-patch--traditional-path line "--- " 0))
+                   (second-name (and second (ngit-patch--traditional-path second "+++ " 0)))
+                   (p (if (and (not old-null) first-name (not (string-search "/" first-name))) 0 -1))
+                   (q (if (and (not new-null) second-name (not (string-search "/" second-name))) 0 -1)))
               (unless (and second (string-prefix-p "+++ " second))
                 (ngit--die-with 128 "error: No valid patches in input"))
               (when (< p 0) (setq p q))
               (when (and (not p-known) (>= p 0) (= p q))
                 (setq ngit-patch--p-value p p-known t))
-              (let* ((old (and first-name (ngit-patch--path line "--- ")))
-                     (name (if (null second-name) old
-                             (ngit-patch--path second "+++ " nil old)))
+              (let* ((old (ngit-patch--traditional-path line "--- "))
+                     (name (if (and new-null (not old-null)) old
+                             (ngit-patch--traditional-path second "+++ " nil
+                                                           (and (not old-null) old))))
                      ;; parse_traditional_patch checks both /dev/null names
                      ;; before guessing creation/deletion from timestamps.
-                     (creation (or (not first-name)
-                                   (and second-name (ngit-patch--epoch-header-p line))))
+                     (creation (or old-null
+                                   (and (not new-null) (ngit-patch--epoch-header-p line))))
                      (deletion (and (not creation)
-                                    (or (not second-name) (ngit-patch--epoch-header-p second)))))
+                                    (or new-null (ngit-patch--epoch-header-p second)))))
                 (unless name
                   (ngit--die-with 128 "error: unable to find filename in patch at line %d"
                                   (- (1+ i) no-newlines)))
@@ -427,7 +467,8 @@
           ;; Skip prose before a later patch, but reject it as the only candidate.
           (setq malformed-traditional t))
          ((and (plist-get current :header-open) (string-prefix-p "+++ " line))
-          (let ((name (ngit-patch--path line "+++ ")))
+          (let ((name (and (not (ngit-patch--dev-null-p line "+++ "))
+                           (ngit-patch--path line "+++ "))))
             (when (and name (plist-get current :new)
                        (not (equal name (plist-get current :new))))
               (ngit--die-with 128 "error: git apply: bad git-diff - inconsistent new filename on line %d"
@@ -478,6 +519,17 @@
             (aset hunk 5 (aref hunk 1))
             (aset hunk 6 (aref hunk 3))
             (setq i (1- j)))))
+        ;; check_header_line rejects conflicting extensions immediately,
+        ;; remembering the first extension's physical line for its diagnostic.
+        (when (plist-get current :header-open)
+          (let ((extensions 0) (lineno (- (1+ i) no-newlines)))
+            (dolist (flag '(:is-new :is-delete :rename :copy))
+              (when (plist-get current flag) (setq extensions (1+ extensions))))
+            (when (> extensions 1)
+              (ngit--die-with 128 "error: inconsistent header lines %d and %d"
+                              (plist-get current :extension-line) lineno))
+            (when (and (> extensions 0) (not (plist-get current :extension-line)))
+              (setq current (plist-put current :extension-line lineno)))))
         (when (and (plist-get current :git) (not hunk)
                    (seq-some (lambda (prefix) (string-prefix-p prefix line))
                              '("diff --git " "index " "old mode " "new mode "
@@ -723,6 +775,12 @@
             (path (ngit-patch--target-path patch reverse)))
         ;; Accepted names already have their find_name normalization and
         ;; contain no empty/dot components. All consumers use these names.
+        ;; check_preimage diagnoses a quoted empty preimage before checking
+        ;; path safety. Never turn it into the traditional default name.
+        (when (equal old "")
+          (ngit--die-with 1 "error: : %s"
+                          (if (or cached index-check) "does not exist in index"
+                            "No such file or directory")))
         (ngit-patch--validate-path old)
         (ngit-patch--validate-path path)
         (when (and old (not (equal old path)) (not (plist-get patch :copy)))
@@ -756,9 +814,53 @@
                  (st (and entry (not cached) (ngit-wt-lstat old-path))))
             (unless entry
               (ngit--die-with 1 "error: %s: does not exist in index" old-path))
+            ;; verify_index_match accepts gitlinks first. ie_match_stat tests
+            ;; CE_FSMONITOR_VALID before intent-to-add; FSMN stores its inverse.
+            (when (and (not cached) (/= (logand (aref entry 2) #o170000) #o160000)
+                       (memq 'ita (aref entry 5)))
+              (let* ((index (ngit-read-index repo)) (raw (aref index 1))
+                     (entries (aref index 0)) (last (aref entries (1- (length entries))))
+                     (pos (aref last 4)) (flags (ngit--be16 raw (+ pos 60)))
+                     (hdr (if (= 0 (logand flags #x4000)) 62 64))
+                     (ext (if (= (aref index 2) 4)
+                              (1+ (ngit--byte-pos raw 0
+                                                (cdr (ngit--index-varint raw (+ pos hdr)))))
+                            (+ pos (logand (+ hdr (length (aref last 0)) 8) -8))))
+                     (bit (seq-position entries entry #'eq))
+                     (monitor (ngit-config-get repo "core.fsmonitor")) valid)
+                (while (< (+ ext 8) (- (length raw) 20))
+                  (let ((len (ngit--be32 raw (+ ext 4))))
+                    (when (and (equal (substring raw ext (+ ext 4)) "FSMN")
+                               (and monitor (not (member (downcase monitor)
+                                                         '("false" "no" "off" "0" "")))))
+                      (let* ((version (ngit--be32 raw (+ ext 8)))
+                             (map (if (= version 1) (+ ext 20)
+                                    (1+ (ngit--byte-pos raw 0 (+ ext 12)))))
+                             (bits (ngit--be32 raw (+ map 4)))
+                             (words (ngit--be32 raw (+ map 8)))
+                             (at (+ map 12)) (offset 0) dirty)
+                        (while (and (< at (+ map 12 (* words 8))) (<= offset bit)
+                                    (< bit bits))
+                          (let* ((word (ngit--be64s raw at))
+                                 (run (* 64 (logand (ash word -1) #xffffffff)))
+                                 (literal (logand (ash word -33) #x7fffffff)))
+                            (setq at (+ at 8))
+                            (if (< bit (+ offset run))
+                                (setq dirty (/= 0 (logand word 1)))
+                              (when (< bit (+ offset run (* literal 64)))
+                                (let* ((slot (- bit offset run))
+                                       (byte (+ at (* (/ slot 64) 8) (- 7 (/ (% slot 64) 8)))))
+                                  (setq dirty (/= 0 (logand (aref raw byte)
+                                                           (ash 1 (% slot 8))))))))
+                            (setq offset (+ offset run (* literal 64))
+                                  at (+ at (* literal 8)))))
+                        (setq valid (not dirty))))
+                    (setq ext (+ ext 8 len))))
+                (unless valid
+                  (ngit--die-with 1 "error: %s: does not match index" old-path))))
             (when st
               (unless
-                  (if (= (aref entry 2) #o160000)
+                  (if (= (logand (aref entry 2) #o170000) #o160000)
                       (= (ngit-wt-mode st) ngit-mode-tree)
                     (and (or (= (ngit-wt-mode st) (aref entry 2))
                              (and (= (aref entry 2) ngit-mode-symlink)
@@ -1271,6 +1373,23 @@
      repo "info" (concat "Author: " name "\nEmail: " email "\nSubject: " subject
                          "\nDate: " date "\n\n"))))
 
+(defun ngit-patch--am-parent (repo)
+  "Resolve HEAD freshly after pre-applypatch, as do_commit does."
+  (aset repo 4 nil)
+  (let* ((name "HEAD") (value (ngit-read-ref repo name)) (depth 0))
+    (while (and value (string-prefix-p "ref: " value) (< depth 6))
+      (setq name (substring value 5) value (ngit-read-ref repo name)
+            depth (1+ depth)))
+    (if (and value (ngit-hex-p value 40)) (downcase value)
+      (ngit-native-write-stderr "applying to an empty history\n")
+      ;; An absent symref target is unborn. A present, invalid ref cannot
+      ;; be updated: retain am state and fail before writing any commit.
+      (when value
+        (ngit--die-with 128
+                        "fatal: update_ref failed for ref 'HEAD': cannot lock ref 'HEAD': unable to resolve reference '%s': reference broken"
+                        name))
+      nil)))
+
 (defun ngit-patch--am-run (repo)
   (let ((status 0) current)
     (ngit-patch--am-write repo "msg" "")
@@ -1279,7 +1398,8 @@
              (message (ngit-patch--mail-message mail))
              (message-file (expand-file-name "final-commit" (ngit-patch--am-dir repo)))
              (subject (ngit-patch--subject message))
-             (patch-data (substring mail (ngit-patch--mail-patch-start mail))))
+             (patch-data (substring mail (ngit-patch--mail-patch-start mail)))
+             committing)
         (ngit-patch--am-write repo "final-commit" message)
         (ngit-patch--am-write-author-state repo mail subject)
         (ngit-patch--am-write repo "patch" patch-data)
@@ -1311,12 +1431,13 @@
                                     0)))
                 (if (/= hook-status 0)
                     (setq status 1)
+                  (setq committing t)
                   (when hook-ran
                     (ngit-write-index repo index (aref index 0) root))
-                  (let* ((head (ngit-resolve-ref repo "HEAD"))
+                  (let* ((head (ngit-patch--am-parent repo))
                          (author (ngit-patch--am-date-ident repo mail)))
                     (let ((ngit-commit-replay-action "am"))
-                      (ngit--finish-commit repo head (list head) tree message nil t nil
+                      (ngit--finish-commit repo head (and head (list head)) tree message nil t nil
                                            (ngit-index-file repo) (ngit-ident repo "COMMITTER") author
                                            nil t nil t)))
                   (ngit-hook-run repo "post-applypatch")
@@ -1325,9 +1446,9 @@
                                         (concat (ngit-resolve-ref repo "HEAD") "\n"))
                   (ngit-patch--am-write repo "next" (format "%d\n" (1+ number))))))
           (error
-           (when (and (eq (car err) 'ngit-fatal)
+           (when (or committing (and (eq (car err) 'ngit-fatal)
                       (or (equal (cadr err) "fatal: ref updates aborted by hook")
-                          (string-prefix-p "fatal: size_t overflow: " (cadr err))))
+                          (string-prefix-p "fatal: size_t overflow: " (cadr err)))))
              (signal (car err) (cdr err)))
            (setq status 128)
            (when (and (cdr err) (stringp (cadr err)) (not (equal (cadr err) "")))
@@ -1406,6 +1527,9 @@
                                  (ngit-seq-tree repo head) head)
       (ngit-patch--am-clear-branch-state repo)
       (ngit-ref-delete-state repo "REBASE_HEAD")
+      ;; am_next refreshes abort-safety on skip as well as after a commit.
+      (aset repo 4 nil)
+      (ngit-patch--am-write repo "abort-safety" (concat (ngit-resolve-ref repo "HEAD") "\n"))
       (ngit-patch--am-write repo "next" (format "%d\n" (1+ (car cur))))
       (ngit-patch--am-run repo)))
    (t
@@ -1435,8 +1559,11 @@
           (unless (ngit-patch--am-no-verify-p repo)
             (when (/= (ngit-hook-run repo "pre-applypatch") 0)
               (ngit--die-with 1 "")))
+          ;; do_commit resolves the parent after pre-applypatch, which may
+          ;; move HEAD. Retain the index loaded before the hook, as Git does.
           (ngit-write-index repo index (aref index 0) root)
-          (ngit--finish-commit repo head (list head) tree message nil t nil (ngit-index-file repo)
+          (setq head (ngit-patch--am-parent repo))
+          (ngit--finish-commit repo head (and head (list head)) tree message nil t nil (ngit-index-file repo)
                                (ngit-ident repo "COMMITTER") (ngit-patch--am-date-ident repo mail)
                                nil t nil t))
         (ngit-hook-run repo "post-applypatch")

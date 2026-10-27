@@ -47,7 +47,8 @@ def clear_permissions(repo):
     repo.chmod(0o755)
 
 
-def compare(name, repo, env, patch, opts=(), cwd='.', command=None, before=None):
+def compare(name, repo, env, patch, opts=(), cwd='.', command=None, before=None,
+            inspect=None):
     if not selected(name):
         return
     snapshot = repo.parent / 'snapshot'
@@ -60,7 +61,7 @@ def compare(name, repo, env, patch, opts=(), cwd='.', command=None, before=None)
         if before:
             before(repo, env)
         result = ux.run([*executable, *argv], repo / cwd, env, patch)
-        results.append((result, ux.state(repo, env)))
+        results.append((result, (inspect or ux.state)(repo, env)))
         clear_permissions(repo)
         shutil.rmtree(repo)
         shutil.copytree(snapshot, repo, symlinks=True)
@@ -251,6 +252,16 @@ def review_f8():
 
 
 def deferred():
+    # Each group owns fresh repositories. Keep all comparisons and the same
+    # deadline while allowing the longer D3/D4 matrices to overlap setup work.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(group) for group in
+                   (deferred_base, deferred_f9, deferred_d2, deferred_d3, deferred_d4, deferred_d5)]
+        for future in futures:
+            future.result()
+
+
+def deferred_base():
     for finding in (3, 6, 7, 8, 9, 10):
         with tempfile.TemporaryDirectory(prefix='ngit-apply-deferred-') as tmp:
             repo, env = fixture(Path(tmp))
@@ -307,8 +318,250 @@ def deferred():
                         deletion.replace(b'+++ b/f\n',
                                          b'+++ b/f\t1970-01-01 00:00:00 +0000\n'))
 
-    deferred_f9()
-    deferred_d2()
+
+def deferred_d5():
+    for control in (b'\v', b'\f'):
+        with tempfile.TemporaryDirectory(prefix='ngit-d5-devnull-') as tmp:
+            repo, env = fixture(Path(tmp))
+            put(repo, 'f', b'old\n')
+            put(repo, 'dev/null' + control.decode() + 'stamp', b'old\n')
+            save(repo, env)
+            patch = b'--- a/f\n+++ /dev/null' + control + b'stamp\n@@ -1 +0,0 @@\n-old\n'
+            for opts in VARIANTS:
+                compare(f'd5-reg-1-byte{control.hex()}-' + ','.join(opts),
+                        repo, env, patch, opts)
+    for reverse in (False, True):
+        with tempfile.TemporaryDirectory(prefix='ngit-d5-emptyold-') as tmp:
+            repo, env = fixture(Path(tmp))
+            put(repo, 'f', b'new\n' if reverse else b'old\n')
+            save(repo, env)
+            for opts in VARIANTS:
+                compare(f'd5-reg-2-empty-old-R{int(reverse)}-' + ','.join(opts),
+                        repo, env, text_patch().replace(b'--- a/f', b'--- '),
+                        [*(['-R'] if reverse else []), *opts])
+    for kind in ('empty', 'occupied', 'reverse'):
+        with tempfile.TemporaryDirectory(prefix='ngit-d5-bothnull-') as tmp:
+            repo, env = fixture(Path(tmp))
+            if kind == 'occupied':
+                put(repo, 'dev/null old', b'occupied\n')
+            elif kind == 'reverse':
+                put(repo, 'dev/null new', b'x\n')
+            save(repo, env)
+            patch = b'--- /dev/null old\n+++ /dev/null new\n@@ -0,0 +1 @@\n+x\n'
+            for opts in VARIANTS:
+                compare(f'd5-reg-3-both-null-{kind}-' + ','.join(opts), repo, env,
+                        patch, [*(['-R'] if kind == 'reverse' else []), *opts])
+    for reverse in (False, True):
+        with tempfile.TemporaryDirectory(prefix='ngit-d5-fsmonitor-') as tmp:
+            repo, env = fixture(Path(tmp))
+            save(repo, env)
+            put(repo, 'f', b'')
+            ux.git(repo, env, 'add', '-N', 'f')
+            put(repo, '.git/hooks/fsmonitor', b"#!/bin/sh\nprintf 'token\\0'\n")
+            (repo / '.git/hooks/fsmonitor').chmod(0o755)
+            ux.git(repo, env, 'config', 'core.fsmonitor', '.git/hooks/fsmonitor')
+            ux.git(repo, env, 'config', 'core.fsmonitorHookVersion', '2')
+            ux.git(repo, env, 'update-index', '--fsmonitor')
+            ux.git(repo, env, 'update-index', '--fsmonitor-valid', 'f')
+            patch = (b'diff --git a/f b/f\n--- a/f\n+++ b/f\n' +
+                     (b'@@ -1 +0,0 @@\n-new\n' if reverse else b'@@ -0,0 +1 @@\n+new\n'))
+            for opts in (['--index'], ['--index', '--check']):
+                compare(f'd5-reg-4-fsmonitor-ita-R{int(reverse)}-' + ','.join(opts),
+                        repo, env, patch, [*(['-R'] if reverse else []), *opts])
+    # Recorded by the close-out review of D5 and left failing: fsmonitor
+    # enabled through GIT_TEST_FSMONITOR instead of core.fsmonitor.
+    with tempfile.TemporaryDirectory(prefix='ngit-d5-fsmonitor-env-') as tmp:
+        repo, env = fixture(Path(tmp))
+        save(repo, env)
+        put(repo, 'f', b'')
+        ux.git(repo, env, 'add', '-N', 'f')
+        put(repo, '.git/hooks/fsmonitor', b"#!/bin/sh\nprintf 'token\\0'\n")
+        (repo / '.git/hooks/fsmonitor').chmod(0o755)
+        ux.git(repo, env, 'config', 'core.fsmonitor', '.git/hooks/fsmonitor')
+        ux.git(repo, env, 'config', 'core.fsmonitorHookVersion', '2')
+        ux.git(repo, env, 'update-index', '--fsmonitor')
+        ux.git(repo, env, 'update-index', '--fsmonitor-valid', 'f')
+        ux.git(repo, env, 'config', '--unset', 'core.fsmonitor')
+        env = dict(env, GIT_TEST_FSMONITOR='.git/hooks/fsmonitor')
+        compare('d5-deferred-1-fsmonitor-env-ita', repo, env,
+                b'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -0,0 +1 @@\n+new\n',
+                ['--index', '--check'])
+
+    def setup_skip(repo, env):
+        put(repo, 'f', b'old\n')
+        ux.commit(repo, env, 'am base')
+        original = ux.git(repo, env, 'rev-parse', 'HEAD')
+        failed_am(repo, env, second=True)
+        ux.git(repo, env, 'commit', '--allow-empty', '-qm', 'external')
+        ux.git(repo, env, 'pack-refs', '--all')
+        ux.git(repo, env, 'update-ref', 'AUTO_MERGE', original)
+        put(repo, '.git/hooks/reference-transaction', (
+            '#!/bin/sh\ninput=$(cat)\ncase "$1:$input" in\n'
+            ' committed:*AUTO_MERGE*)\n'
+            '  if test ! -f .git/hook-done; then\n'
+            '   touch .git/hook-done\n'
+            f'   git -c core.hooksPath=/dev/null update-ref HEAD {original}\n'
+            '   git -c core.hooksPath=/dev/null pack-refs --all\n'
+            '  fi\n ;;\nesac\nexit 0\n').encode())
+        (repo / '.git/hooks/reference-transaction').chmod(0o755)
+
+    def stage_resolution(repo, env):
+        put(repo, 'f', b'resolved\n')
+        ux.git(repo, env, 'add', 'f')
+
+    case('d5-reg-5-skip-hook-packed-abort', setup_skip,
+         [['am', '--skip'], stage_resolution, ['am', '--abort']])
+    with tempfile.TemporaryDirectory(prefix='ngit-d5-staged-byte-') as tmp:
+        repo, env = fixture(Path(tmp))
+        name = os.fsdecode(b'raw-\xff')
+        put(repo, name, b'old\n')
+        save(repo, env)
+        put(repo, name, b'new\n')
+        ux.git(repo, env, 'add', '--', name)
+        compare('d5-disc-1-stash-staged-raw-ff', repo, env, b'',
+                command=['stash', 'push', '--staged'])
+
+
+def deferred_d4():
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        list(pool.map(deferred_d4_group, ('am', 'R0', 'R1')))
+
+
+def deferred_d4_group(group):
+    # Unlike ux.state, this observer also works after a hook corrupts HEAD.
+    def am_state(repo, env):
+        commands = [('show-ref', '--head'), ('ls-files', '-s'),
+                    ('status', '--porcelain=v1'), ('fsck', '--no-dangling')]
+        observed = {str(cmd): ux.run(['git', *cmd], repo, env) for cmd in commands}
+        observed['files'] = {
+            str(p.relative_to(repo)): p.read_bytes().hex()
+            for p in sorted(repo.rglob('*')) if p.is_file() and
+            (str(p.relative_to(repo)) in ('f', '.git/HEAD', '.git/packed-refs') or
+             str(p.relative_to(repo)).startswith(('.git/refs/', '.git/rebase-apply/')))}
+        observed['am_state'] = (repo / '.git/rebase-apply').is_dir()
+        head = ux.run(['git', 'rev-parse', '--verify', 'HEAD'], repo, env)
+        if head['exit'] == 0:
+            observed['commit'] = ux.run(['git', 'cat-file', '-p', 'HEAD'], repo, env)
+        return observed
+
+    for control in (('continue', 'apply') if group == 'am' else ()):
+        for kind, body in (
+                ('broken-head', 'printf "broken\\n" >.git/HEAD'),
+                ('broken-branch', 'printf "broken\\n" >.git/refs/heads/main'),
+                ('detached', 'git update-ref --no-deref HEAD "$other"'),
+                ('unborn', 'git symbolic-ref HEAD refs/heads/unborn'),
+                ('packed', 'git update-ref HEAD "$other"; git pack-refs --all')):
+            prefix = 'd4-disc-2' if kind == 'packed' else (
+                'd4-disc-1' if kind == 'unborn' else 'd4-reg-1')
+            name = f'{prefix}-{kind}-{control}'
+            if not selected(name):
+                continue
+            with tempfile.TemporaryDirectory(prefix='ngit-d4-am-') as tmp:
+                repo, env = fixture(Path(tmp))
+                put(repo, 'f', b'old\n')
+                save(repo, env)
+                parent = ux.git(repo, env, 'rev-parse', 'HEAD')
+                tree = ux.git(repo, env, 'rev-parse', 'HEAD^{tree}')
+                other = ux.git(repo, env, 'commit-tree', tree, '-p', parent,
+                               '-m', 'hook parent')
+                mail = (b'From: Fixture <fixture@example.test>\n'
+                        b'Date: Tue, 14 Nov 2023 22:13:20 +0000\n'
+                        b'Subject: [PATCH] hook head\n\n' + text_patch())
+                if control == 'continue':
+                    failed = ux.run(['git', 'am'], repo, env,
+                                    mail.replace(b'-old\n', b'-missing\n'))
+                    if failed['exit'] != 128:
+                        raise RuntimeError('expected am conflict: ' + repr(failed))
+                    put(repo, 'f', b'new\n')
+                    ux.git(repo, env, 'add', 'f')
+                if kind == 'packed':
+                    ux.git(repo, env, 'pack-refs', '--all')
+                put(repo, '.git/hooks/pre-applypatch',
+                    f'#!/bin/sh\nother={other}\n{body}\n'.encode())
+                (repo / '.git/hooks/pre-applypatch').chmod(0o755)
+                compare(name, repo, env, b'' if control == 'continue' else mail,
+                        command=['am', '--continue'] if control == 'continue' else ['am'],
+                        inspect=am_state)
+
+    for reverse in (False, True):
+        if group != f'R{int(reverse)}':
+            continue
+        with tempfile.TemporaryDirectory(prefix='ngit-d4-names-') as tmp:
+            repo, env = fixture(Path(tmp))
+            put(repo, 'f', b'new\n' if reverse else b'old\n')
+            save(repo, env)
+            for quoted in (b'""', b'"/dev/null"', b'"b/f"', b'"b/\\146"',
+                           b'"b/\\q"', b'"b/\\14"'):
+                for opts in VARIANTS:
+                    compare(f'd4-reg-2-{quoted!r}-R{int(reverse)}-' + ','.join(opts),
+                            repo, env, text_patch().replace(b'+++ b/f', b'+++ ' + quoted),
+                            [*(['-R'] if reverse else []), *opts])
+        with tempfile.TemporaryDirectory(prefix='ngit-d4-gitlink-') as tmp:
+            repo, env = fixture(Path(tmp))
+            save(repo, env)
+            ux.git(repo, env, 'init', '-q', 'sub')
+            ux.git(repo / 'sub', env, 'commit', '--allow-empty', '-qm', 'sub')
+            ux.git(repo, env, '-c', 'advice.addEmbeddedRepo=false', 'add', '-N', 'sub')
+            patch = ux.run(['git', 'diff', *(['-R'] if reverse else []),
+                            '--ita-visible-in-index', '--', 'sub'], repo, env)['stdout'].encode()
+            for opts in VARIANTS:
+                compare(f'd4-reg-3-gitlink-R{int(reverse)}-' + ','.join(opts),
+                        repo, env, patch, [*(['-R'] if reverse else []), *opts])
+
+
+def deferred_d3():
+    addition = (b'diff --git a/f b/f\nnew file mode 100644\n'
+                b'--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+new\n')
+    epoch = b'--- a/f\t1970-01-01 00:00:00 +0000\n+++ \n@@ -0,0 +1 @@\n+new\n'
+    def additions(reverse):
+        with tempfile.TemporaryDirectory(prefix='ngit-d3-add-') as tmp:
+            repo, env = fixture(Path(tmp))
+            if reverse:
+                put(repo, 'f', b'new\n')
+            save(repo, env)
+            for opts in VARIANTS:
+                flags = [*(['-R'] if reverse else []), *opts]
+                suffix = f'R{int(reverse)}-' + ','.join(opts)
+                compare('d3-reg-1-prose-' + suffix, repo, env,
+                        b'@@ -1  +1 @@\n' + addition, flags)
+                compare('d3-reg-4-empty-name-' + suffix, repo, env, epoch, flags)
+            if not reverse:
+                mail = (b'From: Fixture <fixture@example.test>\n'
+                        b'Date: Tue, 14 Nov 2023 22:13:20 +0000\n'
+                        b'Subject: [PATCH] creation after prose\n\n'
+                        b'---\n@@ -1  +1 @@\n' + addition)
+                compare('d3-reg-1-am-prose', repo, env, mail, command=['am'])
+
+    def renames(reverse):
+        with tempfile.TemporaryDirectory(prefix='ngit-d3-rename-') as tmp:
+            repo, env = fixture(Path(tmp))
+            put(repo, 'g' if reverse else 'f', b'old\n')
+            save(repo, env)
+            for src, dst in (('rename old', 'rename new'),
+                             ('rename from', 'rename to')):
+                for last in ('old', 'new'):
+                    headers = [f'{src} f', f'{dst} g']
+                    if last == 'old':
+                        headers.reverse()
+                    patch = ('diff --git a/f b/g\n' + '\n'.join(headers)).encode()
+                    for opts in VARIANTS:
+                        compare(f'd3-reg-2-{src}-last-{last}-R{int(reverse)}-' + ','.join(opts),
+                                repo, env, patch, [*(['-R'] if reverse else []), *opts])
+            for src, dst in (('copy from', 'rename new'),
+                             ('copy from', 'rename to'),
+                             ('rename old', 'copy to'),
+                             ('rename from', 'copy to')):
+                patch = f'diff --git a/f b/g\n{src} f\n{dst} g\n'.encode()
+                for opts in VARIANTS:
+                    compare(f'd3-reg-3-{src}-{dst}-R{int(reverse)}-' + ','.join(opts),
+                            repo, env, patch, [*(['-R'] if reverse else []), *opts])
+
+    # Independent fixtures keep the complete deferred mode within its deadline.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(run, reverse)
+                   for run in (additions, renames) for reverse in (False, True)]
+        for future in futures:
+            future.result()
 
 
 def deferred_d2():
@@ -377,7 +630,7 @@ def deferred_d2():
             compare('deferred-6-hunk-unterminated-' + ','.join(opts), repo, env,
                     patch.split(b'@@ -3 +3 @@', 1)[0] + b'@@ -3 +3 @@', opts)
 
-    # These review findings remain outside the D1/D2 acceptance selections.
+    # D3 closes the remaining review findings under their original prefixes.
     with tempfile.TemporaryDirectory(prefix='ngit-d2-deferred-') as tmp:
         repo, env = fixture(Path(tmp))
         put(repo, 'f', b'old\n')
@@ -385,11 +638,39 @@ def deferred_d2():
         patch = text_patch().replace(b'--- a/f\n', b'--- a/f 2026-01-01 01:02:03\n')
         patch = patch.replace(b'+++ b/f\n', b'+++ b/f 2026-01-02 01:02:03\n')
         compare('d2-deferred-4-space-timestamp', repo, env, patch)
+        for name in ('2026-01-01', '2026-01-01 01:02:03'):
+            # No delimiter precedes the date in these literal filenames.
+            put(repo, name, b'old\n')
+            ux.git(repo, env, 'add', name)
+            patch = text_patch(name=name).replace(b'--- a/', b'--- ').replace(b'+++ b/', b'+++ ')
+            compare('d2-deferred-4-bare-' + name, repo, env, patch)
+        for stamp in ('2026-01-01 01:02:03 +0900',
+                      '2026-01-01 01:02:03.123456789 -05:30',
+                      '26-01-01 01:02:03.1',
+                      '2026-01-01 01:02:03 -0500'):
+            # The filename itself has spaces; only the timestamp is stripped.
+            put(repo, 'name with spaces', b'old\n')
+            ux.git(repo, env, 'add', 'name with spaces')
+            patch = text_patch(name='name with spaces').replace(
+                b'with spaces\n', ('with spaces   ' + stamp + '\n').encode())
+            for opts in (['--check'], ['--index'], ['--cached', '--check']):
+                compare('d2-deferred-4-' + stamp + '-' + ','.join(opts),
+                        repo, env, patch, opts)
+            put(repo, 'name with spaces', b'new\n')
+            ux.git(repo, env, 'add', 'name with spaces')
+            compare('d2-deferred-4-' + stamp + '-R', repo, env, patch, ['-R'])
         put(repo, 'empty', b'')
         ux.git(repo, env, 'add', '-N', 'empty')
         patch = (b'diff --git a/empty b/empty\n--- a/empty\n+++ b/empty\n'
                  b'@@ -0,0 +1 @@\n+new\n')
         compare('d2-deferred-5-empty-ita-index', repo, env, patch, ['--index'])
+        compare('d2-deferred-5-empty-ita-index-check', repo, env, patch,
+                ['--index', '--check'])
+        reverse_patch = patch.replace(b'@@ -0,0 +1 @@\n+new\n',
+                                      b'@@ -1 +0,0 @@\n-new\n')
+        for opts in (['--index'], ['--index', '--check']):
+            compare('d2-deferred-5-empty-ita-R-' + ','.join(opts),
+                    repo, env, reverse_patch, ['-R', *opts])
 
     def setup_skip(repo, env):
         put(repo, 'f', b'old\n')
@@ -413,7 +694,7 @@ def deferred_d2():
     case('d2-deferred-6-skip-abort-safety', setup_skip,
          [['am', '--continue'], move_head, ['am', '--skip'], ['am', '--abort']])
 
-    def setup_hook(repo, env):
+    def setup_hook(repo, env, same_tree=False):
         put(repo, 'f', b'old\n')
         ux.commit(repo, env, 'am base')
         tree = ux.git(repo, env, 'rev-parse', 'HEAD^{tree}')
@@ -422,10 +703,16 @@ def deferred_d2():
         failed_am(repo, env)
         put(repo, 'f', b'resolved\n')
         ux.git(repo, env, 'add', 'f')
+        if same_tree:
+            # The pre-hook emptiness check must not be repeated on the new HEAD.
+            tree = ux.git(repo, env, 'write-tree')
+            moved = ux.git(repo, env, 'commit-tree', tree, '-p', parent, '-m', 'hook tree')
         put(repo, '.git/hooks/pre-applypatch', f'#!/bin/sh\ngit update-ref HEAD {moved}\n'.encode())
         (repo / '.git/hooks/pre-applypatch').chmod(0o755)
 
     case('d2-deferred-7-hook-moves-head', setup_hook, [['am', '--continue']])
+    case('d2-deferred-7-hook-moves-head-same-tree',
+         lambda repo, env: setup_hook(repo, env, same_tree=True), [['am', '--continue']])
 
 
 def rename_record(old, new, before, after):
