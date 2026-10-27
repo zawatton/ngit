@@ -1,0 +1,103 @@
+#+TITLE: ngit apply/am: the deferred divergences from Git
+
+Requested on 2026-10-27 ("fix the defects only"): the apply/am divergences
+README lists under "apply and am still differ from Git", kept as failing cases
+in `sh test/apply-gen.sh deferred` at 9637206.  No new features; waves B and C
+stay unsupported.  Baseline: 9637206.  Criteria were defined before
+implementation.  Stopping rule: the review of this work fixes regressions and
+the eight defects below; other pre-existing divergences it finds are listed in
+README and added to the deferred mode as failing cases, without reopening
+this objective; D2.1 and D2.6 therefore name the cases and README phrases of
+the eight defects, not the whole mode.  D0.1's evidence is the report of
+`sh test/apply-gen.sh deferred` on 9637206's code (lisp/ and test/ equal
+e57d133): 12 compared, 3 exact, 9 failures.
+D1.10 was added on 2026-10-27 after the independent review of D1 (17 -> 18
+criteria): it covers three regressions that review found (cases d2-reg-*,
+red on the D1 code, green after).  The same review's hunk-like prose after
+a mail signature and traditional full-content deletion were added under
+the D1.2 and D1.3 prefixes (deferred-6-hunk, deferred-7-del2; the latter
+already equalled Git, which also leaves an empty file).  Four pre-existing
+divergences it found are failing cases d2-deferred-* outside D2.1, listed in
+README.
+
+Each case runs Git 2.47.3 and ngit on identical fresh fixtures and compares
+exit code, stdout, stderr and repository state (refs, index, work tree).
+`NGIT_UX_ONLY` (comma-separated case-name prefixes) selects cases; a
+selection with no comparisons exits 1.
+
+* D0 Calibration
+
+** D0.1 Before implementation the deferred mode fails on 9637206 by compared cases (9 of 12; report recorded)
+evidence: tools/ai/evidence/apply-deferred-baseline-9637206.json sha256=77352e25b2ccb7e45413189c658e79095a4735b8e495dab995f62072d4f2f91f
+
+** D0.2 Git compared with itself passes the deferred and e2e modes
+#+TIMEOUT: 600
+cmd: sh -c 'NGIT_UX_COMMAND=git sh test/apply-gen.sh deferred && NGIT_UX_COMMAND=git sh test/apply-gen.sh e2e'
+
+* D1 Fixes
+
+** D1.1 apply against an unmerged index refuses as Git does
+#+TIMEOUT: 600
+cmd: env NGIT_UX_ONLY=deferred-3 sh test/apply-gen.sh deferred
+
+** D1.2 Prose after a mail patch that looks like rename or mode lines is not read as patch metadata
+#+TIMEOUT: 600
+cmd: env NGIT_UX_ONLY=deferred-6 sh test/apply-gen.sh deferred
+
+** D1.3 Traditional diffs that add or delete a file without /dev/null behave as Git (addition and deletion cases)
+#+TIMEOUT: 600
+cmd: env NGIT_UX_ONLY=deferred-7 sh test/apply-gen.sh deferred
+
+** D1.4 --cached and --cached --check additions over an intent-to-add entry behave as Git
+#+TIMEOUT: 600
+cmd: env NGIT_UX_ONLY=deferred-9,f9-deferred-9 sh test/apply-gen.sh deferred
+
+** D1.5 --cached additions keep conflict stages of a directory/file neighbour as Git does
+#+TIMEOUT: 600
+cmd: env NGIT_UX_ONLY=f9-deferred-3 sh test/apply-gen.sh deferred
+
+** D1.6 A file whose unlink fails is not overwritten in place
+#+TIMEOUT: 600
+cmd: env NGIT_UX_ONLY=f9-deferred-4 sh test/apply-gen.sh deferred
+
+** D1.7 Rename records with incomplete headers are rejected as Git rejects them
+#+TIMEOUT: 600
+cmd: env NGIT_UX_ONLY=f9-deferred-5 sh test/apply-gen.sh deferred
+
+** D1.8 am --abort after am --continue made a commit returns to the original HEAD as Git does
+#+TIMEOUT: 600
+cmd: env NGIT_UX_ONLY=f9-deferred-7 sh test/apply-gen.sh deferred
+
+** D1.9 End to end: a mailed series applied with am (a failing patch resolved with --continue, then --skip and --abort), and apply --index/--cached on repositories with unmerged and intent-to-add entries, equal Git
+#+TIMEOUT: 600
+cmd: sh test/apply-gen.sh e2e
+
+** D1.10 Regressions found by the review of D1 (explicit /dev/null over an epoch timestamp, mode headers supplying the missing name, rename old/new headers) equal Git
+#+TIMEOUT: 600
+cmd: env NGIT_UX_ONLY=d2-reg- sh test/apply-gen.sh deferred
+
+* D2 Integration
+
+** D2.1 Every deferred case present at 9637206 passes
+#+TIMEOUT: 600
+cmd: env NGIT_UX_ONLY=deferred-3,deferred-6,deferred-7,deferred-8,deferred-9,deferred-10,f9-deferred-3,f9-deferred-4,f9-deferred-5,f9-deferred-7,f9-deferred-9 sh test/apply-gen.sh deferred
+
+** D2.2 The apply review cases stay green
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode apply-gen review
+
+** D2.3 The generated apply cases stay green
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode apply-gen apply-gen
+
+** D2.4 stash (which applies through the same engine) stays green
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py mode ux-cmds stash
+
+** D2.5 Existing suites that touch messages, history and status stay green
+#+TIMEOUT: 600
+cmd: python3 tools/ux-verify.py regression compare
+
+** D2.6 README no longer lists the eight divergences
+#+TIMEOUT: 60
+cmd: sh -c '! grep -qE "unmerged index|prose after a mail patch|without /dev/null|intent-to-add entry|conflict stages|unlink fails|incomplete headers|am --abort after am --continue" README.org'

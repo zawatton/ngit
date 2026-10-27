@@ -235,8 +235,27 @@
                       "error: git diff header lacks filename information when removing %d leading pathname component%s (line %d)"
                       ngit-patch--p-value (if (= ngit-patch--p-value 1) "" "s") line))
      ((or (and (not (plist-get patch :old)) (not (plist-get patch :is-new)))
-          (and (not (plist-get patch :new)) (not (plist-get patch :is-delete))))
+          (and (not (plist-get patch :new)) (not (plist-get patch :is-delete)))
+          (and (or (plist-get patch :old-header) (plist-get patch :new-header))
+               (not (and (not (plist-get patch :rename)) (not (plist-get patch :copy))
+                         (or (and (plist-get patch :is-new) (not (plist-get patch :old)))
+                             (and (plist-get patch :is-delete) (not (plist-get patch :new))))))
+               (or (and (not (plist-get patch :old-header)) (not (plist-get patch :is-new)))
+                   (and (not (plist-get patch :new-header)) (not (plist-get patch :is-delete))))))
       (ngit--die-with 128 "error: git diff header lacks filename information (line %d)" line)))))
+
+(defun ngit-patch--epoch-header-p (line)
+  "Recognize GNU diff's epoch timestamp, including its numeric timezone."
+  (when (string-match
+         "\t\\(1969-12-31\\|1970-01-01\\) \\([0-2][0-9]\\):\\([0-5][0-9]\\):00\\(?:\\.0+\\)? \\([-+]\\)\\([0-2][0-9]\\):?\\([0-5][0-9]\\)\n\\'"
+         line)
+    (let ((day (match-string 1 line))
+          (minutes (+ (* 60 (string-to-number (match-string 2 line)))
+                      (string-to-number (match-string 3 line))))
+          (zone (* (if (equal (match-string 4 line) "-") -1 1)
+                   (+ (* 60 (string-to-number (match-string 5 line)))
+                      (string-to-number (match-string 6 line))))))
+      (= (- minutes zone) (if (equal day "1969-12-31") 1440 0)))))
 
 (defun ngit-patch--hunk-header (line)
   (when (string-match "\\`@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? +\\+\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? @@" line)
@@ -251,8 +270,30 @@
          (ngit-patch--p-value (or p-value 1)) (p-known (not (null p-value)))
          (patches nil) (no-newlines 0) current hunk malformed-traditional)
     (while (< i n)
-      (let ((line (aref lines i)))
+      (let* ((line (aref lines i))
+             (header-line (seq-some
+                           (lambda (prefix) (string-prefix-p prefix line))
+                           '("index " "old mode " "new mode " "new file mode "
+                             "deleted file mode " "similarity index " "dissimilarity index "
+                             "rename old " "rename new " "rename from " "rename to "
+                             "copy from " "copy to " "--- " "+++ "))))
+        ;; parse_single_patch consumes only consecutive fragments. A gap
+        ;; returns to find_header, which rejects any later orphan fragment.
+        (when (and current hunk (not (string-prefix-p "@@ -" line)))
+          (plist-put current :hunks (append (plist-get current :hunks) (list hunk)))
+          (push current patches)
+          (setq current nil hunk nil))
+        ;; parse_git_diff_header stops at the first non-header line. Once
+        ;; hunks or binary data begin, trailing mail prose is never metadata.
+        (when (and (plist-get current :header-open) (not header-line))
+          (ngit-patch--check-header-name current (- (1+ i) no-newlines))
+          (setq current (plist-put current :header-open nil)))
         (cond
+         ((and (not current) (string-prefix-p "@@ -" line)
+               (string-suffix-p "\n" line)
+               (ngit-patch--hunk-header line))
+          (ngit--die-with 128 "error: patch fragment without header at line %d: %s"
+                          (- (1+ i) no-newlines) (ngit-patch--strip-line line)))
          ((string-prefix-p "diff --git " line)
           (when current
             (ngit-patch--check-header-name current (- (1+ i) no-newlines))
@@ -260,10 +301,11 @@
             (push current patches))
           (let ((name (ngit-patch--header-name line)))
             (setq current (list :hunks nil :old-mode #o100644 :new-mode #o100644
-                                :mode-known nil :git t :header-line (- (+ i 2) no-newlines)
+                                :mode-known nil :git t :header-open t
+                                :header-line (- (+ i 2) no-newlines)
                                 :old name :new name)
                   hunk nil)))
-         ((and current (string-prefix-p "index " line))
+         ((and (plist-get current :header-open) (string-prefix-p "index " line))
           (let* ((text (ngit-patch--strip-line line))
                  (space (string-search " " text 6))
                  (dots (string-search ".." text 6)))
@@ -292,51 +334,64 @@
             (setq current (plist-put current :old nil)))
           (when (= (plist-get current :new-mode) 0)
             (setq current (plist-put current :new nil))))
-         ((and current (string-prefix-p "new file mode " line))
+         ((and (plist-get current :header-open) (string-prefix-p "new file mode " line))
           (setq current (plist-put current :is-new t))
           (setq current (plist-put current :old nil))
           (setq current (plist-put current :mode-known t))
           (setq current (plist-put current :old-mode 0))
           (setq current (plist-put current :new-mode (string-to-number (substring line 14) 8))))
-         ((and current (string-prefix-p "deleted file mode " line))
+         ((and (plist-get current :header-open) (string-prefix-p "deleted file mode " line))
           (setq current (plist-put current :is-delete t))
           (setq current (plist-put current :new nil))
           (setq current (plist-put current :mode-known t))
           (setq current (plist-put current :old-mode (string-to-number (substring line 18) 8)))
           (setq current (plist-put current :new-mode 0)))
-         ((and current (string-prefix-p "old mode " line))
+         ((and (plist-get current :header-open) (string-prefix-p "old mode " line))
           (setq current (plist-put current :mode-change t))
           (setq current (plist-put current :mode-known t))
           (setq current (plist-put current :old-mode (string-to-number (substring line 9) 8))))
-         ((and current (string-prefix-p "new mode " line))
+         ((and (plist-get current :header-open) (string-prefix-p "new mode " line))
           (setq current (plist-put current :mode-change t))
           (setq current (plist-put current :mode-known t))
           (setq current (plist-put current :new-mode (string-to-number (substring line 9) 8))))
-         ((and current (or (string-prefix-p "rename from " line) (string-prefix-p "copy from " line)))
+         ((and (plist-get current :header-open)
+               (or (string-prefix-p "rename from " line) (string-prefix-p "rename old " line)
+                   (string-prefix-p "copy from " line)))
+          (setq current (plist-put current :old-header t))
           (when (string-prefix-p "copy " line) (setq current (plist-put current :copy t)))
           (when (string-prefix-p "rename " line) (setq current (plist-put current :rename t)))
           (setq current (plist-put current :old
                                    (ngit-patch--path line
-                                                     (if (plist-get current :copy) "copy from " "rename from ")
+                                                     (cond ((plist-get current :copy) "copy from ")
+                                                           ((string-prefix-p "rename old " line) "rename old ")
+                                                           (t "rename from "))
                                                      (max 0 (1- ngit-patch--p-value)) nil t))))
-         ((and current (or (string-prefix-p "rename to " line) (string-prefix-p "copy to " line)))
+         ((and (plist-get current :header-open)
+               (or (string-prefix-p "rename to " line) (string-prefix-p "rename new " line)
+                   (string-prefix-p "copy to " line)))
+          (setq current (plist-put current :new-header t))
+          (when (string-prefix-p "copy " line) (setq current (plist-put current :copy t)))
+          (when (string-prefix-p "rename " line) (setq current (plist-put current :rename t)))
           (setq current (plist-put current :new
                                    (ngit-patch--path line
-                                                     (if (plist-get current :copy) "copy to " "rename to ")
+                                                     (cond ((plist-get current :copy) "copy to ")
+                                                           ((string-prefix-p "rename new " line) "rename new ")
+                                                           (t "rename to "))
                                                      (max 0 (1- ngit-patch--p-value)) nil t))))
          ((and (string-prefix-p "--- " line)
-               (or (and (plist-get current :git) (not hunk)
+               (or (and (plist-get current :header-open) (not hunk)
                         (not (plist-get current :hunks)))
                    (and (< (+ i 2) n)
                         (string-prefix-p "+++ " (aref lines (1+ i)))
                         (string-prefix-p "@@ -" (aref lines (+ i 2))))))
-          (if (and (plist-get current :git) (not hunk)
+          (if (and (plist-get current :header-open) (not hunk)
                    (not (plist-get current :hunks)))
               (let ((name (ngit-patch--path line "--- ")))
                 (when (and name (plist-get current :old)
                            (not (equal name (plist-get current :old))))
                   (ngit--die-with 128 "error: git apply: bad git-diff - inconsistent old filename on line %d"
                                   (plist-get current :header-line)))
+                (setq current (plist-put current :old-header t))
                 (setq current (plist-put current :old name)))
             (when current
               (ngit-patch--check-header-name current (- (1+ i) no-newlines))
@@ -354,23 +409,30 @@
                 (setq ngit-patch--p-value p p-known t))
               (let* ((old (and first-name (ngit-patch--path line "--- ")))
                      (name (if (null second-name) old
-                             (ngit-patch--path second "+++ " nil old))))
+                             (ngit-patch--path second "+++ " nil old)))
+                     ;; parse_traditional_patch checks both /dev/null names
+                     ;; before guessing creation/deletion from timestamps.
+                     (creation (or (not first-name)
+                                   (and second-name (ngit-patch--epoch-header-p line))))
+                     (deletion (and (not creation)
+                                    (or (not second-name) (ngit-patch--epoch-header-p second)))))
                 (unless name
                   (ngit--die-with 128 "error: unable to find filename in patch at line %d"
                                   (- (1+ i) no-newlines)))
                 (setq current (list :hunks nil :old-mode #o100644 :new-mode #o100644
-                                    :mode-known nil :old (and first-name name)
-                                    :new (and second-name name))
+                                    :mode-known nil :old (and (not creation) name)
+                                    :new (and (not deletion) name))
                       hunk nil i (1+ i))))))
          ((and (not current) (string-prefix-p "--- " line))
           ;; Skip prose before a later patch, but reject it as the only candidate.
           (setq malformed-traditional t))
-         ((and current (string-prefix-p "+++ " line))
+         ((and (plist-get current :header-open) (string-prefix-p "+++ " line))
           (let ((name (ngit-patch--path line "+++ ")))
             (when (and name (plist-get current :new)
                        (not (equal name (plist-get current :new))))
               (ngit--die-with 128 "error: git apply: bad git-diff - inconsistent new filename on line %d"
                               (plist-get current :header-line)))
+            (setq current (plist-put current :new-header t))
             (setq current (plist-put current :new name))))
          ((and current (string-prefix-p "@@ " line))
           (ngit-patch--check-header-name current (- (1+ i) no-newlines))
@@ -421,7 +483,8 @@
                              '("diff --git " "index " "old mode " "new mode "
                                "new file mode " "deleted file mode "
                                "similarity index " "dissimilarity index "
-                               "rename from " "rename to " "copy from " "copy to "
+                               "rename old " "rename new " "rename from " "rename to "
+                               "copy from " "copy to "
                                "--- " "+++ ")))
           (setq current (plist-put current :header-end (- (+ i 2) no-newlines)))))
       (setq i (1+ i)))
@@ -435,6 +498,13 @@
       (let ((old 0) (new 0))
         (dolist (fragment (plist-get patch :hunks))
           (setq old (+ old (aref fragment 1)) new (+ new (aref fragment 3))))
+        ;; With no explicit creation marker, a single insertion-only hunk
+        ;; may create a missing preimage. Existing files remain modifications.
+        (when (and (not (plist-get patch :git))
+                   (plist-get patch :old) (plist-get patch :new)
+                   (= (length (plist-get patch :hunks)) 1))
+          (when (= old 0) (plist-put patch :maybe-new t))
+          (when (= new 0) (plist-put patch :maybe-delete t)))
         (when (and (not (plist-get patch :old)) (> old 0))
           (ngit--die-with 128 "error: new file %s depends on old contents" (plist-get patch :new)))
         (when (and (not (plist-get patch :new)) (> new 0))
@@ -450,9 +520,14 @@
                         (or (plist-get patch :header-end) (plist-get patch :header-line)))))
     (nreverse patches)))
 
+(defun ngit-patch--index-entry (repo path)
+  "Return only a stage-zero entry, as index_name_pos does in apply.c."
+  (let ((entry (and path (ngit-index-lookup (ngit-index-entries repo) path))))
+    (and entry (= (aref entry 3) 0) entry)))
+
 (defun ngit-patch--source (repo patch cached reverse)
   (let* ((path (if reverse (plist-get patch :new) (plist-get patch :old)))
-         (entry (and path (ngit-index-lookup (ngit-index-entries repo) path))))
+         (entry (ngit-patch--index-entry repo path)))
     (cond
      ((null path) "")
      (cached
@@ -637,6 +712,13 @@
     ;; Inspect the whole post-patch tree before checking or writing any path.
     ;; A symlink introduced later in the input still protects its descendants.
     (dolist (patch patches)
+      (let ((old (if reverse (plist-get patch :new) (plist-get patch :old))))
+        (when (and old (plist-get patch (if reverse :maybe-delete :maybe-new))
+                   (not (if (or cached index-check)
+                            (ngit-patch--index-entry repo old)
+                          (progn (ngit-wt-setup (ngit-repo-toplevel repo))
+                                 (ngit-wt-lstat old)))))
+          (plist-put patch (if reverse :new :old) nil)))
       (let ((old (if reverse (plist-get patch :new) (plist-get patch :old)))
             (path (ngit-patch--target-path patch reverse)))
         ;; Accepted names already have their find_name normalization and
@@ -670,7 +752,7 @@
         ;; Once verified, --index always reads the index, retaining CRLF
         ;; blobs stored before autocrlf was enabled.
         (when (and index-check old-path (not previous))
-          (let* ((entry (ngit-index-lookup (ngit-index-entries repo) old-path))
+          (let* ((entry (ngit-patch--index-entry repo old-path))
                  (st (and entry (not cached) (ngit-wt-lstat old-path))))
             (unless entry
               (ngit--die-with 1 "error: %s: does not exist in index" old-path))
@@ -691,15 +773,17 @@
         (setq source (if previous (plist-get previous :data)
                        (ngit-patch--source repo patch (or cached index-check) reverse)))
         (when (and path (not (equal path old-path)) (not (gethash path removed)))
-          (when (and (or cached index-check)
-                     (ngit-index-lookup (ngit-index-entries repo) path))
-            (ngit--die-with 1 "error: %s: already exists in index" path))
+          (let ((entry (and (or cached index-check) (ngit-patch--index-entry repo path))))
+            (when entry
+              (if (memq 'ita (aref entry 5))
+                  (unless cached (ngit--die-with 1 "error: %s: does not match index" path))
+                (ngit--die-with 1 "error: %s: already exists in index" path))))
           (let ((st (and (not cached) (ngit-wt-lstat path))))
             (when (and st (/= (ngit-wt-mode st) ngit-mode-tree))
               (ngit--die-with 1 "error: %s: already exists in working directory" path))))
         (when old-path
           (let* ((entry (and (or cached index-check)
-                             (ngit-index-lookup (ngit-index-entries repo) old-path)))
+                             (ngit-patch--index-entry repo old-path)))
                  (st (and (not cached) (not previous) (ngit-wt-lstat old-path)))
                  (expected (if reverse (plist-get patch :new-mode) (plist-get patch :old-mode)))
                  (actual (or (and previous (plist-get previous :mode))
@@ -780,6 +864,30 @@
                      (ngit--config-access-message (- rc)))))
         nil))))
 
+(defun ngit-patch--create-file (repo path file mode data)
+  "Create FILE exclusively; replace a surviving preimage via a sibling."
+  (let* ((symlink (and (= mode #o120000) (ngit-config-bool repo "core.symlinks" t)))
+         (perm (ngit-native-creation-mode (if (= mode #o100755) #o777 #o666)))
+         (contents (if symlink (decode-coding-string data 'utf-8)
+                     (ngit--checkout-smudge repo path data)))
+         (create (lambda (name)
+                   (if symlink (make-symbolic-link contents name)
+                     (ngit-write-file name contents t nil perm)))))
+    (condition-case nil
+        (funcall create file)
+      (file-already-exists
+       ;; create_one_file never truncates a file that unlink_or_warn left
+       ;; behind. The parent must permit a new file and an atomic rename.
+       (let ((number (emacs-pid)) temporary done)
+         (while (not done)
+           (setq temporary (concat file "~" (number-to-string number)))
+           (condition-case nil
+               (progn (funcall create temporary) (setq done t))
+             (file-already-exists (setq number (1+ number)))))
+         (unwind-protect (rename-file temporary file t)
+           (when (or (file-exists-p temporary) (file-symlink-p temporary))
+             (delete-file temporary))))))))
+
 (defun ngit-patch--write-worktree (repo prepared)
   ;; Remove preimages before creating any result, including symlinks that
   ;; the post-patch path checks treated as removed ancestors.
@@ -825,20 +933,7 @@
 				    path (ngit--octal6 (plist-get one :mode)) reason)))
 		(ngit-make-directory (file-name-directory file) t)
 		(ngit-wt-setup (ngit-repo-toplevel repo))
-		(let* ((st (ngit-wt-lstat path))
-		       (symlink (and st (= (logand (aref st 0) ngit-s-ifmt) ngit-s-iflnk)))
-		       (target-symlink (= (logand (plist-get one :mode) #o170000) #o120000))
-		       (existed (and st (not symlink)))
-		       (perm (ngit-native-creation-mode
-			      (if (= (plist-get one :mode) #o100755) #o777 #o666))))
-		  (when st (when (or symlink target-symlink) (delete-file file)))
-		  (if (and target-symlink (ngit-config-bool repo "core.symlinks" t))
-		      (make-symbolic-link (decode-coding-string (plist-get one :data) 'utf-8) file)
-		    (ngit-write-file file (ngit--checkout-smudge repo path (plist-get one :data))
-				     nil nil (and (not existed) perm))
-		    (when (and existed (/= (logand (file-modes file) #o111)
-					   (logand perm #o111)))
-		      (set-file-modes file perm)))))
+		(ngit-patch--create-file repo path file (plist-get one :mode) (plist-get one :data)))
             (error
              (if (eq (car err) 'ngit-fatal) (signal (car err) (cdr err))
                ;; create_one_file probes lstat after EACCES, so a missing
@@ -905,7 +1000,22 @@
                                  (make-string 12 0)))))
             (puthash path (ngit-make-entry path oid mode stat) latest)))))
     (maphash (lambda (_path entry) (push entry targets)) latest)
-    (setq entries (ngit-index-overlay entries (sort targets #'ngit--entry-less) dropped))
+    (let ((conflicts (make-hash-table :test 'equal)) (old entries))
+      (setq entries
+            (ngit-index-overlay
+             entries (sort targets #'ngit--entry-less) dropped
+             (lambda (entry)
+               (when (> (aref entry 3) 0) (puthash (aref entry 0) t conflicts)))))
+      ;; D/F coexistence is legal across stages. Overlay's general-purpose
+      ;; topology cleanup must not erase those unrelated conflict records.
+      (when (> (hash-table-count conflicts) 0)
+        (let (retained)
+          (dotimes (i (length old))
+            (let* ((entry (aref old i)) (name (aref entry 0)))
+              (when (and (> (aref entry 3) 0) (gethash name conflicts)
+                         (not (gethash name latest)) (not (gethash name dropped)))
+                (push entry retained))))
+          (setq entries (vconcat (sort (append entries retained) #'ngit--entry-less))))))
     (ngit-write-index repo index entries root)))
 
 (defun ngit-patch--emit-offsets (prepared)
@@ -1331,6 +1441,7 @@
                                nil t nil t))
         (ngit-hook-run repo "post-applypatch")
         (ngit-ref-delete-state repo "REBASE_HEAD")
+        (ngit-patch--am-write repo "abort-safety" (concat (ngit-resolve-ref repo "HEAD") "\n"))
         (ngit-patch--am-write repo "next" (format "%d\n" (1+ (car cur))))
         (ngit-patch--am-run repo))))))
 

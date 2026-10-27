@@ -1,0 +1,1000 @@
+{
+  "comparisons": 12,
+  "exact": 3,
+  "intended": {},
+  "failures": 9,
+  "unexpected_errors": 0,
+  "cases": [
+    {
+      "name": "deferred-3",
+      "argv": [
+        "apply",
+        "--cached"
+      ],
+      "equal": false,
+      "expected": {
+        "exit": 1,
+        "stdout": "",
+        "stderr": "error: f: does not exist in index\n"
+      },
+      "actual": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "state_equal": false,
+      "expected_state": {
+        "files": {
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e HEAD\n0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3367afdbbf91e638efe983616377c60477cc6612 1\tf\n100644 b19a1e93bec1317dc6097229e12afaffbfa74dc2 2\tf\n100644 950b81b7eee953d050aa05a641f8e056c85dd1bd 3\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "UU f",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e": "tree 6ad5e45e0d14c7427bb1d5cf61079a8592eca21f\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "actual_state": {
+        "files": {
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e HEAD\n0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3e757656cf36eca53338e520d134963a44f793f8 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "100644 3367afdbbf91e638efe983616377c60477cc6612 1\tf\n100644 b19a1e93bec1317dc6097229e12afaffbfa74dc2 2\tf\n100644 950b81b7eee953d050aa05a641f8e056c85dd1bd 3\tf",
+        "status": "MM f",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e": "tree 6ad5e45e0d14c7427bb1d5cf61079a8592eca21f\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "patch": "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n"
+    },
+    {
+      "name": "deferred-6",
+      "argv": [
+        "apply"
+      ],
+      "equal": false,
+      "expected": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "actual": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "state_equal": false,
+      "expected_state": {
+        "files": {
+          "f": [
+            436,
+            "bmV3Cg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e HEAD\n0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "M f",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e": "tree 6ad5e45e0d14c7427bb1d5cf61079a8592eca21f\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "actual_state": {
+        "files": {
+          "g": [
+            436,
+            "bmV3Cg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e HEAD\n0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "D f\n?? g",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e": "tree 6ad5e45e0d14c7427bb1d5cf61079a8592eca21f\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "patch": "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n\n-- \nrename to g\n"
+    },
+    {
+      "name": "deferred-7",
+      "argv": [
+        "apply"
+      ],
+      "equal": false,
+      "expected": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "actual": {
+        "exit": 1,
+        "stdout": "",
+        "stderr": "error: f: No such file or directory\n"
+      },
+      "state_equal": false,
+      "expected_state": {
+        "files": {
+          "f": [
+            436,
+            "bmV3Cg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e HEAD\n0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "D  f\n?? f",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e": "tree 6ad5e45e0d14c7427bb1d5cf61079a8592eca21f\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "actual_state": {
+        "files": {
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e HEAD\n0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "D  f",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e": "tree 6ad5e45e0d14c7427bb1d5cf61079a8592eca21f\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "patch": "--- a/f\n+++ b/f\n@@ -0,0 +1 @@\n+new\n"
+    },
+    {
+      "name": "deferred-8",
+      "argv": [
+        "apply",
+        "--index"
+      ],
+      "equal": true,
+      "expected": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "actual": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "state_equal": true,
+      "expected_state": {
+        "files": {
+          "a": [
+            "link",
+            "second-target"
+          ],
+          "b": [
+            "link",
+            "first-target"
+          ],
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "4d06cb4b93b81526e7fc98f5bb4052396652d081 HEAD\n4d06cb4b93b81526e7fc98f5bb4052396652d081 refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "120000 c907aacaebc2b0cbda3ba3ca92b6be4b9f0fb5f7 0\ta\n120000 094df80e78203bc6ff2b87a203ae07a08734c53f 0\tb\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "M  a\nM  b",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "4d06cb4b93b81526e7fc98f5bb4052396652d081": "tree 558f6235dc03cc1f0ba71b39e411e6ca64253fee\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "actual_state": {
+        "files": {
+          "a": [
+            "link",
+            "second-target"
+          ],
+          "b": [
+            "link",
+            "first-target"
+          ],
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "4d06cb4b93b81526e7fc98f5bb4052396652d081 HEAD\n4d06cb4b93b81526e7fc98f5bb4052396652d081 refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "120000 c907aacaebc2b0cbda3ba3ca92b6be4b9f0fb5f7 0\ta\n120000 094df80e78203bc6ff2b87a203ae07a08734c53f 0\tb\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "M  a\nM  b",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "4d06cb4b93b81526e7fc98f5bb4052396652d081": "tree 558f6235dc03cc1f0ba71b39e411e6ca64253fee\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "patch": "diff --git a/a b/b\nsimilarity index 100%\nrename from a\nrename to b\nindex 094df80e78203bc6ff2b87a203ae07a08734c53f..094df80e78203bc6ff2b87a203ae07a08734c53f 120000\ndiff --git a/b b/a\nsimilarity index 100%\nrename from b\nrename to a\nindex c907aacaebc2b0cbda3ba3ca92b6be4b9f0fb5f7..c907aacaebc2b0cbda3ba3ca92b6be4b9f0fb5f7 120000\n"
+    },
+    {
+      "name": "deferred-9",
+      "argv": [
+        "apply",
+        "--cached"
+      ],
+      "equal": false,
+      "expected": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "actual": {
+        "exit": 1,
+        "stdout": "",
+        "stderr": "error: new: already exists in index\n"
+      },
+      "state_equal": false,
+      "expected_state": {
+        "files": {
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "new": [
+            436,
+            "bmV3Cg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e HEAD\n0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 3e757656cf36eca53338e520d134963a44f793f8 0\tnew\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "A  new",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e": "tree 6ad5e45e0d14c7427bb1d5cf61079a8592eca21f\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "actual_state": {
+        "files": {
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "new": [
+            436,
+            "bmV3Cg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e HEAD\n0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 0\tnew\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "A new",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "0c1a9ffe9ed62fc2eeaa0f1e71c107829bb5aa3e": "tree 6ad5e45e0d14c7427bb1d5cf61079a8592eca21f\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "patch": "diff --git a/new b/new\nnew file mode 100644\n--- /dev/null\n+++ b/new\n@@ -0,0 +1 @@\n+new\n"
+    },
+    {
+      "name": "deferred-10",
+      "argv": [
+        "apply",
+        "--index"
+      ],
+      "equal": true,
+      "expected": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "actual": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "state_equal": true,
+      "expected_state": {
+        "files": {
+          "f": [
+            436,
+            "bmV3"
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "7f7a76cfa098a1be103596a25e017cfe7df44345 HEAD\n7f7a76cfa098a1be103596a25e017cfe7df44345 refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "120000 3e5126c4e761fd09582fc517918a1601b218dff0 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "M  f",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true\ncore.symlinks=false",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQoJc3ltbGlua3MgPSBmYWxzZQo=",
+        "objects": {
+          "7f7a76cfa098a1be103596a25e017cfe7df44345": "tree 0099c259c68fab00c8c7dde67315fa7f5249724a\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "actual_state": {
+        "files": {
+          "f": [
+            436,
+            "bmV3"
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "7f7a76cfa098a1be103596a25e017cfe7df44345 HEAD\n7f7a76cfa098a1be103596a25e017cfe7df44345 refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "120000 3e5126c4e761fd09582fc517918a1601b218dff0 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "M  f",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true\ncore.symlinks=false",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQoJc3ltbGlua3MgPSBmYWxzZQo=",
+        "objects": {
+          "7f7a76cfa098a1be103596a25e017cfe7df44345": "tree 0099c259c68fab00c8c7dde67315fa7f5249724a\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "patch": "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n"
+    },
+    {
+      "name": "f9-deferred-3-df-conflict-stages",
+      "argv": [
+        "apply",
+        "--cached"
+      ],
+      "equal": false,
+      "expected": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "actual": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "state_equal": false,
+      "expected_state": {
+        "files": {
+          "d": [
+            "directory",
+            509
+          ],
+          "d/f": [
+            436,
+            "b2xkCg=="
+          ],
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "06e8784f4637d0b4037ff93ccf53735a71b72017 HEAD\n06e8784f4637d0b4037ff93ccf53735a71b72017 refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3e757656cf36eca53338e520d134963a44f793f8 0\ta\n100644 afeb4107c4c1499b61eea96e109f92c827b5ddd4 1\ta/precious\n100644 c33f7fba607671eefd49a66266de1b04931a3f5a 2\ta/precious\n100644 67ce10a269b3565b01a72097a89da58530ceb2ab 3\ta/precious\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\td/f\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "AD a\nUU a/precious",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "06e8784f4637d0b4037ff93ccf53735a71b72017": "tree 240f03b4dccbb7210dd85acf63d332fbaf60fe07\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "actual_state": {
+        "files": {
+          "d": [
+            "directory",
+            509
+          ],
+          "d/f": [
+            436,
+            "b2xkCg=="
+          ],
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "06e8784f4637d0b4037ff93ccf53735a71b72017 HEAD\n06e8784f4637d0b4037ff93ccf53735a71b72017 refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3e757656cf36eca53338e520d134963a44f793f8 0\ta\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\td/f\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "100644 afeb4107c4c1499b61eea96e109f92c827b5ddd4 1\ta/precious\n100644 c33f7fba607671eefd49a66266de1b04931a3f5a 2\ta/precious\n100644 67ce10a269b3565b01a72097a89da58530ceb2ab 3\ta/precious",
+        "status": "AD a",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "06e8784f4637d0b4037ff93ccf53735a71b72017": "tree 240f03b4dccbb7210dd85acf63d332fbaf60fe07\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "patch": "diff --git a/a b/a\nnew file mode 100644\n--- /dev/null\n+++ b/a\n@@ -0,0 +1 @@\n+new\n"
+    },
+    {
+      "name": "f9-deferred-4-unlink-overwrite",
+      "argv": [
+        "apply"
+      ],
+      "equal": false,
+      "expected": {
+        "exit": 128,
+        "stdout": "",
+        "stderr": "warning: unable to unlink 'd/f': Permission denied\nerror: unable to write file 'd/f' mode 100644: Permission denied\n"
+      },
+      "actual": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": "warning: unable to unlink 'd/f': Permission denied\n"
+      },
+      "state_equal": false,
+      "expected_state": {
+        "files": {
+          "d": [
+            "directory",
+            365
+          ],
+          "d/f": [
+            436,
+            "b2xkCg=="
+          ],
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "06e8784f4637d0b4037ff93ccf53735a71b72017 HEAD\n06e8784f4637d0b4037ff93ccf53735a71b72017 refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3367afdbbf91e638efe983616377c60477cc6612 0\td/f\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "06e8784f4637d0b4037ff93ccf53735a71b72017": "tree 240f03b4dccbb7210dd85acf63d332fbaf60fe07\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "actual_state": {
+        "files": {
+          "d": [
+            "directory",
+            365
+          ],
+          "d/f": [
+            436,
+            "bmV3Cg=="
+          ],
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "06e8784f4637d0b4037ff93ccf53735a71b72017 HEAD\n06e8784f4637d0b4037ff93ccf53735a71b72017 refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3367afdbbf91e638efe983616377c60477cc6612 0\td/f\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "M d/f",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "06e8784f4637d0b4037ff93ccf53735a71b72017": "tree 240f03b4dccbb7210dd85acf63d332fbaf60fe07\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "patch": "--- a/d/f\n+++ b/d/f\n@@ -1 +1 @@\n-old\n+new\n"
+    },
+    {
+      "name": "f9-deferred-5-incomplete-rename",
+      "argv": [
+        "apply"
+      ],
+      "equal": false,
+      "expected": {
+        "exit": 128,
+        "stdout": "",
+        "stderr": "error: git diff header lacks filename information (line 4)\n"
+      },
+      "actual": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "state_equal": false,
+      "expected_state": {
+        "files": {
+          "d": [
+            "directory",
+            493
+          ],
+          "d/f": [
+            436,
+            "b2xkCg=="
+          ],
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "06e8784f4637d0b4037ff93ccf53735a71b72017 HEAD\n06e8784f4637d0b4037ff93ccf53735a71b72017 refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3367afdbbf91e638efe983616377c60477cc6612 0\td/f\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "06e8784f4637d0b4037ff93ccf53735a71b72017": "tree 240f03b4dccbb7210dd85acf63d332fbaf60fe07\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "actual_state": {
+        "files": {
+          "d": [
+            "directory",
+            493
+          ],
+          "d/f": [
+            436,
+            "bmV3Cg=="
+          ],
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "06e8784f4637d0b4037ff93ccf53735a71b72017 HEAD\n06e8784f4637d0b4037ff93ccf53735a71b72017 refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3367afdbbf91e638efe983616377c60477cc6612 0\td/f\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "M d/f",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "06e8784f4637d0b4037ff93ccf53735a71b72017": "tree 240f03b4dccbb7210dd85acf63d332fbaf60fe07\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "patch": "diff --git a/f b/f\nsimilarity index 100%\nrename from f\ndiff --git a/d/f b/d/f\n--- a/d/f\n+++ b/d/f\n@@ -1 +1 @@\n-old\n+new\n"
+    },
+    {
+      "name": "f9-deferred-9-intent-to-add",
+      "argv": [
+        "apply",
+        "--cached",
+        "--check"
+      ],
+      "equal": false,
+      "expected": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "actual": {
+        "exit": 1,
+        "stdout": "",
+        "stderr": "error: new: already exists in index\n"
+      },
+      "state_equal": true,
+      "expected_state": {
+        "files": {
+          "d": [
+            "directory",
+            493
+          ],
+          "d/f": [
+            436,
+            "b2xkCg=="
+          ],
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "new": [
+            436,
+            "bmV3Cg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "06e8784f4637d0b4037ff93ccf53735a71b72017 HEAD\n06e8784f4637d0b4037ff93ccf53735a71b72017 refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3367afdbbf91e638efe983616377c60477cc6612 0\td/f\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 0\tnew\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "A new",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "06e8784f4637d0b4037ff93ccf53735a71b72017": "tree 240f03b4dccbb7210dd85acf63d332fbaf60fe07\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "actual_state": {
+        "files": {
+          "d": [
+            "directory",
+            493
+          ],
+          "d/f": [
+            436,
+            "b2xkCg=="
+          ],
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "new": [
+            436,
+            "bmV3Cg=="
+          ],
+          "sentinel": [
+            436,
+            "dW50b3VjaGVkCg=="
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "06e8784f4637d0b4037ff93ccf53735a71b72017 HEAD\n06e8784f4637d0b4037ff93ccf53735a71b72017 refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 3367afdbbf91e638efe983616377c60477cc6612 0\td/f\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 0\tnew\n100644 00920521bb6dbc13dc901e35d84bde1ddf52583d 0\tsentinel",
+        "resolve_undo": "",
+        "status": "A new",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "06e8784f4637d0b4037ff93ccf53735a71b72017": "tree 240f03b4dccbb7210dd85acf63d332fbaf60fe07\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nfixture\n"
+        }
+      },
+      "patch": "diff --git a/new b/new\nnew file mode 100644\n--- /dev/null\n+++ b/new\n@@ -0,0 +1 @@\n+new\n"
+    },
+    {
+      "name": "f9-deferred-7-continue-abort-safety/0",
+      "argv": [
+        "am",
+        "--continue"
+      ],
+      "equal": true,
+      "expected": {
+        "exit": 128,
+        "stdout": "Applying: resolve first\nApplying: fails second\nPatch failed at 0002 fails second\n",
+        "stderr": "error: patch failed: f:1\nerror: f: patch does not apply\nhint: Use 'git am --show-current-patch=diff' to see the failed patch\nhint: When you have resolved this problem, run \"git am --continue\".\nhint: If you prefer to skip this patch, run \"git am --skip\" instead.\nhint: To restore the original branch and stop patching, run \"git am --abort\".\nhint: Disable this message with \"git config advice.mergeConflict false\"\n"
+      },
+      "actual": {
+        "exit": 128,
+        "stdout": "Applying: resolve first\nApplying: fails second\nPatch failed at 0002 fails second\n",
+        "stderr": "error: patch failed: f:1\nerror: f: patch does not apply\nhint: Use 'git am --show-current-patch=diff' to see the failed patch\nhint: When you have resolved this problem, run \"git am --continue\".\nhint: If you prefer to skip this patch, run \"git am --skip\" instead.\nhint: To restore the original branch and stop patching, run \"git am --abort\".\nhint: Disable this message with \"git config advice.mergeConflict false\"\n"
+      },
+      "state_equal": true,
+      "expected_state": {
+        "files": {
+          ".gitignore": [
+            436,
+            "Ki5sb2cKaWdub3JlZC8K"
+          ],
+          "f": [
+            436,
+            "cmVzb2x2ZWQK"
+          ],
+          "file": [
+            436,
+            "b25lCnR3bwp0aHJlZQpmb3VyCmZpdmUK"
+          ],
+          "other": [
+            436,
+            "b3RoZXIK"
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "6d6c91b81e112dd990bf6590ff518f29a017daec HEAD\n6d6c91b81e112dd990bf6590ff518f29a017daec refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 7baf3a82b6efc6b97a0d6219e878045a8a51d98b 0\t.gitignore\n100644 2ab19ae607aabda796309682e0448237aab03047 0\tf\n100644 b2f931a67315c95c5daab3aac6de62e534808476 0\tfile\n100644 e45c9c2666d44e0327c1f9c239a74c508336053e 0\tother",
+        "resolve_undo": "",
+        "status": "",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "6d6c91b81e112dd990bf6590ff518f29a017daec": "tree 005ae7f43e91149c19028dd92dccdf4f1fdca572\nparent d86685404fa5585cd459298536f3e074131f7b3d\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nresolve first\n",
+          "d86685404fa5585cd459298536f3e074131f7b3d": "tree ae3ba8391d0011cbefffd2b50d073ced73793ef0\nparent fbcdccb4d79501ec0089a8589c9877fe92b58993\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nam base\n",
+          "fbcdccb4d79501ec0089a8589c9877fe92b58993": "tree 528c56605b3bb7be56f9c80d199ec0aa99569c46\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nbase\n"
+        }
+      },
+      "actual_state": {
+        "files": {
+          ".gitignore": [
+            436,
+            "Ki5sb2cKaWdub3JlZC8K"
+          ],
+          "f": [
+            436,
+            "cmVzb2x2ZWQK"
+          ],
+          "file": [
+            436,
+            "b25lCnR3bwp0aHJlZQpmb3VyCmZpdmUK"
+          ],
+          "other": [
+            436,
+            "b3RoZXIK"
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "6d6c91b81e112dd990bf6590ff518f29a017daec HEAD\n6d6c91b81e112dd990bf6590ff518f29a017daec refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 7baf3a82b6efc6b97a0d6219e878045a8a51d98b 0\t.gitignore\n100644 2ab19ae607aabda796309682e0448237aab03047 0\tf\n100644 b2f931a67315c95c5daab3aac6de62e534808476 0\tfile\n100644 e45c9c2666d44e0327c1f9c239a74c508336053e 0\tother",
+        "resolve_undo": "",
+        "status": "",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "6d6c91b81e112dd990bf6590ff518f29a017daec": "tree 005ae7f43e91149c19028dd92dccdf4f1fdca572\nparent d86685404fa5585cd459298536f3e074131f7b3d\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nresolve first\n",
+          "d86685404fa5585cd459298536f3e074131f7b3d": "tree ae3ba8391d0011cbefffd2b50d073ced73793ef0\nparent fbcdccb4d79501ec0089a8589c9877fe92b58993\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nam base\n",
+          "fbcdccb4d79501ec0089a8589c9877fe92b58993": "tree 528c56605b3bb7be56f9c80d199ec0aa99569c46\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nbase\n"
+        }
+      }
+    },
+    {
+      "name": "f9-deferred-7-continue-abort-safety/1",
+      "argv": [
+        "am",
+        "--abort"
+      ],
+      "equal": false,
+      "expected": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "actual": {
+        "exit": 0,
+        "stdout": "",
+        "stderr": "warning: You seem to have moved HEAD since the last 'am' failure.\nNot rewinding to ORIG_HEAD\n"
+      },
+      "state_equal": false,
+      "expected_state": {
+        "files": {
+          ".gitignore": [
+            436,
+            "Ki5sb2cKaWdub3JlZC8K"
+          ],
+          "f": [
+            436,
+            "b2xkCg=="
+          ],
+          "file": [
+            436,
+            "b25lCnR3bwp0aHJlZQpmb3VyCmZpdmUK"
+          ],
+          "other": [
+            436,
+            "b3RoZXIK"
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "d86685404fa5585cd459298536f3e074131f7b3d HEAD\nd86685404fa5585cd459298536f3e074131f7b3d refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 7baf3a82b6efc6b97a0d6219e878045a8a51d98b 0\t.gitignore\n100644 3367afdbbf91e638efe983616377c60477cc6612 0\tf\n100644 b2f931a67315c95c5daab3aac6de62e534808476 0\tfile\n100644 e45c9c2666d44e0327c1f9c239a74c508336053e 0\tother",
+        "resolve_undo": "",
+        "status": "",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "d86685404fa5585cd459298536f3e074131f7b3d": "tree ae3ba8391d0011cbefffd2b50d073ced73793ef0\nparent fbcdccb4d79501ec0089a8589c9877fe92b58993\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nam base\n",
+          "fbcdccb4d79501ec0089a8589c9877fe92b58993": "tree 528c56605b3bb7be56f9c80d199ec0aa99569c46\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nbase\n"
+        }
+      },
+      "actual_state": {
+        "files": {
+          ".gitignore": [
+            436,
+            "Ki5sb2cKaWdub3JlZC8K"
+          ],
+          "f": [
+            436,
+            "cmVzb2x2ZWQK"
+          ],
+          "file": [
+            436,
+            "b25lCnR3bwp0aHJlZQpmb3VyCmZpdmUK"
+          ],
+          "other": [
+            436,
+            "b3RoZXIK"
+          ]
+        },
+        "refs": {
+          "exit": 0,
+          "stdout": "6d6c91b81e112dd990bf6590ff518f29a017daec HEAD\n6d6c91b81e112dd990bf6590ff518f29a017daec refs/heads/main\n",
+          "stderr": ""
+        },
+        "head": "refs/heads/main",
+        "index": "100644 7baf3a82b6efc6b97a0d6219e878045a8a51d98b 0\t.gitignore\n100644 2ab19ae607aabda796309682e0448237aab03047 0\tf\n100644 b2f931a67315c95c5daab3aac6de62e534808476 0\tfile\n100644 e45c9c2666d44e0327c1f9c239a74c508336053e 0\tother",
+        "resolve_undo": "",
+        "status": "",
+        "config": "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true",
+        "config_bytes": "W2NvcmVdCglyZXBvc2l0b3J5Zm9ybWF0dmVyc2lvbiA9IDAKCWZpbGVtb2RlID0gdHJ1ZQoJYmFyZSA9IGZhbHNlCglsb2dhbGxyZWZ1cGRhdGVzID0gdHJ1ZQo=",
+        "objects": {
+          "6d6c91b81e112dd990bf6590ff518f29a017daec": "tree 005ae7f43e91149c19028dd92dccdf4f1fdca572\nparent d86685404fa5585cd459298536f3e074131f7b3d\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nresolve first\n",
+          "d86685404fa5585cd459298536f3e074131f7b3d": "tree ae3ba8391d0011cbefffd2b50d073ced73793ef0\nparent fbcdccb4d79501ec0089a8589c9877fe92b58993\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nam base\n",
+          "fbcdccb4d79501ec0089a8589c9877fe92b58993": "tree 528c56605b3bb7be56f9c80d199ec0aa99569c46\nauthor Fixture <fixture@example.test> 1700000000 +0000\ncommitter Fixture <fixture@example.test> 1700000000 +0000\n\nbase\n"
+        }
+      }
+    }
+  ],
+  "seconds": 24.998
+}

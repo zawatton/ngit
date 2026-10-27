@@ -12,6 +12,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parents[1]
+# Read selectors before fixture environments discard NGIT_* overrides.
+ONLY = tuple(p for p in os.environ.get('NGIT_UX_ONLY', '').split(',') if p)
 spec = importlib.util.spec_from_file_location('ux_cmds', ROOT / 'test/ux-cmds.py')
 ux = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ux)
@@ -19,6 +21,15 @@ REPORT = ux.REPORT
 VARIANTS = ([], ['--check'], ['--index'], ['--index', '--check'],
             ['--cached'], ['--cached', '--check'])
 SEED = 2473007
+
+
+def selected(name):
+    return (not ONLY or name.startswith(ONLY)) and (not ux.MATCH or ux.MATCH in name)
+
+
+def case(name, setup, commands):
+    if selected(name):
+        ux.case(name, setup, commands)
 
 
 def put(repo, path, data):
@@ -37,7 +48,7 @@ def clear_permissions(repo):
 
 
 def compare(name, repo, env, patch, opts=(), cwd='.', command=None, before=None):
-    if ux.MATCH and ux.MATCH not in name:
+    if not selected(name):
         return
     snapshot = repo.parent / 'snapshot'
     shutil.copytree(repo, snapshot, symlinks=True)
@@ -287,8 +298,134 @@ def deferred():
                          b'+new\n\\ No newline at end of file\n')
                 opts = ['--index']
             compare(f'deferred-{finding}', repo, env, patch, opts)
+            if finding == 7:
+                put(repo, 'f', b'old\n')
+                ux.git(repo, env, 'add', 'f')
+                deletion = b'--- a/f\n+++ b/f\n@@ -1 +0,0 @@\n-old\n'
+                compare('deferred-7-delete', repo, env, deletion)
+                compare('deferred-7-delete-epoch', repo, env,
+                        deletion.replace(b'+++ b/f\n',
+                                         b'+++ b/f\t1970-01-01 00:00:00 +0000\n'))
 
     deferred_f9()
+    deferred_d2()
+
+
+def deferred_d2():
+    deletion = b'--- a/f\n+++ b/f\n@@ -1 +0,0 @@\n-old\n'
+    addition = b'--- a/f\n+++ b/f\n@@ -0,0 +1 @@\n+old\n'
+    for reverse in (False, True):
+        with tempfile.TemporaryDirectory(prefix='ngit-d2-traditional-') as tmp:
+            repo, env = fixture(Path(tmp))
+            put(repo, 'f', b'old\n')
+            save(repo, env)
+            for opts in VARIANTS:
+                flags = [*(['-R'] if reverse else []), *opts]
+                suffix = f'R{int(reverse)}-' + ','.join(opts)
+                compare('deferred-7-del2-' + suffix, repo, env,
+                        addition if reverse else deletion, flags)
+            # Explicit /dev/null must win over the old name's epoch timestamp.
+            if reverse:
+                ux.git(repo, env, 'rm', 'f')
+            epoch = deletion.replace(b'--- a/f\n',
+                                     b'--- a/f\t1970-01-01 00:00:00 +0000\n')
+            epoch = epoch.replace(b'+++ b/f\n', b'+++ /dev/null\n')
+            for opts in VARIANTS:
+                compare(f'd2-reg-1-R{int(reverse)}-' + ','.join(opts), repo, env,
+                        epoch, [*(['-R'] if reverse else []), *opts])
+
+    for delete in (False, True):
+        for reverse in (False, True):
+            with tempfile.TemporaryDirectory(prefix='ngit-d2-mode-') as tmp:
+                repo, env = fixture(Path(tmp))
+                if delete != reverse:
+                    put(repo, 'f', b'old\n')
+                save(repo, env)
+                patch = (b'diff --git a/f b/f\n' +
+                         (b'deleted file mode 100644\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n'
+                          if delete else
+                          b'new file mode 100644\n--- /dev/null\n@@ -0,0 +1 @@\n+old\n'))
+                for opts in VARIANTS:
+                    compare(f'd2-reg-8-del{int(delete)}-R{int(reverse)}-' + ','.join(opts),
+                            repo, env, patch, [*(['-R'] if reverse else []), *opts])
+
+    # Exercise the entire extended-header vocabulary in parse_git_diff_header.
+    for kind, src, dst in (('legacy', 'rename old', 'rename new'),
+                           ('rename', 'rename from', 'rename to'),
+                           ('copy', 'copy from', 'copy to')):
+        with tempfile.TemporaryDirectory(prefix='ngit-d2-headers-') as tmp:
+            repo, env = fixture(Path(tmp))
+            put(repo, 'f', b'old\n')
+            save(repo, env)
+            before = ux.git(repo, env, 'rev-parse', 'HEAD:f')
+            after = ux.git(repo, env, 'hash-object', '-w', '--stdin', data=b'new\n')
+            patch = (f'diff --git a/f b/g\nold mode 100644\nnew mode 100755\n'
+                     f'similarity index 50%\ndissimilarity index 50%\n'
+                     f'{src} f\n{dst} g\nindex {before}..{after}\n'
+                     f'--- a/f\n+++ b/g\n@@ -1 +1 @@\n-old\n+new\n').encode()
+            for opts in VARIANTS:
+                compare('d2-reg-9-' + kind + '-' + ','.join(opts), repo, env, patch, opts)
+
+    with tempfile.TemporaryDirectory(prefix='ngit-d2-mail-hunk-') as tmp:
+        repo, env = fixture(Path(tmp))
+        put(repo, 'f', b'old\nmiddle\nthird\n')
+        save(repo, env)
+        patch = (b'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n'
+                 b'-old\n+new\n middle\n\n-- \nRegards\n@@ -3 +3 @@\n-third\n+TAMPER\n')
+        for opts in VARIANTS:
+            compare('deferred-6-hunk-signature-' + ','.join(opts), repo, env, patch, opts)
+            compare('deferred-6-hunk-unterminated-' + ','.join(opts), repo, env,
+                    patch.split(b'@@ -3 +3 @@', 1)[0] + b'@@ -3 +3 @@', opts)
+
+    # These review findings remain outside the D1/D2 acceptance selections.
+    with tempfile.TemporaryDirectory(prefix='ngit-d2-deferred-') as tmp:
+        repo, env = fixture(Path(tmp))
+        put(repo, 'f', b'old\n')
+        save(repo, env)
+        patch = text_patch().replace(b'--- a/f\n', b'--- a/f 2026-01-01 01:02:03\n')
+        patch = patch.replace(b'+++ b/f\n', b'+++ b/f 2026-01-02 01:02:03\n')
+        compare('d2-deferred-4-space-timestamp', repo, env, patch)
+        put(repo, 'empty', b'')
+        ux.git(repo, env, 'add', '-N', 'empty')
+        patch = (b'diff --git a/empty b/empty\n--- a/empty\n+++ b/empty\n'
+                 b'@@ -0,0 +1 @@\n+new\n')
+        compare('d2-deferred-5-empty-ita-index', repo, env, patch, ['--index'])
+
+    def setup_skip(repo, env):
+        put(repo, 'f', b'old\n')
+        ux.commit(repo, env, 'am base')
+        mail = b''
+        for number in range(3):
+            mail += (f'From {number:040d} Mon Sep 17 00:00:00 2001\n'
+                     f'From: Fixture <fixture@example.test>\n'
+                     f'Date: Tue, 14 Nov 2023 22:13:20 +0000\n'
+                     f'Subject: [PATCH] fails {number}\n\n').encode()
+            mail += text_patch(b'missing\n', b'resolved\n') + b'\n'
+        result = ux.run(['git', 'am'], repo, env, mail)
+        if result['exit'] != 128:
+            raise RuntimeError('expected am conflict: ' + repr(result))
+        put(repo, 'f', b'resolved\n')
+        ux.git(repo, env, 'add', 'f')
+
+    def move_head(repo, env):
+        ux.git(repo, env, 'commit', '--allow-empty', '-qm', 'external move')
+
+    case('d2-deferred-6-skip-abort-safety', setup_skip,
+         [['am', '--continue'], move_head, ['am', '--skip'], ['am', '--abort']])
+
+    def setup_hook(repo, env):
+        put(repo, 'f', b'old\n')
+        ux.commit(repo, env, 'am base')
+        tree = ux.git(repo, env, 'rev-parse', 'HEAD^{tree}')
+        parent = ux.git(repo, env, 'rev-parse', 'HEAD')
+        moved = ux.git(repo, env, 'commit-tree', tree, '-p', parent, '-m', 'hook parent')
+        failed_am(repo, env)
+        put(repo, 'f', b'resolved\n')
+        ux.git(repo, env, 'add', 'f')
+        put(repo, '.git/hooks/pre-applypatch', f'#!/bin/sh\ngit update-ref HEAD {moved}\n'.encode())
+        (repo / '.git/hooks/pre-applypatch').chmod(0o755)
+
+    case('d2-deferred-7-hook-moves-head', setup_hook, [['am', '--continue']])
 
 
 def rename_record(old, new, before, after):
@@ -424,8 +561,54 @@ def deferred_f9():
         failed_am(r, e, second=True)
         put(r, 'f', b'resolved\n')
         ux.git(r, e, 'add', 'f')
-    ux.case('f9-deferred-7-continue-abort-safety', setup_am,
+    case('f9-deferred-7-continue-abort-safety', setup_am,
             [['am', '--continue'], ['am', '--abort']])
+
+
+def e2e():
+    def mailed_series(repo, env):
+        for name in ('clean', 'f', 'g', 'h'):
+            put(repo, name, b'old\n')
+        ux.commit(repo, env, 'series base')
+        base = ux.git(repo, env, 'rev-parse', 'HEAD')
+        for name in ('clean', 'f', 'g', 'h'):
+            put(repo, name, b'new\n')
+            ux.commit(repo, env, 'change ' + name)
+        mail = ux.run(['git', 'format-patch', '--stdout', base + '..HEAD'], repo, env)
+        if mail['exit'] or mail['stdout'].count('Subject: [PATCH ') != 4:
+            raise RuntimeError('expected four real mailed commits: ' + repr(mail))
+        put(repo, '.git/series.mbox', mail['stdout'].encode('utf-8', errors='surrogateescape'))
+        ux.git(repo, env, 'reset', '--hard', base)
+        for name in ('f', 'g'):
+            put(repo, name, b'target branch\n')
+        ux.commit(repo, env, 'target diverges')
+
+    def resolve(repo, env):
+        put(repo, 'f', b'resolved\n')
+        ux.git(repo, env, 'add', 'f')
+
+    for control in ('--skip', '--abort'):
+        case('e2e-am-continue-' + control, mailed_series,
+             [['am', '.git/series.mbox'], resolve, ['am', '--continue'], ['am', control]])
+
+    with tempfile.TemporaryDirectory(prefix='ngit-apply-e2e-index-') as tmp:
+        repo, env = fixture(Path(tmp))
+        put(repo, 'f', b'old\n')
+        save(repo, env)
+        rows = '0 ' + '0' * 40 + '\tf\n'
+        for stage, content in enumerate((b'old\n', b'ours\n', b'theirs\n'), 1):
+            oid = ux.git(repo, env, 'hash-object', '-w', '--stdin', data=content)
+            rows += f'100644 {oid} {stage}\tf\n'
+        ux.git(repo, env, 'update-index', '--index-info', data=rows.encode())
+        for opts in VARIANTS[2:]:
+            compare('e2e-unmerged-' + ','.join(opts), repo, env, text_patch(), opts)
+        ux.git(repo, env, 'read-tree', 'HEAD')
+        put(repo, 'new', b'new\n')
+        ux.git(repo, env, 'add', '-N', 'new')
+        addition = (b'diff --git a/new b/new\nnew file mode 100644\n'
+                    b'--- /dev/null\n+++ b/new\n@@ -0,0 +1 @@\n+new\n')
+        for opts in VARIANTS[2:]:
+            compare('e2e-ita-' + ','.join(opts), repo, env, addition, opts)
 
 
 def generated_f9(number):
@@ -575,7 +758,7 @@ if __name__ == '__main__':
             review_f9()
             review_f10()
         else:
-            {'apply-gen': generated, 'deferred': deferred}[mode]()
+            {'apply-gen': generated, 'deferred': deferred, 'e2e': e2e}[mode]()
     except Exception as exc:
         REPORT['unexpected_errors'] += 1
         print('ERROR ' + repr(exc), flush=True)

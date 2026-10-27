@@ -400,13 +400,11 @@ rm/mv/checkout/reset/stash, log -L, notes, tag signing, reset -p,
 checkout/switch -p and sparse checkouts, restore -p, rm/mv --sparse,
 stash -p, add -p/-i/--patch (rejected as unsupported options).
 
-apply and am still differ from Git on: patches against an unmerged index
-(Git refuses; ngit applies from stage 1), prose after a mail patch that looks
-like rename or mode lines, traditional diffs that add or delete a file
-without /dev/null, --cached additions (and --cached --check) over an
-intent-to-add entry, --cached additions next to conflict stages of a
-directory/file neighbour (ngit drops the stages), a file whose unlink fails
-(ngit overwrites it in place), rename records with incomplete headers, and
-am --abort after am --continue made a commit (ngit keeps that commit
-instead of returning to the original HEAD); =sh test/apply-gen.sh deferred=
-carries at least one case each.
+apply and am still differ from Git on: traditional diffs whose header puts a
+space (not a tab) before the timestamp (ngit keeps the timestamp in the file
+name), apply --index of a creation hunk over an empty intent-to-add file
+(Git refuses; ngit applies it), am --abort after an empty commit and am
+--skip (ngit keeps that commit instead of returning to the original HEAD),
+and am --continue after a pre-applypatch hook moved HEAD (ngit commits on
+the old HEAD and fails); =sh test/apply-gen.sh deferred= carries one case
+each (named d2-deferred-*).

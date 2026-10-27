@@ -18,6 +18,8 @@ through apply --cached, am or mail parsing are kept as failing cases in the
 ungraded mode `sh test/apply-gen.sh deferred` and listed in README.
 On 2026-10-26 the user ended ngit development after wave A: waves B and C
 are not planned and their items stay in README's "Not supported yet" list.
+On 2026-10-27 the user reopened defect fixes only: the deferred apply/am
+divergences are tracked in tools/ai/git-apply-deferred-progress.org.
 
 Each suite compares ngit with Git 2.47.3 on fresh fixtures (output, exit
 code, repository state) and reports exact comparisons and intended
