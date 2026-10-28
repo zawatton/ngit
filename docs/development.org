@@ -1,0 +1,252 @@
+#+TITLE: ngit development reference
+
+[[file:../README.org][Back to installation and Git transition guide]].
+Shell commands and source paths on this page are relative to the ngit checkout.
+The progress meter is a Notes workspace tool, not an ngit dependency.
+
+* Design
+
+- =lisp/ngit-native.el= — file reads via =syscall-direct= into reusable
+  mmap buffers, zlib inflate via libz =uncompress2= through the nl-ffi dlsym
+  path (compression is in the approved FFI scope).  Linux x86_64 only.
+- =lisp/ngit-store.el= — repository/worktree discovery, loose objects, pack
+  index v2 lookup (lazy fanout, per-first-byte name slices), pack entries
+  with OFS_DELTA/REF_DELTA, delta application, commit/tree parsing.
+- =lisp/ngit-rev.el= — loose/packed/symbolic refs and gitrevisions subset.
+- =lisp/ngit-cli.el= — commands and git-compatible formatting (C-style path
+  quoting, default date format, automatic abbreviation length).
+- =lisp/ngit-paths.el= — invocation-relative literal path selection and
+  human status display, keeping index/tree paths relative to the root.
+- =lisp/ngit-config.el= — system/global/repository config, last one wins.
+- =lisp/ngit-hook.el= — runs hooks from core.hooksPath or =$GIT_DIR/hooks=
+  (loaded only when the hook exists): commit, merge, sequencer, checkout,
+  am, push/receive, gc --auto and reference-transaction hooks.
+- =lisp/ngit-match.el= — wildmatch port, .gitignore and .gitattributes.
+- =lisp/ngit-pathspec.el=, =lisp/ngit-pathspec-attr.el= — pathspec magic,
+  including =attr:= requirements; commands whose Git pathspec mask rejects
+  =attr= fail with Git's diagnostic.
+- =lisp/ngit-command-paths.el=, =lisp/ngit-ls-files.el=,
+  =lisp/ngit-diff-stat.el= — invocation-relative path selection for
+  clean/rm/mv/checkout/reset/stash, ls-files from subdirectories, and
+  =diff --relative=/=--stat=.
+- =lisp/ngit-index.el= — index v2/v3/v4 and the cache-tree extension.
+- =lisp/ngit-worktree.el= — lstat/open/readlink by syscall, end-of-line
+  conversion (core.autocrlf, text/eol attributes, safer autocrlf).
+- =lisp/ngit-changes.el= — tree/tree, tree/index (cache-tree skipping),
+  index/work tree, untracked walk, submodule dirtiness, similarity renames.
+- =lisp/ngit-xdiff.el= — port of git's xdiff (Myers with git's heuristics,
+  indent heuristic, function-name hunk headers cut at invalid UTF-8
+  like diff.c sane_truncate_line).
+- =lisp/ngit-status.el=, =lisp/ngit-diff.el= — status and diff output.
+- =lisp/ngit-write.el= — loose objects (zlib =compress2= at
+  core.looseCompression, default 1 as in git), locks, the index writer
+  (byte-identical to git: version choice, v4 names, racy-clean smudge,
+  TREE extension) and the cache-tree update behind write-tree and commit.
+- =lisp/ngit-add.el= — add: tracked updates (stat-dirty entries are
+  rehashed and invalidate their cache-tree path, as in git), untracked
+  files below literal pathspecs, ignored-path errors, nested repositories
+  as gitlinks.
+- =lisp/ngit-log.el= — revision walking ported from revision.c (date
+  queue, limit_list, TREESAME simplification, parent rewriting, topological
+  sort), merge bases (commit-reach.c), pretty formats and user formats
+  (pretty.c), dates, decorations, diff output for log and the history graph
+  (graph.c).
+- =lisp/ngit-rename.el= — diffcore-rename: exact, same-basename and
+  inexact renames with diffcore-delta's span hashes and diff.renameLimit.
+- =lisp/ngit-branch.el= — branch: listing with ref-filter's built-in
+  format, tracking (ahead/behind, gone), creation with upstream setup,
+  deletion, rename/copy with reflogs and HEAD, and config edits that follow
+  config.c (set by parse-event offsets, rename/copy/remove sections).
+- =lisp/ngit-show.el= — show: commits like log with --cc dense combined
+  diffs for merges, annotated tags, trees and blobs.
+- =lisp/ngit-tag.el= — tag: listing with filters and sorting, lightweight
+  and annotated creation, -f and -d.
+- =lisp/ngit-checkout.el= — work-tree writes (entry.c write_entry with
+  autocrlf/eol smudge, executable bit, symlinks, gitlinks), index stat
+  refresh, and checkout [REV] -- PATH.
+- =lisp/ngit-reset.el= — reset --soft/--mixed/--hard and path resets; the
+  new index patches only entries whose paths changed between the trees.
+- =lisp/ngit-switch.el= — switch and checkout of branches: twoway merge
+  carrying local changes, overwrite/untracked refusals, tracking DWIM,
+  detached HEAD advice and orphaned-commit warnings.
+- =lisp/ngit-rm.el= — rm (up-to-date and staged-content checks, directory
+  removal) and mv (files, directories, into a directory, case-only renames).
+- =lisp/ngit-restore.el= — restore of the index and/or work tree from the
+  index or a revision.
+- =lisp/ngit-stash.el= — stash: index/work-tree/untracked commits, the
+  refs/stash reflog, list/show/apply/pop/drop/clear/branch; applying runs a
+  three-way merge, and conflicts keep the stash as in git.
+- =lisp/ngit-profile.el= — with =NGIT_PROFILE=1=, prints per-phase times
+  to stderr.
+- =ngit-main.el= loads the larger command modules only when an argument
+  names their command (=ngit-main--lazy-modules=).
+- =lisp/ngit-commit.el= — commit: index refresh, -a, COMMIT_EDITMSG,
+  commit object, ref and reflog updates, the summary (shortstat, create/
+  delete/rename/mode lines), local time zone from TZif files.
+- =lisp/ngit-merge-file.el= — byte-exact port of xdiff/xmerge.c and the
+  merge-file command.  =lisp/ngit-merge-tree.el= merges three trees with
+  file rename reconciliation from =lisp/ngit-merge-rename.el=;
+  =lisp/ngit-merge.el= runs merge and its state files;
+  =lisp/ngit-sequencer.el= replays commits for cherry-pick, revert and the
+  merge backend of rebase.
+- =lisp/ngit-objects.el=, =lisp/ngit-pack.el=, =lisp/ngit-maint.el=,
+  =lisp/ngit-fsck.el= — object enumeration and reachability, pack writing
+  and indexing, repack/gc/prune/pack-refs/reflog, and fsck.
+- =lisp/ngit-remote.el= (init, remotes), =lisp/ngit-transport.el= (smart
+  protocol client, fetch/pull/push and clone) with
+  =ngit-transport-process.el= (local and ssh subprocesses),
+  =ngit-transport-http.el= (libcurl smart HTTP(S) discovery and RPCs),
+  =ngit-negotiate.el= (Git's default fetch negotiator),
+  =ngit-transport-index.el= (received-pack indexing),
+  =ngit-transport-delta.el= and =ngit-transport-kernel.el= (delta
+  application compiled to native code once per process) and
+  =ngit-transport-checkout.el= (parallel initial checkout).
+  =ngit-transport-memory.el= plans worker/cache allowances and
+  =tools/transport-memory.py= supervises owned descendants using Linux
+  subreaping and pidfd signals.
+- =lisp/ngit-blame.el=, =lisp/ngit-grep.el=, =lisp/ngit-describe.el= (with
+  name-rev, shortlog and rev-list), =lisp/ngit-lines.el= (line scans).
+- =lisp/ngit-patch.el= (format-patch, apply, am), =lisp/ngit-clean.el=,
+  =lisp/ngit-worktree-cmd.el=, =lisp/ngit-config-cmd.el= (config writes)
+  and =lisp/ngit-bisect.el=.
+
+** NeLisp performance notes
+
+Primitive costs depend on the runtime build, value representation and
+execution path. The following measurements describe the 2026-10-17 runtime
+and should be remeasured before choosing an optimization for a newer build.
+That interpreter cost tens of microseconds per primitive call, and several
+primitives scaled with the whole string length:
+=string-search= with a START argument ~3–25 ms, =format= ~0.7 ms, a
+regexp match ~1–17 ms, an =aref= a few µs.  Hot paths therefore use =aref=
+loops and lookup tables instead of =string-search=, =format= and regexps.
+=puthash= with a vector key in an =eq= table costs ~1 ms (an integer key
+~13 µs), so per-entry sets are keyed by index positions.  =maphash= costs
+tens of milliseconds even on a small table, so tables keep side lists.
+
+The faster NeLisp build used in that comparison (=~/.local/bin/nelisp= from the anvil build) makes
+=string-search= native (proportional to the string length per call), which
+ngit uses for tree lookups; the older =target/nelisp= runs ngit about four
+times slower.  Objects are found through the loose listing of their
+=objects/XX= directory first and then the packs in most-recently-hit
+order, abbreviations follow find_unique_abbrev with one binary search per
+pack, and zlib's =uncompress2= is called through =ptr-call= with an address
+resolved once.
+
+** Byte code
+
+NeLisp spends 20–40 ms on the first call of each function loaded from
+source, which dominated every ngit command.  =tools/build-elc.sh= compiles
+=lisp/*.el= with the host GNU Emacs (=EMACS=, default =emacs=) through
+=tools/compile.el=; NeLisp runs the byte code and commands become two to
+four times faster.  =ngit-main.el= uses the =.elc= files only while
+=lisp/.elc-stamp= is newer than every source (any change rebuilds all
+modules) and falls back to the sources otherwise or with =NGIT_NO_ELC=1=.
+The test scripts call =tools/build-elc.sh= first; without Emacs they run
+from source.  =tools/compile.el= works around three NeLisp limits found on
+2026-10-20: the Bsubstring opcode rejects vectors, and the reader reads
+neither =#@= lazy docstrings nor =#N==/=#N#= labels.  =NGIT_PROFILE_FNS=
+(with =NGIT_PROFILE=1=) adds space-separated function names to the
+profiled phases.
+
+** Command startup
+
+The CLI calls its configuration boundary directly. Loading a generic advice
+implementation for this one application-owned wrapper dominated startup.
+On 2026-10-28, paired fresh-process measurements on the same fixture reduced
+default CLI wall time from 1.841 to 0.450 seconds for status, 1.826 to 0.470
+for ten log entries, and 1.883 to 0.514 for diff --stat. All outputs and exit
+statuses matched Git. These medians include startup and GC; they do not
+measure primitive throughput or large-repository/network performance.
+Runtime/source identities and samples are recorded in
+=tools/ai/evidence/ngit-startup-after-20261028.json=.
+
+The loader selects source or bytecode modules; it does not explicitly install
+native versions of all ngit functions. Runtime value-layout improvements
+benefit ordinary Lisp code without changing Git data layouts or foreign
+structure sizes in ngit. Further native compilation needs its own admission,
+compatibility and performance checks on the selected runtime.
+
+** Resident status sessions
+
+The experimental =status-server= command keeps one repository open for repeated
+editor queries. It returns =status --porcelain=v1= bytes using a framed pipe
+protocol. Start =bin/ngit -C REPOSITORY status-server=, then send ASCII lines
+=status=, =refresh=, =stats= or =quit=. Responses begin with =OK BYTE_COUNT\n=
+or =ERR EXIT_CODE BYTE_COUNT\n=, followed by exactly that many payload bytes.
+Repository, environment and global options are fixed at startup. A process
+supports one session; the Lisp API is described in =docs/status-session.org=.
+
+On supported local Linux filesystems, inotify permits unchanged output reuse
+and selected-entry checks for ordinary tracked-file edits. Metadata, policy,
+structural changes and watch loss force a full refresh. Unproven dependencies
+disable reuse or return an explicit unsupported error; inspect =cache_enabled=
+and =cache_reason= in =stats=. Includes, symlinked policy files, linked worktrees,
+external repository paths, submodules, clean filters and unsupported index
+flags are outside the initial cached boundary. Existing standard system
+attributes files are refused unless =GIT_ATTR_NOSYSTEM= disables them. Use
+=refresh= after writes that
+inotify cannot observe, including mmap or remote writes and mount replacement.
+
+The intended speed benefit is repeated warm requests. Startup and full refresh
+still perform repository discovery and status computation. The reproducible
+comparison is =python3 test/status-session.py benchmark=; it checks output
+against Git and reports startup, warm round trips and tracked-edit refreshes
+separately.
+
+Certified selected updates also retain private configuration and resolved
+filemode/quoting policy. Configuration changes and abnormal exits discard the
+snapshot. =python3 test/status-session-config.py benchmark= compares immediate
+different-size and same-size tracked edits with Git, including clean/dirty
+transitions; its samples and correctness assertions are separate from warm
+cache-hit measurements. See =docs/status-config-cache.org=.
+
+* Tests
+
+#+begin_src sh
+sh test/compare.sh SUITE   # basic rev cat all-objects deltas worktree ls-tree log
+                           # index attr-config diff status status-long
+                           # write-objects index-write write-tree add add-all
+                           # commit commit-output log-format log-walk
+                           # log-diff log-path log-graph branch-list
+                           # branch-filter branch-create branch-modify
+                           # branch-upstream reset-index reset-hard tag-list
+                           # tag-write show switch checkout worktree-overlay
+                           # modes rm mv restore stash-push stash-apply
+                           # unmerged merge-file merge cherry-pick rebase
+                           # stash-merge blame grep describe pack-write gc
+                           # fsck patch misc bisect clone fetch push remote ssh
+                           # hooks hooks-extra
+sh test/real-write.sh /path/to/repo MODE LIMIT  # on a clone; MODE: tree add commit
+    # branch reset tag switch rm-mv restore stash merge gc transport hooks
+sh test/real-log.sh /path/to/repo (walk|diff|graph|branch|show|inspect) LIMIT  # read-only
+sh test/maintenance.sh (pack-write|gc|fsck)  # also run by compare.sh
+sh test/merge-fuzz.sh      # merge-file against git on random inputs
+sh test/xdiff-fuzz.sh 300  # xdiff port against git diff --no-index
+sh test/hunk-utf8-check.sh # hunk headers with multibyte/invalid UTF-8 (needs python3)
+sh test/smart-http.sh (discovery|fetch|push|auth|e2e) # loopback HTTP and private-CA TLS
+sh test/pathspec-magic.sh (read|write|boundaries|e2e)
+sh test/directory-rename.sh (clean|conflicts|e2e)
+python3 tools/network-compat-verify.py (controls|regression|e2e)
+sh test/config-includes.sh (read|conditional|boundaries|e2e)
+sh test/similarity-read.sh (status|diff|boundaries|e2e)
+sh test/credential-helpers.sh (helpers|auth|boundaries|e2e)
+sh test/include-hasconfig.sh (match|boundaries|e2e)
+sh test/pathspec-attr.sh (select|boundaries|e2e)
+sh test/subdir-commands.sh (inspect|mutate|boundaries|e2e)
+sh test/audit-config.sh (core|e2e); sh test/audit-paths.sh (core|e2e)
+sh test/audit-reaudit.sh (core|special|boundaries|e2e|pull|attrs|binary|objects|round4-paths|round4-pull|round4-unified|round5-autostash|round5-headers)
+sh test/round6.sh (headers|pull|mail_starts)
+sh test/protocol-v2.sh (select|lsrefs|e2e-ssh|http-discovery|http-fetch|e2e-https|negotiate|negotiate-http|negotiate-v0|e2e-negotiate|errors|server-option|fallback|review|followups-launcher|file|followups|config-case)
+sh test/audit-fixes.sh (core|e2e|prefix|prefix-boundary|prefix-untracked|prefix-rm|prefix-e2e)
+python3 tools/include-pathspec-verify.py (controls|differences [GROUP]|regression|e2e)
+python3 tools/usability-verify.py (controls|regression|e2e)
+sh test/ux-commit.sh (editor|identity|paths|e2e)
+sh test/ux-log.sh (follow|dates|format|history|e2e)
+sh test/ux-cmds.sh (status|refs|worktree|stash|e2e)
+sh test/apply-gen.sh (review|apply-gen) # apply and apply -R against git, fixed-seed generated cases
+python3 tools/ux-verify.py (controls [SUITE]|mode SUITE MODE|regression [pull|compare])
+nelisp --load test/hash-chars-check.el -- x  # span hash vs reference copy
+NGIT_REAL_REPO=/path/to/repo sh test/compare.sh real
+bin/progress-meter.sh --ledger tools/ai/git-read-core-progress.org   # from Notes
+#+end_src
