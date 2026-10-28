@@ -1,0 +1,85 @@
+#+TITLE: Opt-in ngit for interactive Git and Magit
+
+* Command selection
+
+=bin/ngit= runs ngit directly. =bin/ngit-git= is an optional dispatcher that
+selects ngit only for a checked subset of command arguments and repository
+features. Other invocations use the original Git with their original arguments.
+Selection happens before execution. An ngit failure is returned to the caller;
+the dispatcher never retries that operation through Git.
+
+The dispatcher requires Python 3 even for invocations routed to Git.
+
+The certificate requires an ordinary local SHA-1 repository. Unsupported
+formats, filters, attributes, submodules, signing, special index flags and
+ongoing sequencer operations use Git. An existing hook, output encoding policy
+or warning-producing CRLF conversion can also select Git. This is gradual
+adoption, not complete Git replacement.
+
+* Interactive Bash
+
+After following the main installation guide, put the following in
+=~/.bash_aliases= or another file sourced by interactive Bash.
+Adjust the checkout and runtime to your installation:
+
+#+begin_src sh
+export NGIT_CHECKOUT="$HOME/src/ngit"
+export NGIT_NELISP="$HOME/src/nelisp/target/nelisp"
+export NGIT_NELISP_ROOT="$HOME/src/nelisp"
+export PATH="$NGIT_CHECKOUT/bin:$PATH"
+git() { "$NGIT_CHECKOUT/bin/ngit-git" "$@"; }
+#+end_src
+
+Open a new terminal or source that file. =git status= and other admitted forms
+now go through the dispatcher. Scripts continue to find the installed Git
+executable. Do not export the function or install the dispatcher as =git= on
+=PATH=.
+
+Use =command git ...= to invoke the original Git from the shell.
+=NGIT_GIT_BACKEND=git git ...= also forces the original backend while keeping
+the dispatcher in place. =ngit ...= explicitly invokes ngit without routing.
+
+* Magit
+
+Keep Magit's default global arguments intact and set its local executable
+after loading Magit. For example, with the installation layout above:
+
+#+begin_src emacs-lisp
+(with-eval-after-load 'magit
+  (let ((dispatcher (expand-file-name "src/ngit/bin/ngit-git" "~"))
+        (runtime (expand-file-name "src/nelisp/target/nelisp" "~")))
+    (when (and (file-executable-p dispatcher) (file-executable-p runtime))
+      (setenv "NGIT_NELISP" runtime)
+      (setq magit-git-executable dispatcher
+            magit--host-git-version-cache nil))))
+#+end_src
+
+The dispatcher recognizes Magit's =INSIDE_EMACS= marker. Frequent metadata
+queries stay on Git to avoid repeated NeLisp startup. Supported simple
+operations, including staging ordinary paths, can use ngit. Complex literal
+pathspecs, partial staging and unsupported arguments use Git. Remote TRAMP
+repositories keep Magit's separate remote Git executable.
+
+Ordinary ngit startup is slower than Git. This configuration does not connect
+Magit to the experimental resident =status-server=; that protocol requires a
+separate integration. Use the dispatcher for adoption and compatibility, not
+as a promise of faster Magit refreshes.
+
+* Inspect or disable routing
+
+Set =NGIT_GIT_TRACE= to a local file to record backend, reason and command
+category. The trace omits arguments and configuration values; it is disabled
+by default. Repository certification may conservatively select Git even for
+an otherwise supported command.
+
+#+begin_src sh
+NGIT_GIT_TRACE="$HOME/ngit-routing.jsonl" git status --short
+NGIT_GIT_BACKEND=git git status --short
+command git status --short
+#+end_src
+
+To undo the shell setting, remove the function definition and run
+=unset -f git=, or open a new shell after removing the setup.
+For Magit, restore =magit-git-executable= to ="git"= and clear
+=magit--host-git-version-cache=. Remove the saved setting to keep that choice
+after restarting Emacs. No repository conversion or cleanup is required.

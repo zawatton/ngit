@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Choose a certified ngit subset before execution; never replay a command.
+
+Magit's INSIDE_EMACS=...,magit profile keeps cheap metadata on Git before
+certification, avoiding repeated cold runtime starts during each refresh.
+Supported status/diff/add and explicit-message commits still select ngit.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+
+SAFE_CONFIG = {
+    "core.preloadindex": {"true"}, "log.showsignature": {"false"},
+    "color.ui": {"false"}, "color.diff": {"false"},
+}
+SAFE_ENV = {"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+            "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+            "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE"}
+REV = re.compile(r"(?!.*\.\.)(?!.*//)(?!.*\/\.)(?!.*(?:/|\.|\.lock)$)(?:HEAD|[A-Za-z0-9_][A-Za-z0-9_./-]*)(?:[~^][0-9]*)*\Z")
+
+
+def simple_path(value):
+    return bool(value) and not any(c in value for c in "*?[]:\\\n\r\0")
+
+
+def grammar(argv):
+    """Return preserved ngit argv, certificate globals, and command, or None.
+
+    Grammar follows ngit-{status,diff,add,commit,log}.el and ngit-cli.el.
+    Restrict pathspecs even without --literal-pathspecs to avoid guessing.
+    """
+    kept, globals_ = [], []
+    i = 0
+    while i < len(argv) and argv[i].startswith("-"):
+        a = argv[i]
+        if a in ("-P", "--no-pager"):
+            kept.append(a)
+            globals_.append(a)
+        elif a == "--literal-pathspecs":
+            pass  # Every admitted path below has identical literal semantics.
+        elif a in ("-C", "-c") and i + 1 < len(argv):
+            value = argv[i + 1]
+            if a == "-C" and value.startswith("~"):
+                return None  # ngit's expand-file-name expands a literal tilde.
+            if a == "-c":
+                key, sep, val = value.partition("=")
+                key = key.lower()
+                if not sep or not (key in ("user.name", "user.email") or
+                                   val.lower() in SAFE_CONFIG.get(key, ())):
+                    return None
+            kept.extend((a, value))
+            globals_.extend((a, value))
+            i += 1
+        else:
+            return None
+        i += 1
+    if i == len(argv):
+        return None
+    command, args = argv[i], argv[i + 1:]
+    kept.extend(argv[i:])
+    if command in ("status", "diff", "add"):
+        allowed = {
+            "status": {"-s", "--short", "--porcelain", "--porcelain=v1", "--long",
+                       "-u", "--untracked-files", "--untracked-files=all",
+                       "--untracked-files=normal", "--untracked-files=no"},
+            "diff": {"--cached", "--staged", "--stat", "--name-only", "--name-status",
+                     "--no-renames", "--exit-code", "--quiet", "-p", "--patch"},
+            "add": {"-u", "--update", "-A", "--all", "-n", "--dry-run"},
+        }[command]
+        paths = False
+        for a in args:
+            if not paths and a == "--":
+                paths = True
+            elif not paths and a in allowed:
+                continue
+            elif not paths and a.startswith("-"):
+                return None
+            elif command == "diff" and not paths:
+                return None  # A bare diff operand is a revision, not a path.
+            elif not simple_path(a):
+                return None
+    elif command == "commit":
+        messages = 0
+        j = 0
+        while j < len(args):
+            if args[j] in ("-m", "-F") and j + 1 < len(args):
+                if args[j] == "-F" and (not args[j + 1] or args[j + 1] == "-" or args[j + 1].startswith("~")):
+                    return None  # ngit reads a file; Git also supports stdin.
+                messages += 1
+                j += 2
+            elif args[j] in ("-q", "--quiet", "--allow-empty", "--amend", "--no-verify"):
+                j += 1
+            else:
+                return None
+        if messages != 1:
+            return None
+    elif command == "switch":
+        # An existing target tree can introduce attributes absent from the
+        # certified current tree. Creating a branch retains the current tree.
+        if len(args) != 2 or args[0] != "-c" or not REV.fullmatch(args[1]) or any(c in args[1] for c in "~^"):
+            return None
+    elif command == "log":
+        j = 0
+        while j < len(args):
+            if args[j] == "--oneline" or re.fullmatch(r"-[0-9]+|--max-count=[0-9]+", args[j]):
+                j += 1
+            elif args[j] == "-n" and j + 1 < len(args) and args[j + 1].isdigit():
+                j += 2
+            else:
+                return None
+    elif command == "config":
+        if len(args) != 2 or args[0] != "--get" or not re.fullmatch(r"[A-Za-z][A-Za-z0-9.-]*", args[1]):
+            return None
+    elif command == "rev-parse":
+        if args not in (["--show-toplevel"], ["--is-inside-work-tree"]):
+            return None  # Git handles ranges, paths, and revision verification.
+    elif command == "symbolic-ref":
+        if args not in (["HEAD"], ["--short", "HEAD"]):
+            return None
+    elif command == "cat-file":
+        if len(args) != 2 or args[0] not in ("-t", "-s", "-p", "-e") or not REV.fullmatch(args[1]):
+            return None
+    else:
+        return None
+    return kept, globals_, command
+
+
+def certificate(git, globals_, command=None):
+    """Bound original Git probes and reject unsupported repository features."""
+    pager_disabled = False
+    options = iter(globals_)
+    for option in options:
+        if option in ("-C", "-c"):
+            next(options, None)
+        elif option in ("-P", "--no-pager"):
+            pager_disabled = True
+    if any(k.startswith("GIT_") and k not in SAFE_ENV and
+           not (k == "GIT_PAGER" and (pager_disabled or os.environ[k] in ("", "cat")))
+           for k in os.environ):
+        return False
+    deadline = time.monotonic() + 5
+
+    def probe(*args):
+        # Spool output so even a huge repository cannot fill Python's memory.
+        with tempfile.TemporaryFile() as out:
+            result = subprocess.run([git, *globals_, *args], stdin=subprocess.DEVNULL,
+                                    stdout=out, stderr=subprocess.DEVNULL,
+                                    timeout=max(0.01, deadline - time.monotonic()))
+            if result.returncode or out.tell() > 8 * 1024 * 1024:
+                raise ValueError("uncertified")
+            out.seek(0)
+            return out.read()
+
+    try:
+        info = probe("rev-parse", "--path-format=absolute", "--show-toplevel",
+                     "--absolute-git-dir", "--git-common-dir", "--is-bare-repository",
+                     "--show-object-format").decode().splitlines()
+        if len(info) != 5 or info[3:] != ["false", "sha1"]:
+            return False
+        root, gitdir, common = map(Path, info[:3])
+        dotgit = root / ".git"
+        if not dotgit.is_dir() or dotgit.is_symlink() or dotgit.resolve() != gitdir.resolve() or gitdir.resolve() != common.resolve():
+            return False
+        for name in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge",
+                     "rebase-apply", "sequencer", "shallow", "info/grafts",
+                     "objects/info/alternates", "info/sparse-checkout"):
+            if (gitdir / name).exists():
+                return False
+        if (root / ".gitmodules").exists():
+            return False
+        hooks = gitdir / "hooks"
+        if hooks.is_dir() and any(p.is_file() and not p.name.endswith(".sample") and
+                                  os.access(p, os.X_OK) for p in hooks.iterdir()):
+            return False
+        config = probe("config", "--null", "--list")
+        autocrlf_input = False
+        for item in config.split(b"\0"):
+            if not item:
+                continue
+            key, _, value = item.partition(b"\n")
+            key, value = key.lower(), value.lower()
+            if key == b"core.autocrlf" and value == b"input":
+                autocrlf_input = True
+                continue  # ngit-worktree's auto-input conversion is covered.
+            if key in (b"core.autocrlf", b"core.fsmonitor", b"core.splitindex",
+                       b"core.sparsecheckout", b"core.sparsecheckoutcone") and value in (b"false", b"no", b"off", b"0"):
+                continue  # Explicitly disabled features have no active policy.
+            if key.startswith((b"extensions.", b"filter.", b"submodule.", b"diff.", b"i18n.")):
+                return False
+            if key in (b"core.sparsecheckout", b"core.sparsecheckoutcone", b"core.splitindex",
+                       b"core.fsmonitor", b"core.worktree", b"core.hookspath", b"core.attributesfile",
+                       b"core.autocrlf", b"core.eol", b"user.signingkey", b"gpg.format",
+                       b"gpg.program", b"commit.template", b"i18n.commitencoding",
+                       b"status.short", b"status.branch"):
+                return False
+            if key in (b"commit.gpgsign", b"tag.gpgsign", b"tag.forcesignannotated") and value not in (b"false", b"no", b"off", b"0"):
+                return False
+            if key == b"core.repositoryformatversion" and value != b"0":
+                return False
+        if probe("for-each-ref", "--count=1", "--format=%(refname)", "refs/replace"):
+            return False  # Includes both loose and packed replacement refs.
+        # Git exposes its compiled system path and resolved global default;
+        # unsupported Git versions fail closed through the probe boundary.
+        for variable in ("GIT_ATTR_SYSTEM", "GIT_ATTR_GLOBAL"):
+            attrpath = probe("var", variable).decode().removesuffix("\n")
+            if not attrpath or not Path(attrpath).is_absolute() or os.path.lexists(attrpath):
+                return False
+        if os.path.lexists(gitdir / "info/attributes"):
+            return False
+        # Include ignored directories; their attributes still affect Git.
+        # Reject symlinks instead of following dependencies outside this tree.
+        pending, entries = [root], 0
+        while pending:
+            with os.scandir(pending.pop()) as directory:
+                for entry in directory:
+                    entries += 1
+                    if entries > 10000 or time.monotonic() >= deadline:
+                        return False
+                    if entry.name == ".git" and Path(entry.path) == dotgit:
+                        continue
+                    if entry.name in (".gitattributes", ".git") or entry.is_symlink():
+                        return False
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(Path(entry.path))
+        stage = probe("ls-files", "--stage", "-v", "-z")
+        for entry in stage.split(b"\0"):
+            if entry and not re.match(rb"H (100644|100755|120000) [0-9a-f]{40} 0\t", entry):
+                return False
+            if entry and entry.split(b"\t", 1)[1].rsplit(b"/", 1)[-1] == b".gitattributes":
+                return False  # Git may read an attributes file from the index.
+        debug = probe("ls-files", "--debug", "-z")
+        flags = re.findall(rb"\n  size: [0-9]+\tflags: ([0-9a-f]+)\n", debug)
+        if len(flags) != len([x for x in stage.split(b"\0") if x]) or any(int(x, 16) for x in flags):
+            return False
+        if any(gitdir.glob("sharedindex.*")):
+            return False
+        if autocrlf_input and command in ("add", "diff"):
+            # Git emits conversion warnings that ngit does not yet reproduce.
+            eol = probe("ls-files", "--eol", "--cached", "--others", "--exclude-standard", "-z")
+            if any(re.search(rb"(?:^|\s)w/(?:crlf|mixed)(?:\s|$)", item.split(b"\t", 1)[0])
+                   for item in eol.split(b"\0")):
+                return False
+        return True
+    except (OSError, ValueError, UnicodeError, subprocess.TimeoutExpired):
+        return False
+
+
+def main():
+    argv = sys.argv[1:]
+    mode = os.environ.get("NGIT_GIT_BACKEND", "auto")
+    if mode not in ("auto", "git"):
+        print("ngit-git: invalid NGIT_GIT_BACKEND (expected auto or git)", file=sys.stderr)
+        return 2
+    git = os.environ.get("NGIT_REAL_GIT") or shutil.which("git")
+    if not git:
+        print("ngit-git: original Git executable unavailable", file=sys.stderr)
+        return 127
+    selected = grammar(argv) if mode == "auto" else None
+    backend, reason, command = "git", "forced" if mode == "git" else "grammar", "other"
+    target, arguments = git, argv
+    if selected:
+        arguments_, globals_, command = selected
+        if os.environ.get("INSIDE_EMACS", "").endswith(",magit") and command in (
+            "rev-parse", "config", "symbolic-ref", "cat-file"
+        ):
+            reason = "magit-metadata"
+        else:
+            reason = "certificate"
+            if certificate(git, globals_, command):
+                backend, reason = "ngit", "supported"
+                target = os.environ.get("NGIT_COMMAND") or str(Path(__file__).resolve().with_name("ngit"))
+                arguments = arguments_
+    trace = os.environ.get("NGIT_GIT_TRACE")
+    if trace:
+        try:
+            with open(trace, "a", encoding="utf-8") as stream:
+                stream.write(json.dumps(dict(backend=backend, reason=reason, command=command)) + "\n")
+        except OSError:
+            pass
+    try:
+        os.execvpe(target, [target, *arguments], os.environ)
+    except OSError:
+        print("ngit-git: selected backend could not be executed", file=sys.stderr)
+        return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main())

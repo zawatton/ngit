@@ -1,0 +1,39 @@
+{
+  "date": "2026-10-28",
+  "result": "PASS",
+  "setup": "Fresh interactive bash -ic reading the saved ~/.bash_aliases through existing ~/.bashrc",
+  "checks": [
+    "git resolves to an interactive function",
+    "ordinary add/commit/status select ngit",
+    "command git bypasses routing",
+    "NGIT_GIT_BACKEND=git selects original Git",
+    "ngit executable is on PATH",
+    "git fsck succeeds"
+  ],
+  "routing": [
+    {
+      "backend": "git",
+      "reason": "forced",
+      "command": "other",
+      "count": 1
+    },
+    {
+      "backend": "ngit",
+      "reason": "supported",
+      "command": "add",
+      "count": 1
+    },
+    {
+      "backend": "ngit",
+      "reason": "supported",
+      "command": "commit",
+      "count": 1
+    },
+    {
+      "backend": "ngit",
+      "reason": "supported",
+      "command": "status",
+      "count": 1
+    }
+  ]
+}

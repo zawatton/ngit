@@ -1,0 +1,17 @@
+{
+  "date": "2026-10-28",
+  "result": "PASS",
+  "authorities": [
+    "capture/init.org",
+    "~/.emacs.d/init.el",
+    "~/.bash_aliases"
+  ],
+  "checks": [
+    "Identical guarded Magit block in authoritative Org and generated init",
+    "All surrounding configuration bytes preserved",
+    "Existing ~/.bashrc is unchanged",
+    "New ~/.bash_aliases matches the reviewed draft",
+    "Source comments and prose use English"
+  ],
+  "magit_block_sha256": "6bd3bdb7a78df0559d368ca91a3f6562d82cf3b23a5e6d8173526deb40c36ed9"
+}

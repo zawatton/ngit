@@ -1,0 +1,28 @@
+#+TITLE: ngit adoption for interactive Git and Magit
+#+NOTE: Six criteria defined before implementation. Explicit pre-execution routing preserves original Git for unsupported invocations. No automatic replay after execution.
+
+* S1 Command routing and shell use
+
+** S1.1 Supported command forms select ngit and unsupported forms preserve original Git arguments
+#+TIMEOUT: 600
+cmd: python3 test/git-dispatch.py routing
+
+** S1.2 Exit statuses, stdin and writes are preserved and failure never replays a command
+#+TIMEOUT: 600
+cmd: python3 test/git-dispatch.py boundaries
+
+** S1.3 End to end: an interactive shell uses ngit for a supported repository workflow and can invoke original Git
+evidence: tools/ai/evidence/ngit-adoption-shell-20261028.json sha256=f26396a3ed9b5f21fd877155981fe6ab53c0085b8833f6fe45334e3fec4ff589
+
+* S2 Magit and persistent configuration
+
+** S2.1 Magit configuration is persisted in its authoritative Org source and generated init file
+evidence: tools/ai/evidence/ngit-adoption-settings-20261028.json sha256=5a0e6aa3dc5dcac4b37c04ffa722f631811e4a1c69faf9f9b0529db952e7307c
+
+** S2.2 Installed Magit loads and uses both validated ngit routing and required Git fallbacks
+evidence: tools/ai/evidence/ngit-adoption-magit-20261028.json sha256=93684ad793c37450e7fa8d77a7eb01f47662099fe8328e82c2289a88236eeaa5
+
+** S2.3 End to end: Magit status, staging and commit complete in a disposable repository with verified Git state
+#+TIMEOUT: 600
+cmd: python3 test/git-dispatch.py e2e
+evidence: tools/ai/evidence/ngit-adoption-magit-20261028.json sha256=93684ad793c37450e7fa8d77a7eb01f47662099fe8328e82c2289a88236eeaa5

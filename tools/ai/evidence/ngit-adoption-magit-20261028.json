@@ -1,0 +1,51 @@
+{
+  "date": "2026-10-28",
+  "result": "PASS",
+  "setup": "Actual installed Magit from the active Nelix native profile with the saved configuration block",
+  "checks": [
+    "Status buffer displays the modified file",
+    "magit-stage-file selects ngit and updates the index",
+    "magit-call-git explicit-message commit selects ngit",
+    "Original Git reads the resulting commit and fsck succeeds",
+    "Frequent metadata probes use original Git",
+    "Original all-Git trace is rejected as a negative control"
+  ],
+  "routing": [
+    {
+      "backend": "git",
+      "reason": "grammar",
+      "command": "other",
+      "count": 72
+    },
+    {
+      "backend": "git",
+      "reason": "magit-metadata",
+      "command": "rev-parse",
+      "count": 20
+    },
+    {
+      "backend": "git",
+      "reason": "magit-metadata",
+      "command": "symbolic-ref",
+      "count": 3
+    },
+    {
+      "backend": "ngit",
+      "reason": "supported",
+      "command": "add",
+      "count": 1
+    },
+    {
+      "backend": "ngit",
+      "reason": "supported",
+      "command": "commit",
+      "count": 1
+    }
+  ],
+  "elapsed_seconds": 3.067244052886963,
+  "limitations": [
+    "Interactive editor-driven commits and unsupported forms may use original Git",
+    "No resident status-server integration",
+    "Normal ngit CLI startup is slower than Git"
+  ]
+}
