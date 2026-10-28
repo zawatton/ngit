@@ -597,7 +597,7 @@ an entry was replaced."
   (dolist (name '("MERGE_HEAD" "MERGE_MSG" "MERGE_MODE" "MERGE_RR"
                   "SQUASH_MSG"))
     (let ((path (expand-file-name name (ngit-repo-gitdir repo))))
-      (when (file-exists-p path) (delete-file path)))))
+      (when (file-exists-p path) (ngit-delete-file path)))))
 
 (defun ngit--commit-merge-editor (repo message &optional cleanup)
   "Return (CLEANED . TEMPLATE) for a merge using an unchanged editor."
@@ -781,7 +781,7 @@ an entry was replaced."
             (setq lock (ngit-lock index-file))
             (ngit-write-file lock bytes)
             (unless all
-              (rename-file lock index-file t)
+              (ngit-rename-file lock index-file t)
               (setq lock nil)))
           (aset repo 6 nil)
           (when editing
@@ -904,7 +904,7 @@ an entry was replaced."
                                               ((cdr parents) "commit (merge)")
                                               (t "commit")))
                                         ": " first-line) t)))
-    (when lock (rename-file lock index-file t))
+    (when lock (ngit-rename-file lock index-file t))
     (when ngit-commit-index-publish
       (setq index-file (funcall ngit-commit-index-publish)))
     (unless no-state-cleanup (ngit-commit-clear-merge-state repo))

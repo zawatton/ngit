@@ -133,7 +133,7 @@
         ngit--config-parameters nil ngit--config-sources nil))
 
 (defun ngit-ss--close-fds (table)
-  (maphash (lambda (_ fd) (syscall-direct 3 fd 0 0 0 0 0)) table)
+  (maphash (lambda (_ fd) (ngit-native-fd-close fd)) table)
   (clrhash table))
 
 (defun ngit-ss--reset (session)
@@ -342,7 +342,9 @@
              (_ (unless (ngit-repo-toplevel repo)
                   (error "fatal: this operation must be run in a work tree")))
              (before (ngit-ss--coverage repo))
-             (watch nil) (failure (plist-get before :reason)))
+             (watch nil) (failure (if (ngit-windows-p)
+                                     "Windows watcher unavailable; uncached result"
+                                   (plist-get before :reason))))
         (unless failure
           (condition-case err
               (progn (setq watch (ngit-status-watch-open (plist-get before :paths)))
@@ -542,8 +544,8 @@
   (let ((address (nl-ffi-memory-address buffer)) (position 0) (interrupts 0))
     (ptr-write-bytes address bytes)
     (while (< position (length bytes))
-      (let ((written (syscall-direct 1 1 (+ address position)
-                                     (- (length bytes) position) 0 0 0)))
+      (let ((written (ngit-native-fd-write 1 (+ address position)
+                                          (- (length bytes) position))))
         (cond ((= written -4)
                (setq interrupts (1+ interrupts))
                (when (>= interrupts 8) (error "ngit: status-server write interrupted")))
@@ -610,7 +612,7 @@
                         ;; chunk may contain many complete pipelined verbs.
                         (when (> position 0)
                           (setq input (substring input position) position 0))
-                        (let ((read (syscall-direct 0 0 address (- 4097 (length input)) 0 0 0)))
+                        (let ((read (ngit-native-fd-read 0 address (- 4097 (length input)))))
                           (cond
                            ((= read -4)
                             (setq interrupts (1+ interrupts))

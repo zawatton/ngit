@@ -29,18 +29,20 @@
   "Write unibyte DATA to PATH; with EXCL, fail when PATH exists.
 With APPEND, append to PATH.  Preserve existing file permissions.
 MODE overrides new file permissions; `defer' leaves them for the caller."
-  (let ((new (and (not (eq mode 'defer)) (or excl (not (file-exists-p path)))))
+  (if (ngit-windows-p)
+      (ngit-win-write-file path data excl append)
+   (let ((new (and (not (eq mode 'defer)) (or excl (not (file-exists-p path)))))
         (coding-system-for-write 'no-conversion))
     (write-region data nil path append 'silent nil (and excl 'excl))
     (when new
       (let ((mode (or mode (ngit-native-creation-mode #o666))))
         ;; Standalone write-region creates files as 0644, ignoring umask.
-        (unless (= (file-modes path) mode) (set-file-modes path mode))))))
+        (unless (= (file-modes path) mode) (set-file-modes path mode)))))))
 
 (defun ngit-make-directory (path &optional parents)
   "Create PATH, optionally with PARENTS, using the process umask."
   ;; Unlike write-region, make-directory already honors the process umask.
-  (make-directory path parents))
+  (ngit-create-directory path parents))
 
 (defun ngit-lock (path &optional mode)
   "Create PATH.lock exclusively and return its name, or die as git does.
@@ -59,14 +61,14 @@ MODE controls permissions as in `ngit-write-file'."
     lock))
 
 (defun ngit-unlock (lock)
-  (when (file-exists-p lock) (delete-file lock)))
+  (when (file-exists-p lock) (ngit-delete-file lock)))
 
 (defun ngit-commit-lock (lock data &optional mode)
   "Write DATA to LOCK and rename it over the file it guards.
 With MODE, set final permissions after writing, before the rename."
   (ngit-write-file lock data)
-  (when (and mode (/= (file-modes lock) mode)) (set-file-modes lock mode))
-  (rename-file lock (substring lock 0 -5) t))
+  (when (and mode (not (ngit-windows-p)) (/= (file-modes lock) mode)) (set-file-modes lock mode))
+  (ngit-rename-file lock (substring lock 0 -5) t))
 
 ;;;; Objects
 
@@ -91,8 +93,8 @@ With DRY-RUN, only compute the name."
         (ngit-make-directory dir t)
         (ngit-write-file tmp obj t nil 'defer)
         (ngit-write-file tmp (ngit-native-deflate-file tmp (length obj) level))
-        (set-file-modes tmp #o444)
-        (rename-file tmp path t)
+        (unless (ngit-windows-p) (set-file-modes tmp #o444))
+        (ngit-rename-file tmp path t)
         (ngit-abbrev-forget)))
     bin))
 

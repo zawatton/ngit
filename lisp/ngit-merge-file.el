@@ -388,7 +388,9 @@ Return (RESULT . CONFLICTS), where RESULT is a unibyte string."
   (let ((addr (ngit-merge-file--path path)) size mode)
     (ngit-native--with-memory (statbuf 144)
       (let* ((stat (nl-ffi-memory-address statbuf))
-             (rc (syscall-direct 4 addr stat 0 0 0 0)))
+             (rc (if (ngit-windows-p)
+                     (if (ngit-win-stat (ngit-merge-file--filename path) stat) 0 -2)
+                   (syscall-direct 4 addr stat 0 0 0 0))))
         (when (< rc 0)
           (ngit--die-with 255 "error: Could not stat %s: %s"
                           path (ngit-merge-file--errno (- rc))))
@@ -411,7 +413,7 @@ Return (RESULT . CONFLICTS), where RESULT is a unibyte string."
 (defun ngit-merge-file--write (path text &optional stdout)
   "Write TEXT to PATH or STDOUT, checking write and close errors."
   (let* ((fd (if stdout 1
-               (syscall-direct 2 (ngit-merge-file--path path) #o1101 #o666 0 0 0)))
+               (ngit-native-fd-open (ngit-merge-file--filename path) #o1101 #o666)))
          (size (length text)))
     (when (< fd 0)
       (ngit--die-with 255 "error: Could not open %s for writing: %s"
@@ -422,8 +424,8 @@ Return (RESULT . CONFLICTS), where RESULT is a unibyte string."
                 (offset 0) rc)
             (ptr-write-bytes buf text)
             (while (< offset (length text))
-              (setq rc (syscall-direct 1 fd (+ buf offset)
-                                       (- (length text) offset) 0 0 0))
+              (setq rc (ngit-native-fd-write fd (+ buf offset)
+                                            (- (length text) offset)))
               (when (<= rc 0)
                 ;; Git's stdio buffers short writes until fclose.
                 (if (< size 4096)
@@ -432,7 +434,7 @@ Return (RESULT . CONFLICTS), where RESULT is a unibyte string."
                   (ngit--die-with 255 "error: Could not write to %s: %s"
                                   path (ngit-merge-file--errno (if (= rc 0) 5 (- rc))))))
               (setq offset (+ offset rc)))))
-      (let ((rc (syscall-direct 3 fd 0 0 0 0 0)))
+      (let ((rc (ngit-native-fd-close fd)))
         (when (< rc 0)
           (ngit--die-with 255 "error: Could not close %s: %s"
                           path (ngit-merge-file--errno (- rc))))))))

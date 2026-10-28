@@ -173,14 +173,23 @@ Return [OWNER ADDRESS LENGTH].  The caller must release OWNER."
               (ptr-write-u64 iov-address (* slot 16) (car piece))
               (ptr-write-u64 iov-address (+ (* slot 16) 8) (cdr piece))
               (setq slot (1+ slot)))
-            (let* ((pid (syscall-direct ngit-transport-delta--sys-getpid 0 0 0 0 0 0))
-                   (copied (if (and ngit-transport-delta--process-vm-readv-p
+            (let* ((pid (unless (ngit-windows-p)
+                          (syscall-direct ngit-transport-delta--sys-getpid 0 0 0 0 0 0)))
+                   (copied (if (ngit-windows-p)
+                               (let ((position 0))
+                                 (dolist (piece pieces)
+                                   (ngit-win-call "ucrtbase.dll" "memcpy"
+                                                  (+ output-address position)
+                                                  (car piece) (cdr piece))
+                                   (setq position (+ position (cdr piece))))
+                                 position)
+                             (if (and ngit-transport-delta--process-vm-readv-p
                                     (<= piece-count ngit-transport-delta--iov-max)
                                     (<= output-length ngit-transport-delta--io-byte-limit))
                                (syscall-direct
                                 ngit-transport-delta--sys-process-vm-readv pid
                                 iov-address 1 (+ iov-address 16) piece-count 0)
-                             -1)))
+                             -1))))
               (unless (= copied output-length)
                 (if (< copied 0)
                     (progn
@@ -198,7 +207,7 @@ Return [OWNER ADDRESS LENGTH].  The caller must release OWNER."
 
 (defun ngit-transport-delta-apply (base-address base-length delta)
   "Apply DELTA to native BASE-ADDRESS; return owned [OWNER ADDRESS LENGTH]."
-  (or (and ngit-transport-delta--use-kernel
+  (or (and (not (ngit-windows-p)) ngit-transport-delta--use-kernel
            (fboundp 'ngit-transport-kernel-apply)
            (let* ((base-size (ngit-transport-delta--varint delta 0))
                   (size (car (ngit-transport-delta--varint delta (cdr base-size)))))

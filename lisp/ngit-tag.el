@@ -308,7 +308,7 @@
     (ngit--write-ref repo ref hex old nil)
     (when (and (or annotate given file edit)
                (file-exists-p (expand-file-name "TAG_EDITMSG" (ngit-repo-gitdir repo))))
-      (delete-file (expand-file-name "TAG_EDITMSG" (ngit-repo-gitdir repo))))
+      (ngit-delete-file (expand-file-name "TAG_EDITMSG" (ngit-repo-gitdir repo))))
     (when (and old force (not (string= old hex)))
       (ngit--emit (format "Updated tag '%s' (was %s)\n" name
                           (ngit-abbrev repo old (ngit-default-abbrev repo)))))

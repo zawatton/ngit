@@ -55,9 +55,7 @@ If CANDIDATES is a cons, collect unverified paths in its car for a later diff."
             (if (null st)
                 (setq status
                       (if (or leading
-                              (= (syscall-direct ngit-wt--sys-lstat
-                                                 (ngit-wt--set-path (aref e 0))
-                                                 (nl-ffi-memory-address ngit-wt--stat) 0 0 0 0)
+                              (= (ngit-wt-lstat-result (aref e 0))
                                  -2))
                           "D" "M"))
               (let ((wmode (ngit-wt-mode st)))
@@ -196,7 +194,11 @@ protected entry checks and before the first work-tree deletion or write."
          (ngit--checkout-attr-cache (make-hash-table :test 'equal))
          (ngit--checkout-leading-cache (make-hash-table :test 'equal))
          (checked (make-hash-table :test 'eql))
-         (lock (ngit-lock (ngit-index-file repo))))
+         (_ (progn (ngit-win-validate-worktree-records old)
+                   (ngit-win-validate-worktree-records changes)
+                   (when (ngit-windows-p)
+                     (ngit-win-validate-worktree-records (ngit-diff-trees repo nil tree)))))
+         (lock (unless (ngit-windows-p) (ngit-lock (ngit-index-file repo)))))
     (unwind-protect
         (progn
           (ngit-wt-setup (ngit-repo-toplevel repo))
@@ -237,6 +239,8 @@ protected entry checks and before the first work-tree deletion or write."
            dropped)
           (setq removed (sort removed #'ngit--entry-less)
                 entries (ngit-index-overlay old targets dropped))
+          (ngit-win-validate-worktree-records entries)
+          (when (ngit-windows-p) (setq lock (ngit-lock (ngit-index-file repo))))
           ;; Protected entries still undergo verify_uptodate when the
           ;; target changes them, even with UNPACK_RESET_OVERWRITE_UNTRACKED.
           (let ((raw (aref index 1)) (rejected nil))
@@ -248,9 +252,7 @@ protected entry checks and before the first work-tree deletion or write."
                            (or (memq 'skip-worktree (aref e 5))
                                (/= 0 (logand (aref raw (+ pos 60)) #x80))))
                   (unless (or (ngit--checkout-stat-clean-p repo index e stat-options)
-                              (= (syscall-direct ngit-wt--sys-lstat
-                                                 (ngit-wt--set-path (aref e 0))
-                                                 (nl-ffi-memory-address ngit-wt--stat) 0 0 0 0)
+                              (= (ngit-wt-lstat-result (aref e 0))
                                  -2))
                       (ngit-native-write-stderr
                        (format "error: Entry '%s' not uptodate. Cannot merge.\n" (aref e 0)))
@@ -310,7 +312,7 @@ protected entry checks and before the first work-tree deletion or write."
           (aset index 9 nil)
           (ngit-commit-lock lock (ngit-index-bytes repo index entries root checked))
           (aset repo 6 nil))
-      (ngit-unlock lock))))
+      (when lock (ngit-unlock lock)))))
 
 (defun ngit--reset-uptodate-p (repo index entry)
   "Check unpack-trees' stat contract without refreshing the index first."
@@ -334,14 +336,16 @@ protected entry checks and before the first work-tree deletion or write."
 
 (defun ngit--reset-original-cwd ()
   "Read the inherited process cwd, unaffected by the CLI's Lisp-only -C."
-  (let* ((buffer (ngit-native--buffer 3 4096))
+  (if (ngit-windows-p)
+      (or (getenv "NGIT_ORIGINAL_CWD") (ngit-win-current-directory))
+   (let* ((buffer (ngit-native--buffer 3 4096))
          (address (nl-ffi-memory-address buffer))
          ;; Linux getcwd includes the terminating NUL in its return value.
          (size (syscall-direct 79 address 4096 0 0 0 0)))
     (unless (> size 0)
       (ngit--die "fatal: Unable to read current working directory"))
     (directory-file-name
-     (file-truename (decode-coding-string (ptr-read-bytes address (1- size)) 'utf-8)))))
+     (file-truename (decode-coding-string (ptr-read-bytes address (1- size)) 'utf-8))))))
 
 (defun ngit--reset-protect-untracked (repo changes old rev)
   "Preflight every destination and its leading components before reset writes."
@@ -485,6 +489,10 @@ protected entry checks and before the first work-tree deletion or write."
           (when write
             (if target (push target writes) (when current (push current deletes)))))))
     (let* ((entries (ngit-index-overlay old targets drop))
+           (_ (progn (ngit-win-validate-worktree-records old)
+                     (ngit-win-validate-worktree-records deletes)
+                     (ngit-win-validate-worktree-records writes)
+                     (ngit-win-validate-worktree-records entries)))
            (lock (ngit-lock (ngit-index-file repo)))
            (checked (make-hash-table :test 'eql))
            (ngit--checkout-attr-cache (make-hash-table :test 'equal)))
@@ -586,7 +594,7 @@ protected entry checks and before the first work-tree deletion or write."
         (dolist (name '("MERGE_HEAD" "MERGE_RR" "MERGE_MSG" "MERGE_MODE"
                         "SQUASH_MSG"))
           (let ((file (expand-file-name name (ngit-repo-gitdir repo))))
-            (when (file-exists-p file) (delete-file file))))
+            (when (file-exists-p file) (ngit-delete-file file))))
         (ngit-ref-delete-state repo "AUTO_MERGE"))
       (when (and (equal mode "--hard") hex (not quiet))
         (let ((subject (ngit--subject-of repo hex)))

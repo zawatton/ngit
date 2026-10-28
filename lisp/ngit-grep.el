@@ -196,7 +196,7 @@
                               (if (= 0 (logand (aref (aref index 1) (+ pos 60)) #x40)) 62 64))))
          (st (if cpath (ngit-wt-lstat-at cpath) (ngit-wt-lstat (aref entry 0)))))
     (when (and st (= (logand (aref st 0) ngit-s-ifmt) ngit-s-ifreg))
-      (if (not cpath) (ngit-wt-read (aref entry 0) (aref st 2))
+      (if (or (ngit-windows-p) (not cpath)) (ngit-wt-read (aref entry 0) (aref st 2))
         (let ((fd (syscall-direct 257 (ngit-wt--top-fd) cpath ngit-native--o-rdonly-cloexec 0 0 0))
               (size (aref st 2)))
           (when (< fd 0) (ngit--die "fatal: cannot open %s" (aref entry 0)))

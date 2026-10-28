@@ -519,6 +519,24 @@ Each object is also verified against its SHA-1 before it is printed."
 (defun ngit-cli--shell-alias (repo value args)
   "Run shell alias VALUE with appended ARGS in REPO's worktree."
   (require 'ngit-hook)
+  (if (and (fboundp 'ngit-windows-p) (ngit-windows-p))
+      (progn
+        (when (and args (member (getenv "NGIT_WINDOWS_SHELL") '(nil "")))
+          (ngit--die "fatal: Windows shell aliases with arguments require NGIT_WINDOWS_SHELL"))
+      (let* ((shell (substring value 1))
+             (command (concat shell
+                              (mapconcat
+                               (lambda (arg)
+                                 (concat " " (ngit-transport--shell-quote arg)))
+                               args "")))
+             (environment (ngit-hook--env-apply
+                           process-environment
+                           (if repo (ngit-hook--repository-env repo) '("GIT_PREFIX="))))
+             (conn (ngit-win-process-spawn
+                    (ngit-win-process-shell command) environment
+                    (if repo (ngit--hook-cwd repo) default-directory)
+                    'inherit 'inherit nil)))
+        (ngit-win-process-close conn)))
   (let* ((shell (substring value 1))
          (environment (ngit-hook--env-apply
                        process-environment
@@ -549,7 +567,7 @@ Each object is also verified against its SHA-1 before it is printed."
     (nl-ffi-memory-release (car ev))
     (nl-ffi-memory-release (car cv))
     (when (< pid 0) (ngit--die "fatal: fork failed (errno %d)" (- pid)))
-    (ngit-transport-close (vector ngit-transport--tag pid -1 -1 nil nil))))
+    (ngit-transport-close (vector ngit-transport--tag pid -1 -1 nil nil)))))
 
 (defun ngit-cli--expand-alias (args)
   "Return expanded ARGS, or a numeric shell-alias exit status."

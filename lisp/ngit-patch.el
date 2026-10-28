@@ -732,6 +732,7 @@
 (defun ngit-patch--validate-path (path)
   "Require a single canonical spelling before path or symlink bookkeeping."
   (when path
+    (when (ngit-windows-p) (ngit-win-validate-worktree-path path))
     (let ((parts (split-string path "/")))
       (when (or (string= path "") (= (aref path 0) ?/)
                 (member "" parts) (member "." parts) (member ".." parts)
@@ -956,7 +957,11 @@
     (ngit-native--write-bytes address bytes)
     (ptr-write-u8 address (length bytes) 0)
     ;; Linux x86-64 rmdir/unlink, matching the native I/O substrate.
-    (let ((rc (syscall-direct (if directory 84 87) address 0 0 0 0 0)))
+    (let ((rc (if (ngit-windows-p)
+                  (condition-case nil
+                      (progn (if directory (ngit-delete-directory file) (ngit-delete-file file)) 0)
+                    (file-error -13))
+                (syscall-direct (if directory 84 87) address 0 0 0 0 0))))
       (if (or (= rc 0) (= rc -2)) t
         (ngit-native-write-stderr
          (format "warning: unable to %s '%s': %s\n" (if directory "rmdir" "unlink") path
@@ -986,9 +991,9 @@
            (condition-case nil
                (progn (funcall create temporary) (setq done t))
              (file-already-exists (setq number (1+ number)))))
-         (unwind-protect (rename-file temporary file t)
+         (unwind-protect (ngit-rename-file temporary file t)
            (when (or (file-exists-p temporary) (file-symlink-p temporary))
-             (delete-file temporary))))))))
+             (ngit-delete-file temporary))))))))
 
 (defun ngit-patch--write-worktree (repo prepared)
   ;; Remove preimages before creating any result, including symlinks that
@@ -1012,7 +1017,7 @@
                 ;; dir.c:remove_path stops on rmdir failure, ignoring it.
                 (condition-case nil
                     (progn
-                      (delete-directory dir)
+                      (ngit-delete-directory dir)
                       (setq dir (if (file-directory-p dir) top
                                   (directory-file-name (file-name-directory dir)))))
                   (file-error (setq dir top))))))))))
@@ -1029,7 +1034,7 @@
 		  (when (file-directory-p file)
 		    (if (ngit--dir-names (file-name-as-directory file))
 			(setq reason "Directory not empty")
-		      (delete-directory file)))
+		      (ngit-delete-directory file)))
 		  (when reason
 		    (ngit--die-with 1 "error: unable to write file '%s' mode %s: %s"
 				    path (ngit--octal6 (plist-get one :mode)) reason)))
@@ -1173,7 +1178,7 @@
     (let* ((owner (ngit-native--buffer 0 65536))
            (addr (nl-ffi-memory-address owner)) parts done)
       (while (not done)
-        (let ((n (syscall-direct 0 0 addr 65536 0 0 0)))
+        (let ((n (ngit-native-fd-read 0 addr 65536)))
           (cond ((< n 0) (error "ngit: stdin read failed (errno %d)" (- n)))
                 ((= n 0) (setq done t))
                 (t (push (ptr-read-bytes addr n) parts)))))
@@ -1223,6 +1228,28 @@
        (format "warning: %d line%s add%s whitespace errors.\n"
                count (if (= count 1) "" "s") (if (= count 1) "s" ""))))))
 
+(defun ngit-patch--preflight-windows (repo prepared index-write)
+  "Validate the complete Windows patch result before any mutation."
+  (when (ngit-windows-p)
+    (let ((removed (make-hash-table :test 'equal))
+          (replaced (make-hash-table :test 'equal)) targets)
+      (dolist (one prepared)
+        (let ((old (plist-get one :old)) (path (plist-get one :path)))
+          (when (and old (not (plist-get (plist-get one :patch) :copy)))
+            (puthash old t removed))
+          (when (and path (/= (plist-get one :mode) 0))
+            (puthash path t replaced)
+            (push (vector path) targets))))
+      (ngit-win-validate-worktree-records targets)
+      (when index-write
+        (let ((old (ngit-index-entries repo)) surviving)
+          (ngit-win-validate-worktree-records old)
+          (mapc (lambda (entry)
+                  (unless (or (gethash (aref entry 0) removed)
+                              (gethash (aref entry 0) replaced))
+                    (push entry surviving))) old)
+          (ngit-win-validate-worktree-records (append surviving targets)))))))
+
 ;;;###autoload
 (defun ngit-cmd-apply (repo args &optional input)
   (let ((check nil) (cached nil) (index nil) (reverse nil) (stat nil) (files nil) p-value
@@ -1247,6 +1274,7 @@
       (when reverse (setq patches (reverse patches)))
       (if stat (ngit-patch--stat patches reverse)
         (let ((prepared (ngit-patch--prepare repo patches cached reverse index)))
+          (ngit-patch--preflight-windows repo prepared (or cached index))
           (unless check
             (ngit-patch--warn-whitespace data
                                          (if (= (length files) 1) (car files) "<stdin>")
@@ -1416,7 +1444,8 @@
                                (unless patches
                                  (ngit--die-with 128 "error: No valid patches in input (allow with \"--allow-empty\")"))
                                (ngit-patch--prepare repo patches nil nil t))))
-              (ngit-patch--write-worktree repo prepared)
+                (ngit-patch--preflight-windows repo prepared t)
+                (ngit-patch--write-worktree repo prepared)
               (ngit-patch--write-index repo prepared t)
               ;; When pre-applypatch runs, git-am keeps its in-memory index
               ;; across the hook.  A hook may change the index file, but

@@ -11,16 +11,31 @@
 ;;; Code:
 (require 'ngit-native)
 (require 'ngit-config)
-(ffi:library "libcurl.so.4")
+(unless (ngit-windows-p) (ffi:library "libcurl.so.4"))
 (defvar ngit-http--functions (make-hash-table :test 'equal))
 
 (defun ngit-http--call (name &rest args)
   "Call an external-library NAME with integer or pointer ARGS."
   (let ((fn (or (gethash name ngit-http--functions)
-                (let ((p (nl-ffi--resolve-via-dlsym name)))
+                (let ((p (if (ngit-windows-p)
+                             (ngit-http--windows-symbol name)
+                           (nl-ffi--resolve-via-dlsym name))))
                   (when (zerop p) (ngit-transport--fail "fatal: missing HTTP library function %s" name))
                   (puthash name p ngit-http--functions)))))
     (apply #'ptr-call fn (append args (make-list (- 6 (length args)) 0)))))
+
+(defun ngit-http--windows-symbol (name)
+  "Resolve external HTTP functions with explicit CRT ownership."
+  (let* ((curl (string-prefix-p "curl_" name))
+         (zlib (string-prefix-p "gz" name))
+         (dll (cond (curl "libcurl-4.dll") (zlib "zlib1.dll") (t "ucrtbase.dll")))
+         (directory (getenv "NGIT_WINDOWS_DLL_DIR"))
+         (symbol (or (cdr (assoc name '(("fileno" . "_fileno") ("dup" . "_dup")
+                                      ("close" . "_close") ("lseek" . "_lseeki64")
+                                      ("fseek" . "_fseeki64") ("ftell" . "_ftelli64"))))
+                     name)))
+    (ngit-win-symbol (if (and (or curl zlib) directory (not (string= directory "")))
+                         (expand-file-name dll directory) dll) symbol)))
 
 (defun ngit-http--check (code operation)
   (unless (= code 0)
@@ -164,7 +179,8 @@
                     (ngit-transport--fail "fatal: malformed HTTP request packet"))
                   (setq offset (+ offset (max n 4)) done (= n 0)))))
           (nl-ffi-memory-release owner))))
-    (if (and (not chunked) (> size 1024))
+    ;; Keep zlib's private CRT away from the owned UCRT descriptors.
+    (if (and (not (ngit-windows-p)) (not chunked) (> size 1024))
         (let ((compressed (ngit-http--gzip file)))
           (list (car compressed) (cdr compressed) nil t))
       (list file size chunked nil))))
@@ -200,6 +216,12 @@
               (ngit-http--set handle 107 1) ; CURLAUTH_BASIC; separate decoded fields.
               (ngit-http--set handle 10001 body)
               (ngit-http--set handle 10029 head)
+              (when (ngit-windows-p)
+                ;; Both callbacks match fread/fwrite's four-argument ABI.
+                ;; FILE pointers and callbacks must belong to the same CRT.
+                (ngit-http--set handle 20011 (ngit-win-symbol "ucrtbase.dll" "fwrite"))
+                (ngit-http--set handle 20079 (ngit-win-symbol "ucrtbase.dll" "fwrite"))
+                (ngit-http--set handle 20012 (ngit-win-symbol "ucrtbase.dll" "fread")))
               (dolist (value (append (aref state 6)
                                     (if post
                                         (list (concat "Content-Type: application/x-" (aref state 2) "-request")

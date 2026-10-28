@@ -60,6 +60,7 @@
 
 (defun ngit-wt--set-path (rel)
   "Make the path buffer hold TOP/REL; return its address."
+  (when (ngit-windows-p) (ngit-win-validate-worktree-path rel))
   (let* ((addr (nl-ffi-memory-address ngit-wt--path))
          (base (cdr ngit-wt--top))
          (end nil))
@@ -76,11 +77,33 @@
 
 (defun ngit-wt-lstat (rel)
   "Return [MODE INO SIZE MTIME MTIME-NS CTIME] for REL, or nil if absent."
-  (let* ((addr (ngit-wt--set-path rel))
+  (if (ngit-windows-p)
+      (ngit-win-stat (ngit-wt-absolute rel) (nl-ffi-memory-address ngit-wt--stat))
+   (let* ((addr (ngit-wt--set-path rel))
          (sa (nl-ffi-memory-address ngit-wt--stat)))
     (and (>= (syscall-direct ngit-wt--sys-lstat addr sa 0 0 0 0) 0)
          (vector (ptr-read-u32 sa 24) (ptr-read-u64 sa 8) (ptr-read-u64 sa 48)
-                 (ptr-read-u64 sa 88) (ptr-read-u64 sa 96) (ptr-read-u64 sa 104)))))
+                 (ptr-read-u64 sa 88) (ptr-read-u64 sa 96) (ptr-read-u64 sa 104))))))
+
+(defun ngit-wt-absolute (rel)
+  "Expand UTF-8 relative worktree REL into a native Lisp path."
+  (when (ngit-windows-p) (ngit-win-validate-worktree-path rel))
+  (expand-file-name (decode-coding-string rel 'utf-8)
+                    (decode-coding-string (car ngit-wt--top) 'utf-8)))
+
+(defun ngit-wt-gitdir-lstat (parent)
+  "Read-only nested-repository probe below validated worktree PARENT.
+Only this literal internal metadata suffix bypasses the user-path guard."
+  (if (ngit-windows-p)
+      (ngit-win-stat (expand-file-name ".git" (file-name-as-directory (ngit-wt-absolute parent)))
+                     (nl-ffi-memory-address ngit-wt--stat))
+    (ngit-wt-lstat (concat parent "/.git"))))
+
+(defun ngit-wt-lstat-result (rel)
+  "Return zero for present REL, -2 when absent; other failures signal."
+  (if (ngit-windows-p) (if (ngit-wt-lstat rel) 0 -2)
+    (syscall-direct ngit-wt--sys-lstat (ngit-wt--set-path rel)
+                    (nl-ffi-memory-address ngit-wt--stat) 0 0 0 0)))
 
 (defconst ngit-wt--sys-newfstatat 262)
 (defconst ngit-wt--at-symlink-nofollow #x100)
@@ -97,19 +120,27 @@
 
 (defun ngit-wt-lstat-at (cpath)
   "Like `ngit-wt-lstat' for a NUL-terminated relative path at address CPATH."
-  (let ((sa (nl-ffi-memory-address ngit-wt--stat)))
+  (if (ngit-windows-p)
+      (let ((size 0))
+        (while (/= 0 (ptr-read-u8 cpath size)) (setq size (1+ size)))
+        (ngit-wt-lstat (ptr-read-bytes cpath size)))
+   (let ((sa (nl-ffi-memory-address ngit-wt--stat)))
     (and (>= (syscall-direct ngit-wt--sys-newfstatat (ngit-wt--top-fd) cpath sa
                              ngit-wt--at-symlink-nofollow 0 0)
              0)
          (vector (ptr-read-u32 sa 24) (ptr-read-u64 sa 8) (ptr-read-u64 sa 48)
-                 (ptr-read-u64 sa 88) nil (ptr-read-u64 sa 104)))))
+                 (ptr-read-u64 sa 88) nil (ptr-read-u64 sa 104))))))
 
 (defun ngit-wt-exists-p (rel)
   (ngit-wt-lstat rel))
 
 (defun ngit-wt-read (rel size)
   "Return the SIZE-byte contents of regular file REL (path buffer reused)."
-  (if (<= size 0)
+  (if (ngit-windows-p)
+      (let ((path (ngit-wt-absolute rel)))
+        (unwind-protect (ngit-native-read-bytes path 0 size)
+          (ngit-native-close path)))
+   (if (<= size 0)
       ""
     (let* ((addr (ngit-wt--set-path rel))
            (fd (syscall-direct ngit-native--sys-open addr ngit-native--o-rdonly-cloexec 0 0 0 0)))
@@ -123,9 +154,10 @@
                                        (- size done) done 0 0)))
                 (if (<= n 0) (setq eof t) (setq done (+ done n)))))
             (ptr-read-bytes ba done))
-        (syscall-direct ngit-native--sys-close fd 0 0 0 0 0)))))
+        (syscall-direct ngit-native--sys-close fd 0 0 0 0 0))))))
 
 (defun ngit-wt-readlink (rel)
+  (when (ngit-windows-p) (error "ngit: Windows symbolic links are unsupported"))
   (let* ((addr (ngit-wt--set-path rel))
          (buf (ngit-native--buffer 0 4096))
          (ba (nl-ffi-memory-address buf))

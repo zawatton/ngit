@@ -231,7 +231,7 @@
                             (if (string= subject "") ""
                               (concat " " (decode-coding-string subject 'utf-8)))
                             "\n"))
-              (delete-file (expand-file-name "locked" admin))
+              (ngit-delete-file (expand-file-name "locked" admin))
               (setq keep-worktree t)
               (ngit-hook-run view "post-checkout"
                              (list (make-string 40 ?0) hex "1") nil
@@ -246,10 +246,10 @@
 (defun ngit-worktree-cmd--delete-directory (directory)
   (dolist (path (directory-files directory t nil t))
     (unless (member (file-name-nondirectory path) '("." ".."))
-      (cond ((file-symlink-p path) (delete-file path))
+      (cond ((file-symlink-p path) (ngit-delete-file path))
             ((file-directory-p path) (ngit-worktree-cmd--delete-directory path))
-            (t (delete-file path)))))
-  (delete-directory directory))
+            (t (ngit-delete-file path)))))
+  (ngit-delete-directory directory))
 
 (defun ngit-worktree-cmd--find (repo arg)
   (let ((absolute (directory-file-name (expand-file-name arg default-directory)))
@@ -317,7 +317,7 @@
       (let ((root (ngit-worktree-cmd--admin-root repo)))
         (when (and (file-directory-p root)
                    (null (directory-files root nil "\\`[^.]")))
-          (delete-directory root)))
+          (ngit-delete-directory root)))
       0)))
 
 (defun ngit-worktree-cmd--prune (repo args)
@@ -331,14 +331,14 @@
                (target-git (and (file-regular-p gitfile)
                                 (ngit--trim-eol (ngit--read-file gitfile)))))
           (cond ((or (file-symlink-p admin) (not (file-directory-p admin)))
-                 (delete-file admin))
+                 (ngit-delete-file admin))
                 ((and (not (file-exists-p locked))
                       (or (not target-git) (string= target-git "")
                           (not (file-exists-p target-git))))
                  (ngit-worktree-cmd--delete-directory admin))))))
     (when (and (file-directory-p root)
                (null (directory-files root nil "\\`[^.]")))
-      (delete-directory root)))
+      (ngit-delete-directory root)))
   0)
 
 ;;;###autoload

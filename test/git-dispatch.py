@@ -206,6 +206,14 @@ class Routing(Fixture):
 
 @unittest.skipUnless(MODE in ("all", "boundaries"), "mode")
 class Boundaries(Fixture):
+    def test_explicitly_disabled_system_attributes(self):
+        system = self.git("var", "GIT_ATTR_SYSTEM").decode().removesuffix("\n")
+        original = os.path.lexists
+        for value, expected in (("1", True), ("0", False), ("invalid", False)):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {**self.env, "GIT_ATTR_NOSYSTEM": value}, clear=True):
+                with mock.patch("os.path.lexists", side_effect=lambda path: True if str(path) == system else original(path)):
+                    self.assertEqual(API["certificate"](GIT, ["-C", str(self.repo)], "status"), expected)
+
     def fallback(self):
         self.dispatch(["status", "--short"])
         self.assertEqual(self.backend(), "git")
@@ -510,6 +518,8 @@ class EndToEnd(Fixture):
         self.env["NGIT_NELISP"] = os.environ.get("NGIT_NELISP") or shutil.which("nelisp")
         self.git("config", "core.autocrlf", "input")
         (self.repo / "file").write_bytes(b"one\r\ntwo\r\n")
+        # Keep conversion warnings independent of racy-index timestamp timing.
+        os.utime(self.repo / "file", (1600000000, 1600000000))
         reference = self.base / "reference"
         shutil.copytree(self.repo, reference)
         for args in (["status", "--porcelain"], ["add", "--", "file"],
@@ -523,6 +533,7 @@ class EndToEnd(Fixture):
                          run([GIT, "rev-parse", "HEAD"], reference, self.env)[1])
         for repo in (self.repo, reference):
             (repo / "fresh").write_bytes(b"new\r\n")
+            os.utime(repo / "fresh", (1600000000, 1600000000))
         for args in (["add", "-A"], ["commit", "-q", "-m", "untracked CRLF"]):
             expected = run([GIT, *args], reference, self.env)[:3]
             self.assertEqual(self.dispatch(args)[:3], expected)

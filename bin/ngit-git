@@ -134,6 +134,7 @@ def grammar(argv):
 
 def certificate(git, globals_, command=None):
     """Bound original Git probes and reject unsupported repository features."""
+    system_attributes_disabled = os.environ.get("GIT_ATTR_NOSYSTEM") == "1"
     pager_disabled = False
     options = iter(globals_)
     for option in options:
@@ -142,6 +143,7 @@ def certificate(git, globals_, command=None):
         elif option in ("-P", "--no-pager"):
             pager_disabled = True
     if any(k.startswith("GIT_") and k not in SAFE_ENV and
+           not (k == "GIT_ATTR_NOSYSTEM" and system_attributes_disabled) and
            not (k == "GIT_PAGER" and (pager_disabled or os.environ[k] in ("", "cat")))
            for k in os.environ):
         return False
@@ -209,6 +211,8 @@ def certificate(git, globals_, command=None):
         # Git exposes its compiled system path and resolved global default;
         # unsupported Git versions fail closed through the probe boundary.
         for variable in ("GIT_ATTR_SYSTEM", "GIT_ATTR_GLOBAL"):
+            if variable == "GIT_ATTR_SYSTEM" and system_attributes_disabled:
+                continue
             attrpath = probe("var", variable).decode().removesuffix("\n")
             if not attrpath or not Path(attrpath).is_absolute() or os.path.lexists(attrpath):
                 return False
@@ -277,6 +281,10 @@ def main():
                 backend, reason = "ngit", "supported"
                 target = os.environ.get("NGIT_COMMAND") or str(Path(__file__).resolve().with_name("ngit"))
                 arguments = arguments_
+                if os.name == "nt" and "NGIT_COMMAND" not in os.environ:
+                    target = sys.executable
+                    arguments = [str(Path(__file__).resolve().parents[1] / "tools/ngit-windows.py"),
+                                 *arguments_]
     trace = os.environ.get("NGIT_GIT_TRACE")
     if trace:
         try:

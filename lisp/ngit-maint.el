@@ -45,9 +45,15 @@
   (unless ngit-maint--stat-memory
     (setq ngit-maint--stat-memory (nl-ffi-memory-allocate 256)))
   (let ((sa (nl-ffi-memory-address ngit-maint--stat-memory)))
+   (if (ngit-windows-p)
+       (let ((info (ngit-win-stat path sa)))
+         (when info
+           ;; Git for Windows uses logical sizes (NO_ST_BLOCKS_IN_STRUCT_STAT).
+           ;; The block slot is unused by the Windows accounting path.
+           (vector (aref info 0) (aref info 2) 0 (aref info 3))))
     (and (>= (syscall-direct 6 (ngit-maint--write-c-string path) sa 0 0 0 0) 0)
          (vector (ptr-read-u32 sa 24) (ptr-read-u64 sa 48)
-                 (ptr-read-u64 sa 64) (ptr-read-u64 sa 88)))))
+                 (ptr-read-u64 sa 64) (ptr-read-u64 sa 88))))))
 
 (defun ngit-maint--regular-p (stat)
   (= (logand (aref stat 0) #o170000) #o100000))
@@ -61,13 +67,13 @@
     (while (and (string-prefix-p (concat stop "/") dir)
                 (file-directory-p dir)
                 (null (directory-files dir nil "\\`[^.]\\|\\`\\.[^.]")))
-      (delete-directory dir)
+      (ngit-delete-directory dir)
       (setq dir (directory-file-name (file-name-directory dir))))))
 
 (defun ngit-maint--delete-loose (repo hex &optional keep-directory)
   (let ((path (ngit-maint--loose-path repo hex)))
     (when (file-exists-p path)
-      (delete-file path)
+      (ngit-delete-file path)
       (unless keep-directory
         (ngit-maint--delete-empty-parents
          (file-name-directory path) (ngit--objects-dir repo))))))
@@ -87,10 +93,10 @@
     ;; Unpublish the split chain before removing any of its graph files.
     (dolist (path (list (expand-file-name "commit-graph" info)
                         (expand-file-name "commit-graph-chain" split)))
-      (when (file-exists-p path) (delete-file path)))
+      (when (file-exists-p path) (ngit-delete-file path)))
     (when (file-directory-p split)
       (dolist (path (directory-files split t "\\`graph-[0-9a-f]+\\.graph\\'"))
-        (delete-file path)))))
+        (ngit-delete-file path)))))
 
 (defun ngit-maint--pack-files (repo)
   "Return existing pack basenames, without extensions."
@@ -106,7 +112,7 @@
   (unless (file-exists-p (concat base ".keep"))
     (dolist (ext '(".pack" ".idx" ".rev" ".bitmap" ".mtimes"))
       (let ((path (concat base ext)))
-        (when (file-exists-p path) (delete-file path))))))
+        (when (file-exists-p path) (ngit-delete-file path))))))
 
 (defun ngit-maint--prune-packed (repo dry-run &optional known)
   "Remove loose objects already present in a pack.
@@ -120,11 +126,12 @@ KNOWN is a membership table for a pack successfully written by this command."
               (ngit--emit "rm -f " (file-relative-name path default-directory) "\n")
             ;; The loose listing already supplied PATH.  Unlink directly;
             ;; another process removing it first is harmless (ENOENT).
-            (let ((rc (syscall-direct ngit-maint--sys-unlink
-                                      (ngit-maint--write-c-string path) 0 0 0 0 0)))
+            (let ((rc (if (ngit-windows-p) -38
+                        (syscall-direct ngit-maint--sys-unlink
+                                        (ngit-maint--write-c-string path) 0 0 0 0 0))))
               (cond
                ((= rc -38)
-                (when (file-exists-p path) (delete-file path)))
+                (when (file-exists-p path) (ngit-delete-file path)))
                ((not (or (= rc 0) (= rc -2)))
                 (error "ngit: cannot remove %s (errno %d)" path (- rc)))))
             (let ((prefix (substring hex 0 2)))
@@ -369,7 +376,7 @@ KNOWN is a membership table for a pack successfully written by this command."
                   (progn
                     (setq input (ngit-ref-prepare repo (list (list value nil (car item)))
                                                   nil (list ref-lock)))
-                    (delete-file (cdr item))
+                    (ngit-delete-file (cdr item))
                     (ngit-unlock ref-lock)
                     (ngit-maint--delete-empty-parents
                      (file-name-directory (cdr item)) (expand-file-name "refs" common))
@@ -757,7 +764,8 @@ KNOWN is a membership table for a pack successfully written by this command."
         (let ((stat (ngit-maint--stat (ngit-maint--loose-path repo hex))))
           (when (and stat (ngit-maint--regular-p stat))
             (setq loose (1+ loose)
-                  loose-size (+ loose-size (* 512 (aref stat 2))))
+                  loose-size (+ loose-size (if (ngit-windows-p) (aref stat 1)
+                                            (* 512 (aref stat 2)))))
             (when (ngit--find-packed repo (ngit-unhex hex))
               (setq packable (1+ packable))))))
       (dolist (pack packs)

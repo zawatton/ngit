@@ -28,7 +28,7 @@
                         (and items (not excluded) (not (ngit-index-dir-p entries (concat path "/")))
                              (not (ngit-pathspec-untracked-class items path))))
               (let* ((tracked (ngit-index-dir-p entries (concat path "/")))
-                     (nested (ngit-wt-lstat (concat path "/.git")))
+                     (nested (ngit-wt-gitdir-lstat path))
                      (children (unless nested
                                  (ngit-ls-files--walk repo top entries (concat path "/")
                                                       stack standard ignored excluded items

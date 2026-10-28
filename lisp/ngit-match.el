@@ -239,7 +239,9 @@ Return one of `match', `nomatch', `abort-all', `abort-to-starstar'."
   "Read PATH atomically without following a symlink, diagnosing NAME.
 The descriptor is private; a rename between lstat and open cannot redirect
 attribute or ignore reads to the target of a symlink."
-  (let* ((bytes (encode-coding-string path 'utf-8))
+  (if (ngit-windows-p)
+      (ngit-win-read-nofollow path)
+   (let* ((bytes (encode-coding-string path 'utf-8))
          (address (nl-ffi-memory-address (ngit-native--buffer 3 (1+ (length bytes))))))
     (ptr-write-bytes address bytes)
     (ptr-write-u8 address (length bytes) 0)
@@ -261,7 +263,7 @@ attribute or ignore reads to the target of a symlink."
                   (if (<= size 0) (setq done t)
                     (push (ptr-read-bytes buffer size) parts))))
               (apply #'concat (nreverse parts)))
-          (syscall-direct ngit-native--sys-close descriptor 0 0 0 0 0))))))
+          (syscall-direct ngit-native--sys-close descriptor 0 0 0 0 0)))))))
 
 (defun ngit-read-ignore-file (path base &optional nofollow)
   "Return the patterns of ignore file PATH, last line first."

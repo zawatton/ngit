@@ -10,7 +10,8 @@ or importing your history.
 ngit is under active development. Supported cases are compared with Git for
 output and repository state; a supported command does not imply complete
 Git compatibility. Keep Git available for unsupported operations.
-The current native implementation targets *Linux x86_64*.
+The native implementation supports *Linux x86_64* and has a
+[[file:docs/windows.org][Windows x86-64 backend validated with Wine]].
 
 - [[#install][Install]]
 - [[#create-your-first-repository][Create your first repository]]
@@ -32,7 +33,7 @@ The current native implementation targets *Linux x86_64*.
 
 | Component | Requirement |
 |-----------+-------------|
-| OS / CPU | Linux x86_64; other NeLisp platforms do not make ngit portable |
+| OS / CPU | Linux x86_64; see the separate Windows setup for Windows x86-64 |
 | Runtime | A compatible standalone NeLisp binary and its =packages/nl-ffi= source |
 | Libraries | zlib =libz.so.1= and OpenSSL 3 =libcrypto.so.3= |
 | HTTPS | libcurl =libcurl.so.4= with its TLS backend and CA certificates |

@@ -8,7 +8,11 @@ The progress meter is a Notes workspace tool, not an ngit dependency.
 
 - =lisp/ngit-native.el= — file reads via =syscall-direct= into reusable
   mmap buffers, zlib inflate via libz =uncompress2= through the nl-ffi dlsym
-  path (compression is in the approved FFI scope).  Linux x86_64 only.
+  path (compression is in the approved FFI scope). Windows uses the
+  explicit =ngit-windows.el= OS adapter and native DLL resolution.
+- =lisp/ngit-windows-process.el= — Win64 process handles, binary pipes,
+  separate stderr, explicit environment/cwd and owned writer cancellation.
+  See [[file:windows.org][Windows setup and Wine acceptance]].
 - =lisp/ngit-store.el= — repository/worktree discovery, loose objects, pack
   index v2 lookup (lazy fanout, per-first-byte name slices), pack entries
   with OFS_DELTA/REF_DELTA, delta application, commit/tree parsing.

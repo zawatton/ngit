@@ -8,7 +8,8 @@
 ;; through the nl-ffi dlsym path.  Lisp only ever sees the final unibyte
 ;; result via `ptr-read-bytes'.
 ;;
-;; Requires Linux x86_64 (the syscall numbers and nl-ffi-memory profile).
+;; Linux uses direct syscalls; Windows uses the application's owned OS
+;; adapter and native external compression/crypto DLLs.
 
 ;;; Code:
 
@@ -22,7 +23,10 @@
       (expand-file-name "../../nelisp/" ngit-native--dir)))
   "Root of the NeLisp checkout that provides packages/nl-ffi.")
 
-(let ((src (expand-file-name "packages/nl-ffi/src/" ngit-nelisp-root)))
+(require 'ngit-windows (expand-file-name "ngit-windows.el" ngit-native--dir))
+
+(unless (ngit-windows-p)
+ (let ((src (expand-file-name "packages/nl-ffi/src/" ngit-nelisp-root)))
   (load (expand-file-name "nl-ffi.el" src) nil t)
   (load (expand-file-name "nl-ffi-memory.el" src) nil t))
 
@@ -39,7 +43,20 @@
 
 (ffi:defun ngit-native--compress2 "compress2"
   [:sint32 :pointer :pointer :pointer :uint64 :sint32]
-  "compress2(dest, &destLen, source, sourceLen, level).")
+  "compress2(dest, &destLen, source, sourceLen, level)."))
+
+(defvar ngit-native--sha1-context nil)
+(defvar ngit-native--sha1-functions nil)
+
+(defun ngit-native--resolve (symbol)
+  "Resolve a compression or crypto entry for the current platform."
+  (if (ngit-windows-p)
+      (let* ((crypto (string-prefix-p "SHA1" symbol))
+             (name (if crypto "libcrypto-3-x64.dll" "zlib1.dll"))
+             (directory (getenv "NGIT_WINDOWS_DLL_DIR")))
+        (ngit-win-symbol (if (and directory (not (equal directory "")))
+                             (expand-file-name name directory) name) symbol))
+    (nl-ffi--resolve-via-dlsym symbol)))
 
 (defvar ngit-native--direct (make-hash-table :test 'equal)
   "Resolved addresses of the zlib functions, for direct `ptr-call's.")
@@ -52,8 +69,8 @@ the address resolved once by nl-ffi's own lookup is equivalent.  Falls
 back to FALLBACK, the `ffi:defun' wrapper, when that lookup is missing."
   (let ((addr (or (gethash symbol ngit-native--direct)
                   (puthash symbol
-                           (if (and (fboundp 'nl-ffi--resolve-via-dlsym) (fboundp 'ptr-call))
-                               (funcall 'nl-ffi--resolve-via-dlsym symbol)
+                           (if (and (or (ngit-windows-p) (fboundp 'nl-ffi--resolve-via-dlsym)) (fboundp 'ptr-call))
+                               (ngit-native--resolve symbol)
                              0)
                            ngit-native--direct))))
     (if (zerop addr)
@@ -67,16 +84,62 @@ back to FALLBACK, the `ffi:defun' wrapper, when that lookup is missing."
 (defconst ngit-native--sys-umask 95)
 (defconst ngit-native--o-rdonly-cloexec #o2000000)
 
+(defun ngit-native--windows-errno-result (result)
+  "Convert a failed CRT RESULT into Linux-style negative errno."
+  (if (< result 0) (- (ngit-win-errno)) result))
+
+(defun ngit-native-fd-open (path flags &optional mode)
+  "Open PATH using Linux flag vocabulary and return a descriptor."
+  (if (ngit-windows-p)
+      (progn
+       (unless (= 0 (logand flags (lognot #o2003303)))
+         (error "ngit: unsupported Windows open flags %o" flags))
+       (ngit-native--windows-errno-result
+        (ngit-win-open path
+                     (logior (logand flags 3)
+                             (if (/= 0 (logand flags #o100)) #x100 0)
+                             (if (/= 0 (logand flags #o200)) #x400 0)
+                             (if (/= 0 (logand flags #o1000)) #x200 0)
+                             (if (/= 0 (logand flags #o2000)) #x8 0))
+                     (or mode #o666))))
+    (let ((owner (nl-ffi-memory-cstring (encode-coding-string path 'utf-8))))
+      (unwind-protect
+          (syscall-direct 2 (nl-ffi-memory-address owner) flags (or mode 0) 0 0 0)
+        (nl-ffi-memory-release owner)))))
+
+(defun ngit-native-fd-read (fd address count)
+  (if (ngit-windows-p)
+      (ngit-native--windows-errno-result
+       (ngit-win-signed32 (ngit-win-call "ucrtbase.dll" "_read" fd address count)))
+    (syscall-direct 0 fd address count 0 0 0)))
+
+(defun ngit-native-fd-write (fd address count)
+  (if (ngit-windows-p)
+      (ngit-native--windows-errno-result
+       (ngit-win-signed32 (ngit-win-call "ucrtbase.dll" "_write" fd address count)))
+    (syscall-direct 1 fd address count 0 0 0)))
+
+(defun ngit-native-fd-close (fd)
+  (if (ngit-windows-p)
+      (ngit-native--windows-errno-result
+       (ngit-win-signed32 (ngit-win-call "ucrtbase.dll" "_close" fd)))
+    (syscall-direct 3 fd 0 0 0 0 0)))
+
+(defun ngit-native-fd-pread (fd address count offset)
+  (if (ngit-windows-p)
+      (ngit-native--windows-errno-result (ngit-win-pread fd address count offset))
+    (syscall-direct 17 fd address count offset 0 0)))
+
 (defvar ngit-native--umask nil
   "Process umask, read and restored once on first use.")
 
 (defun ngit-native-creation-mode (mode)
   "Return creation MODE masked by the cached process umask."
-  (unless ngit-native--umask
+  (unless (or (ngit-windows-p) ngit-native--umask)
     (let ((mask (syscall-direct ngit-native--sys-umask 0 0 0 0 0 0)))
       (syscall-direct ngit-native--sys-umask mask 0 0 0 0 0)
       (setq ngit-native--umask mask)))
-  (logand mode (lognot ngit-native--umask)))
+  (logand mode (lognot (or ngit-native--umask 0))))
 
 (defconst ngit-native--z-ok 0)
 (defconst ngit-native--z-data-error -3)
@@ -144,9 +207,9 @@ destination and length buffers remain live throughout this call."
     ;; context, then 32 for the digest and 96 for the small object header.
     (setq ngit-native--sha1-context (nl-ffi-memory-allocate 256)
           ngit-native--sha1-functions
-          (vector (nl-ffi--resolve-via-dlsym "SHA1_Init")
-                  (nl-ffi--resolve-via-dlsym "SHA1_Update")
-                  (nl-ffi--resolve-via-dlsym "SHA1_Final")))
+          (vector (ngit-native--resolve "SHA1_Init")
+                  (ngit-native--resolve "SHA1_Update")
+                  (ngit-native--resolve "SHA1_Final")))
     (dotimes (i 3)
       (when (zerop (aref ngit-native--sha1-functions i))
         (error "ngit: missing SHA-1 crypto function"))))
@@ -167,14 +230,19 @@ destination and length buffers remain live throughout this call."
 (defun ngit-native-try-open (path)
   "Open PATH read-only and cache the descriptor; return nil when that fails."
   (or (gethash path ngit-native--fds)
-      (let* ((bytes (encode-coding-string path 'utf-8))
+      (if (ngit-windows-p)
+          (let ((fd (ngit-win-open path 0 0)))
+            (if (>= fd 0) (puthash path fd ngit-native--fds)
+              (unless (memq (ngit-win-errno) '(2 3))
+                (error "ngit: cannot open %s (errno %d)" path (ngit-win-errno)))))
+       (let* ((bytes (encode-coding-string path 'utf-8))
              (addr (nl-ffi-memory-address
                     (ngit-native--buffer 3 (1+ (length bytes))))))
         (ngit-native--write-bytes addr bytes)
         (ptr-write-u8 addr (length bytes) 0)
         (let ((fd (syscall-direct ngit-native--sys-open addr
                                   ngit-native--o-rdonly-cloexec 0 0 0 0)))
-          (and (>= fd 0) (puthash path fd ngit-native--fds))))))
+          (and (>= fd 0) (puthash path fd ngit-native--fds)))))))
 
 (defun ngit-native--open (path)
   (or (ngit-native-try-open path)
@@ -187,8 +255,10 @@ destination and length buffers remain live throughout this call."
         (done 0)
         (eof nil))
     (while (and (< done len) (not eof))
-      (let ((n (syscall-direct ngit-native--sys-pread64 fd (+ addr done)
-                               (- len done) (+ offset done) 0 0)))
+      (let ((n (if (ngit-windows-p)
+                   (ngit-win-pread fd (+ addr done) (- len done) (+ offset done))
+                 (syscall-direct ngit-native--sys-pread64 fd (+ addr done)
+                                 (- len done) (+ offset done) 0 0))))
         (cond ((< n 0) (error "ngit: read %s failed (errno %d)" path (- n)))
               ((= n 0) (setq eof t))
               (t (setq done (+ done n))))))
@@ -198,7 +268,8 @@ destination and length buffers remain live throughout this call."
   "Close the cached descriptor of PATH, if any (for files read once)."
   (let ((fd (gethash path ngit-native--fds)))
     (when fd
-      (syscall-direct ngit-native--sys-close fd 0 0 0 0 0)
+      (if (ngit-windows-p) (ngit-win-call "ucrtbase.dll" "_close" fd)
+        (syscall-direct ngit-native--sys-close fd 0 0 0 0 0))
       (remhash path ngit-native--fds))))
 
 (defun ngit-native-read-bytes (path offset len)
@@ -217,7 +288,9 @@ destination and length buffers remain live throughout this call."
         (while (< i (length bytes))
           (ptr-write-u8 addr i (aref bytes i))
           (setq i (1+ i)))
-        (syscall-direct 1 2 addr (length bytes) 0 0 0)))))
+        (if (ngit-windows-p)
+            (ngit-win-call "ucrtbase.dll" "_write" 2 addr (length bytes))
+          (syscall-direct 1 2 addr (length bytes) 0 0 0))))))
 
 (defun ngit-native--inflate-once (src src-len dst-cap &optional skip)
   "Inflate SRC-LEN bytes of owner SRC (from byte SKIP) into a DST-CAP buffer.
@@ -234,8 +307,8 @@ Return (RC . (DATA . CONSUMED)); DATA is nil unless RC is Z_OK."
       (when (>= rc #x80000000) (setq rc (- rc #x100000000)))
       (cons rc
             (and (= rc ngit-native--z-ok)
-                 (cons (ptr-read-bytes da (ptr-read-u64 la 0))
-                       (ptr-read-u64 la 8)))))))
+                 (cons (ptr-read-bytes da (if (ngit-windows-p) (ptr-read-u32 la 0) (ptr-read-u64 la 0)))
+                       (if (ngit-windows-p) (ptr-read-u32 la 8) (ptr-read-u64 la 8))))))))
 
 (defun ngit-native-inflate-file (path offset &optional size)
   "Inflate the zlib stream of PATH that starts at OFFSET.
@@ -310,11 +383,11 @@ native memory costs a primitive call per four bytes."
          (da (nl-ffi-memory-address (ngit-native--buffer 1 cap)))
          (la (nl-ffi-memory-address (ngit-native--buffer 2 16))))
     (ptr-write-u64 la 0 cap)
-    (let ((rc (logand (ngit-native--compress2 da la (nl-ffi-memory-address src) n level)
+    (let ((rc (logand (ngit-native--zlib-call "compress2" #'ngit-native--compress2 da la (nl-ffi-memory-address src) n level)
                       #xffffffff)))
       (unless (= rc ngit-native--z-ok)
         (error "ngit: deflate of %s failed (zlib %d)" path rc))
-      (ptr-read-bytes da (ptr-read-u64 la 0)))))
+      (ptr-read-bytes da (if (ngit-windows-p) (ptr-read-u32 la 0) (ptr-read-u64 la 0))))))
 
 (provide 'ngit-native)
 

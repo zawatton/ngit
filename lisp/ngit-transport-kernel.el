@@ -58,7 +58,7 @@ Failure is remembered so callers can use their ordinary Lisp fallback."
                     (command-line-args (cons binary (cdr command-line-args))))
                 (progn
                   (ngit-transport-kernel--load-compiler binary)
-                  (when (file-exists-p prefix) (delete-file prefix))
+                  (when (file-exists-p prefix) (ngit-delete-file prefix))
                   (nelisp-native-load-raw-compile-file
                    source artifact nil "ngit-transport-kernel"
                    (nelisp-native-load--running-binary-sha256))
@@ -79,8 +79,8 @@ Failure is remembered so callers can use their ordinary Lisp fallback."
                   (setq ngit-transport-kernel--unit-id unit
                         ngit-transport-kernel--address address
                         ngit-transport-kernel--ready t)))
-            (when (file-exists-p prefix) (delete-file prefix))
-            (when (file-exists-p artifact) (delete-file artifact))))
+            (when (file-exists-p prefix) (ngit-delete-file prefix))
+            (when (file-exists-p artifact) (ngit-delete-file artifact))))
       (error (setq ngit-transport-kernel--error (error-message-string err)
                    ngit-transport-kernel--ready nil))))
   ngit-transport-kernel--ready)

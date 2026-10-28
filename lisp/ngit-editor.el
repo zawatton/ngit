@@ -18,6 +18,11 @@
 
 (defun ngit-editor-process (repo argv)
   "Run editor ARGV with inherited terminal descriptors; return (STATUS . ERRNO)."
+  (if (and (fboundp 'ngit-windows-p) (ngit-windows-p))
+      (let ((conn (ngit-win-process-spawn argv process-environment
+                                           (or (ngit-repo-toplevel repo) default-directory)
+                                           'inherit 'inherit nil)))
+        (cons (ngit-win-process-close conn) nil))
   (let* ((program (or (and (string-search "/" (car argv)) (car argv))
                       (executable-find (car argv)) (car argv)))
          (av (ngit-transport--cstring-vector argv))
@@ -56,7 +61,7 @@
               (cons status err)))))
       (when (>= (cdr pipe) 0) (syscall-direct 3 (cdr pipe) 0 0 0 0 0))
       (dolist (owner (list (car av) (car ev) (car pv) (car sv) (car cv) memory))
-        (nl-ffi-memory-release owner)))))
+        (nl-ffi-memory-release owner))))))
 
 (defun ngit-editor-run (repo file)
   "Run the configured editor on FILE; return its exit code."
@@ -70,9 +75,15 @@
       (unless (featurep 'ngit-hook)
         (load (expand-file-name "ngit-hook.el" ngit-native--dir) nil t))
       (let* ((shell (string-match-p "[|&;<>()$`\\\"' \t\n*?\\[~#=%%]" editor))
-             (argv (if shell
+             (argv (if (and shell (fboundp 'ngit-windows-p) (ngit-windows-p))
+                       (progn
+                         (when (member (getenv "NGIT_WINDOWS_SHELL") '(nil ""))
+                           (ngit--die "fatal: Windows shell editors require NGIT_WINDOWS_SHELL"))
+                         (ngit-win-process-shell
+                          (concat editor " " (ngit-transport--shell-quote file))))
+                     (if shell
                        (list "/bin/sh" "-c" (concat editor " \"$@\"") editor file)
-                     (list editor file)))
+                     (list editor file))))
              (result (ngit-editor-process repo argv))
              (status (car result)))
         (unless (= status 0)
@@ -398,7 +409,7 @@
           (let ((ngit-commit-index-publish
                  (lambda ()
                    (when include (ngit-write-file lock (ngit--read-file temp)))
-                   (rename-file lock index-file t)
+                   (ngit-rename-file lock index-file t)
                    (setq lock nil)
                    (setenv "GIT_INDEX_FILE" saved)
                    (aset repo 6 nil)
@@ -408,8 +419,8 @@
       (setenv "GIT_INDEX_FILE" saved)
       (aset repo 6 nil)
       (when lock (ngit-unlock lock))
-      (when (file-exists-p temp) (delete-file temp))
-      (when (file-exists-p (concat temp ".lock")) (delete-file (concat temp ".lock"))))))
+      (when (file-exists-p temp) (ngit-delete-file temp))
+      (when (file-exists-p (concat temp ".lock")) (ngit-delete-file (concat temp ".lock"))))))
 
 (provide 'ngit-editor)
 ;;; ngit-editor.el ends here

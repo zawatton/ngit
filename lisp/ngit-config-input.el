@@ -15,7 +15,7 @@
   (let* ((owner (ngit-native--buffer 0 65536))
          (address (nl-ffi-memory-address owner)) parts done)
     (while (not done)
-      (let ((size (syscall-direct 0 0 address 65536 0 0 0)))
+      (let ((size (ngit-native-fd-read 0 address 65536)))
         (cond ((< size 0) (ngit--die "fatal: unable to read standard input"))
               ((= size 0) (setq done t))
               (t (push (ptr-read-bytes address size) parts)))))

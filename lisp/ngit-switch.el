@@ -110,6 +110,10 @@
   "Merge local work-tree edits across a branch change after two-tree refusal."
   (require 'ngit-merge-tree)
   (let* ((index (ngit-read-index repo)) (old (aref index 0))
+         (_ (when (ngit-windows-p)
+              (ngit-win-validate-worktree-records old)
+              (ngit-win-validate-worktree-records (ngit-merge-tree-entries repo base))
+              (ngit-win-validate-worktree-records (ngit-merge-tree-entries repo target))))
          (staged (ngit-diff-tree-index repo base))
          (wt (ngit-wt-changes repo t))
          (drop (make-hash-table :test 'equal)) (local nil))
@@ -166,8 +170,11 @@
               (aset e 0 original)
               (puthash original t dropped))
             (push e unmerged))))
-      (setq final (ngit-index-overlay final unmerged dropped)
-            lock (ngit-lock (ngit-index-file repo)))
+      (setq final (ngit-index-overlay final unmerged dropped))
+      (ngit-win-validate-worktree-records old)
+      (ngit-win-validate-worktree-records image)
+      (ngit-win-validate-worktree-records final)
+      (setq lock (ngit-lock (ngit-index-file repo)))
       (unwind-protect
           (progn
             (while (< i (length old))
@@ -281,6 +288,13 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
                  (seq-every-p (lambda (path) (member path local)) collisions))
         (throw 'ngit-switch-merge-needed 'merge))
       (ngit--switch-error-paths command local collisions removed dirs))
+    (ngit-win-validate-worktree-records old)
+    (ngit-win-validate-worktree-records (mapcar #'cadr planned))
+    (when (ngit-windows-p)
+      (ngit-win-validate-worktree-records
+       (ngit--switch-overlay old dropped
+                             (mapcar #'cadr (seq-filter (lambda (operation)
+                                                       (eq (car operation) 'write)) planned)))))
     (let ((lock (ngit-lock (ngit-index-file repo)))
           (fresh nil)
           (checked (make-hash-table :test 'eql))
@@ -374,10 +388,10 @@ KNOWN-UNTRACKED, when supplied, wraps an already expanded list of paths."
   (dolist (path (directory-files directory t nil t))
     (unless (member (file-name-nondirectory path) '("." ".."))
       (cond
-       ((file-symlink-p path) (delete-file path))
+       ((file-symlink-p path) (ngit-delete-file path))
        ((file-directory-p path) (ngit--switch-delete-directory-tree path))
-       (t (delete-file path)))))
-  (delete-directory directory))
+       (t (ngit-delete-file path)))))
+  (ngit-delete-directory directory))
 
 (defun ngit--switch-clear-target-directories (repo entries)
   "Remove safe work-tree directories replaced by file ENTRIES."

@@ -192,7 +192,7 @@ name.  Items that matched something are pushed onto the third element."
               (push item ignored) (push item matched))
              ((not isdir) (funcall emit item))
              ((and (not (ngit-index-dir-p entries (concat item "/")))
-                   (ngit-wt-lstat (concat item "/.git")))
+                   (ngit-wt-gitdir-lstat item))
               (funcall emit (concat item "/")))
              (t
               (ngit--walk-untracked repo top tracked (concat item "/") (car ctx)

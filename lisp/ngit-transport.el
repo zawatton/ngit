@@ -325,15 +325,15 @@
                          (ngit-pack--entry-header (car object) (length (cdr object)))))
                  (end (+ (- size 20) (cdr entry))))
             (ngit-pack--write-bytes fd (ngit-pack--sha1-file tmp end)))
-          (syscall-direct 3 fd 0 0 0 0 0) (setq fd nil)
+          (ngit-native-fd-close fd) (setq fd nil)
           (ngit-native-close path)
           (ngit-native-close tmp)
-          (rename-file tmp path t)
+          (ngit-rename-file tmp path t)
           (remhash path ngit-native--sizes))
-      (when fd (syscall-direct 3 fd 0 0 0 0 0))
+      (when fd (ngit-native-fd-close fd))
       (ngit-native-close tmp)
       (remhash tmp ngit-native--sizes)
-      (when (file-exists-p tmp) (delete-file tmp)))))
+      (when (file-exists-p tmp) (ngit-delete-file tmp)))))
 
 (defun ngit-tr--index-received-pack (repo path idx)
   "Index PATH, completing only missing REF bases available in REPO."
@@ -366,10 +366,10 @@
         (aset checked 3 (cons pack (ngit-repo-packs repo)))
         (unwind-protect (funcall check checked)
           (ngit-native-close idx))))
-    (make-directory dir t)
+    (ngit-create-directory dir t)
     (ngit-native-close path)
-    (rename-file path (concat base ".pack") t)
-    (rename-file idx (concat base ".idx") t)
+    (ngit-rename-file path (concat base ".pack") t)
+    (ngit-rename-file idx (concat base ".idx") t)
     (aset repo 3 nil)
     (clrhash ngit-native--sizes)))
 
@@ -588,7 +588,7 @@
         (when v2
           (ngit-tr--pack-sections
            conn repo (or sought (seq-filter (lambda (ref) (member (nth 1 ref) wants)) (car adv)))))
-        (make-directory (file-name-directory tmp) t)
+        (ngit-create-directory (file-name-directory tmp) t)
         (setq fd (ngit-pack--open-output tmp))
         (unwind-protect
             (let (packet finished)
@@ -605,13 +605,13 @@
                           ((= channel 3) (ngit--die "fatal: %s" (substring packet 1)))
                           (t (ngit--die "fatal: protocol error in pack stream")))))))
               (when (and v2 stateless) (ngit-http-response-end conn 'fetch))
-              (syscall-direct 3 fd 0 0 0 0 0) (setq fd nil)
+              (ngit-native-fd-close fd) (setq fd nil)
               (ngit-tr--install-pack repo tmp check))
-          (when fd (syscall-direct 3 fd 0 0 0 0 0))
+          (when fd (ngit-native-fd-close fd))
           (when check
             (ngit-native-close tmp)
-            (when (file-exists-p (concat tmp ".idx")) (delete-file (concat tmp ".idx"))))
-          (when (file-exists-p tmp) (delete-file tmp)))))))
+            (when (file-exists-p (concat tmp ".idx")) (ngit-delete-file (concat tmp ".idx"))))
+          (when (file-exists-p tmp) (ngit-delete-file tmp)))))))
 
 (defun ngit-cmd-ls-remote (repo args)
   (let (heads tags symrefs refs-only quiet exit-code names remote sort-key
@@ -832,8 +832,8 @@
           (ngit-transport-finish-write conn)
           (ngit-transport-close conn))
         (unless success
-          (when (file-directory-p dest) (delete-directory dest t))
-          (when existed (make-directory dest)))))))
+          (when (file-directory-p dest) (ngit-delete-directory dest t))
+          (when existed (ngit-create-directory dest)))))))
 
 (defun ngit-tr--fetch-map (refs specs tracking explicit tags)
   "Return (SOURCE OID DEST FORCE MERGE IGNORE-HEAD) entries in fetch order."
@@ -1706,8 +1706,8 @@ REPORTS maps each update to its ordered report-status-v2 option records."
                       path (concat base "-" sha ".pack"))
                 (unwind-protect (ngit-transport-send-file conn path)
                   (ngit-native-close path)
-                  (delete-file path)
-                  (delete-file (concat base "-" sha ".idx")))))
+                  (ngit-delete-file path)
+                  (ngit-delete-file (concat base "-" sha ".idx")))))
             (ngit-transport-finish-write conn)
             (when sent
               (let ((status (ngit-tr--push-status (ngit-tr--push-report conn sideband) updates)))

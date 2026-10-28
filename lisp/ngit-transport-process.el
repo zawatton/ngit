@@ -12,6 +12,8 @@
 
 (require 'ngit-native)
 (require 'ngit-config)
+(when (and (fboundp 'ngit-windows-p) (ngit-windows-p))
+  (require 'ngit-windows-process))
 
 (defconst ngit-transport--sys-read 0)
 (defconst ngit-transport--sys-write 1)
@@ -87,6 +89,10 @@ GIT_TEST_PROTOCOL_VERSION, else 2; receive-pack never uses version 2."
 (defun ngit-transport--parse-url (url)
   "Return (KIND . FIELDS) for supported URL."
   (cond
+   ((and (fboundp 'ngit-windows-p) (ngit-windows-p)
+         (or (string-match-p "\\`[A-Za-z]:[/\\\\]" url)
+             (string-prefix-p "\\\\" url)))
+    (cons 'local (list url)))
    ((string-prefix-p "file://" url)
     (let ((rest (substring url 7)))
       ;; Git's file transport ignores the authority and uses the local path.
@@ -126,7 +132,9 @@ GIT_TEST_PROTOCOL_VERSION, else 2; receive-pack never uses version 2."
     (apply #'concat (nreverse parts))))
 
 (defun ngit-transport--executable (name)
-  (or (and (file-name-absolute-p name) (file-executable-p name) name)
+  (or (and (fboundp 'ngit-windows-p) (ngit-windows-p)
+           (ngit-win-process-executable name))
+      (and (file-name-absolute-p name) (file-executable-p name) name)
       (executable-find name)
       (ngit-transport--fail "fatal: cannot run %s: No such file or directory" name)))
 
@@ -204,6 +212,8 @@ descriptors 1 and 2 identical; `inherit' leaves fd 1 inherited.
 NO-STDIN connects standard input to /dev/null.  FALLBACK, when non-nil,
 is exec'd after an ENOEXEC from ARGV (the hook shell-script fallback).
 REPORT-EXEC adds a close-on-exec pipe used for exact hook diagnostics."
+  (if (and (fboundp 'ngit-windows-p) (ngit-windows-p))
+      (ngit-win-process-spawn argv env cwd stdout-mode no-stdin fallback)
   (let* ((input (and (not no-stdin) (ngit-transport--pipe)))
          (output (and (not stdout-mode) (ngit-transport--pipe)))
          (exec-error (and report-exec (ngit-transport--pipe)))
@@ -289,11 +299,12 @@ REPORT-EXEC adds a close-on-exec pipe used for exact hook diagnostics."
           (vector ngit-transport--tag pid (if input (cdr input) -1)
                   (if output (car output) -1) nil nil (car exec-error) nil)
         (vector ngit-transport--tag pid (if input (cdr input) -1)
-                (if output (car output) -1) nil nil))))))
+                (if output (car output) -1) nil nil)))))))
 
 (defun ngit-transport--exec-error (conn)
   "Read and close CONN's close-on-exec error pipe."
-  (when (> (length conn) 6)
+  (when (and (not (and (fboundp 'ngit-win-process-p) (ngit-win-process-p conn)))
+             (> (length conn) 6))
     (let* ((fd (aref conn 6))
            (owner (nl-ffi-memory-allocate 4))
            (address (nl-ffi-memory-address owner))
@@ -352,9 +363,11 @@ INHERIT-STDOUT is non-nil it retains fd 1, as Git's pre-push runner does."
                (format "error: %s died of signal %d\n" (car argv) (aref conn 7))))
             status)))
       (ngit-transport-finish-write conn)
-      (when (>= (aref conn 3) 0)
-        (syscall-direct ngit-transport--sys-close (aref conn 3) 0 0 0 0 0)
-        (aset conn 3 -1)))))
+      (if (and (fboundp 'ngit-win-process-p) (ngit-win-process-p conn))
+          (unless (aref conn 4) (ngit-win-process-close conn t))
+        (when (>= (aref conn 3) 0)
+          (ngit-native-fd-close (aref conn 3))
+          (aset conn 3 -1))))))
 
 (defun ngit-transport-open (repo url service)
   "Open URL for SERVICE and return a binary transport connection."
@@ -394,6 +407,8 @@ INHERIT-STDOUT is non-nil it retains fd 1, as Git's pre-push runner does."
     (signal 'wrong-type-argument (list 'ngit-transport-write conn bytes)))
   (when (and (fboundp 'ngit-http-p) (ngit-http-p conn))
     (ngit-http-before-write conn bytes))
+  (if (and (fboundp 'ngit-win-process-p) (ngit-win-process-p conn))
+      (ngit-win-process-write conn bytes)
   (let* ((n (string-bytes bytes))
          (owner (nl-ffi-memory-allocate (max 1 n)))
          (addr (nl-ffi-memory-address owner)) (done 0))
@@ -401,14 +416,13 @@ INHERIT-STDOUT is non-nil it retains fd 1, as Git's pre-push runner does."
         (progn
           (ptr-write-bytes addr bytes)
           (while (< done n)
-            (let ((rc (syscall-direct ngit-transport--sys-write (aref conn 2)
-                                      (+ addr done) (- n done) 0 0 0)))
+            (let ((rc (ngit-native-fd-write (aref conn 2) (+ addr done) (- n done))))
               (cond ((= rc -4))
                     ((< rc 0)
                 (ngit-transport--fail "fatal: transport write failed (errno %d)" (- rc)))
                     (t (setq done (+ done rc))))))
           done)
-      (nl-ffi-memory-release owner))))
+      (nl-ffi-memory-release owner)))))
 
 (defun ngit-transport-read (conn count)
   "Read exactly COUNT bytes from CONN, or nil at clean EOF.
@@ -416,6 +430,8 @@ An EOF after a partial result is a truncated Git stream and signals an error."
   (unless (and (ngit-transport--conn-p conn) (integerp count) (>= count 0))
     (signal 'wrong-type-argument (list 'ngit-transport-read conn count)))
   (when (and (fboundp 'ngit-http-p) (ngit-http-p conn)) (ngit-http-ready conn))
+  (if (and (fboundp 'ngit-win-process-p) (ngit-win-process-p conn))
+      (ngit-win-process-read conn count)
   (if (= count 0) ""
     (if (aref conn 5) nil
       (let* ((owner (nl-ffi-memory-allocate count))
@@ -423,8 +439,7 @@ An EOF after a partial result is a truncated Git stream and signals an error."
         (unwind-protect
             (progn
               (while (and (< done count) (not eof))
-                (let ((rc (syscall-direct ngit-transport--sys-read (aref conn 3)
-                                          (+ addr done) (- count done) 0 0 0)))
+                (let ((rc (ngit-native-fd-read (aref conn 3) (+ addr done) (- count done))))
                   (cond ((< rc 0)
                          (unless (= rc -4)
                            (ngit-transport--fail "fatal: transport read failed (errno %d)" (- rc))))
@@ -435,7 +450,7 @@ An EOF after a partial result is a truncated Git stream and signals an error."
                     (t (ngit-transport--fail
                         "fatal: unexpected EOF in Git transport (%d of %d bytes)"
                         done count))))
-          (nl-ffi-memory-release owner))))))
+          (nl-ffi-memory-release owner)))))))
 
 (defun ngit-transport-send-file (conn path)
   "Stream PATH to CONN without constructing one whole-file Lisp string."
@@ -449,32 +464,48 @@ An EOF after a partial result is a truncated Git stream and signals an error."
 (defun ngit-transport-copy (conn fd count)
   "Copy exactly COUNT bytes from CONN to FD without Lisp payload strings."
   (when (and (fboundp 'ngit-http-p) (ngit-http-p conn)) (ngit-http-ready conn))
+  (if (and (fboundp 'ngit-win-process-p) (ngit-win-process-p conn))
+      (let ((left count) (memory (ngit-map-anon 65536)))
+        (unwind-protect
+            (progn
+              (while (> left 0)
+                (let* ((size (min left 65536))
+                       (bytes (ngit-win-process-read conn size)) (done 0))
+                  (unless bytes (ngit-transport--fail "fatal: early EOF in pack stream"))
+                  (ptr-write-bytes memory bytes)
+                  (while (< done size)
+                    (let ((written (ngit-native-fd-write fd (+ memory done) (- size done))))
+                      (when (<= written 0) (ngit-transport--fail "fatal: cannot write received pack"))
+                      (setq done (+ done written))))
+                  (setq left (- left size))))
+              count)
+          (ngit-win-free memory)))
   (let* ((owner (ngit-native--buffer 0 (max 1 (min count 65536))))
          (address (nl-ffi-memory-address owner)) (left count))
     (while (> left 0)
       (let ((got -4))
         (while (= got -4)
-          (setq got (syscall-direct ngit-transport--sys-read (aref conn 3)
-                                    address (min left 65536) 0 0 0)))
+          (setq got (ngit-native-fd-read (aref conn 3) address (min left 65536))))
         (when (<= got 0) (ngit-transport--fail "fatal: early EOF in pack stream"))
         (let ((done 0))
           (while (< done got)
-            (let ((written (syscall-direct ngit-transport--sys-write fd
-                                           (+ address done) (- got done) 0 0 0)))
+            (let ((written (ngit-native-fd-write fd (+ address done) (- got done))))
               (cond ((= written -4))
                     ((<= written 0) (ngit-transport--fail "fatal: cannot write received pack"))
                     (t (setq done (+ done written)))))))
         (setq left (- left got))))
-    count))
+    count)))
 
 (defun ngit-transport-finish-write (conn)
   "Close CONN's input side."
   (unless (ngit-transport--conn-p conn)
     (signal 'wrong-type-argument (list 'ngit-transport-finish-write conn)))
+  (if (and (fboundp 'ngit-win-process-p) (ngit-win-process-p conn))
+      (ngit-win-process-finish-write conn)
   (when (and (not (and (fboundp 'ngit-http-p) (ngit-http-p conn)))
              (>= (aref conn 2) 0))
-    (syscall-direct ngit-transport--sys-close (aref conn 2) 0 0 0 0 0)
-    (aset conn 2 -1))
+    (ngit-native-fd-close (aref conn 2))
+    (aset conn 2 -1)))
   nil)
 
 (defun ngit-transport--wait (conn options)
@@ -496,17 +527,19 @@ An EOF after a partial result is a truncated Git stream and signals an error."
   "Close CONN, let the server finish its work, reap it and return status."
   (unless (ngit-transport--conn-p conn)
     (signal 'wrong-type-argument (list 'ngit-transport-close conn)))
+  (if (and (fboundp 'ngit-win-process-p) (ngit-win-process-p conn))
+      (ngit-win-process-close conn)
   (if (and (fboundp 'ngit-http-p) (ngit-http-p conn)) (ngit-http-close conn)
     (or (aref conn 4)
       (progn
         (ngit-transport-finish-write conn)
         (when (>= (aref conn 3) 0)
-          (syscall-direct ngit-transport--sys-close (aref conn 3) 0 0 0 0 0)
+          (ngit-native-fd-close (aref conn 3))
           (aset conn 3 -1))
         (let ((raw (ngit-transport--wait conn 0)))
           (when (and (> (length conn) 7) (/= (logand raw #x7f) 0))
             (aset conn 7 (logand raw #x7f)))
-          (aset conn 4 (ngit-transport--status raw)))))))
+          (aset conn 4 (ngit-transport--status raw))))))))
 
 (defun ngit-transport-tty-p ()
   "Return non-nil when stderr is attached to a terminal."
@@ -514,10 +547,13 @@ An EOF after a partial result is a truncated Git stream and signals an error."
 
 (defun ngit-transport-abort (conn)
   "Terminate a rejected transport before closing its pipes, as Git does."
+  (if (and (fboundp 'ngit-win-process-p) (ngit-win-process-p conn))
+      (ngit-win-process-close conn t)
+    (progn
   (unless (aref conn 4)
     (syscall-direct ngit-transport--sys-kill (aref conn 1)
                     ngit-transport--sigterm 0 0 0 0))
-  (ngit-transport-close conn))
+  (ngit-transport-close conn))))
 
 (provide 'ngit-transport-process)
 

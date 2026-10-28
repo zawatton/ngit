@@ -11,9 +11,10 @@
 (require 'ngit-objects)
 (require 'ngit-write)
 
-(ffi:defun ngit-pack--crc32-ffi "crc32"
+(unless (ngit-windows-p)
+ (ffi:defun ngit-pack--crc32-ffi "crc32"
   [:uint64 :uint64 :pointer :uint64]
-  "zlib crc32(crc, bytes, length).")
+  "zlib crc32(crc, bytes, length)."))
 
 (defconst ngit-pack--sys-read 0)
 (defconst ngit-pack--sys-write 1)
@@ -83,16 +84,16 @@
          (addr (nl-ffi-memory-address owner)))
     (ptr-write-bytes addr bytes)
     (ptr-write-u8 addr (length bytes) 0)
-    (let ((fd (syscall-direct ngit-pack--sys-open addr
+    (let ((fd (ngit-native-fd-open path
                               (logior ngit-pack--o-wronly ngit-pack--o-creat
                                       ngit-pack--o-trunc ngit-pack--o-cloexec)
-                              (ngit-native-creation-mode #o666) 0 0 0)))
+                              (ngit-native-creation-mode #o666))))
       (if (< fd 0) (error "ngit: cannot create %s (errno %d)" path (- fd)) fd))))
 
 (defun ngit-pack--write-pointer (fd addr len)
   (let ((done 0))
     (while (< done len)
-      (let ((n (syscall-direct ngit-pack--sys-write fd (+ addr done) (- len done) 0 0 0)))
+      (let ((n (ngit-native-fd-write fd (+ addr done) (- len done))))
         (when (<= n 0) (error "ngit: pack write failed (errno %d)" (- n)))
         (when (and ngit-pack--hash-stream (aref ngit-pack--hash-stream 2))
           (let ((sent (syscall-direct ngit-pack--sys-sendto
@@ -148,8 +149,9 @@
 
 (defun ngit-pack--sha1-stream-open ()
   "Return [SOCKET OP VALID] for a streaming Linux AF_ALG SHA-1, or nil."
-  (let ((sock (syscall-direct ngit-pack--sys-socket ngit-pack--af-alg
-                              ngit-pack--sock-seqpacket 0 0 0 0)))
+  (let ((sock (if (ngit-windows-p) -1
+                (syscall-direct ngit-pack--sys-socket ngit-pack--af-alg
+                                ngit-pack--sock-seqpacket 0 0 0 0))))
     (when (>= sock 0)
       (let* ((sa (ngit-native--buffer 2 88))
              (addr (nl-ffi-memory-address sa)))
@@ -192,8 +194,9 @@
 
 (defun ngit-pack--sha1-file (path len)
   "Return the binary SHA-1 of the first LEN bytes of PATH using Linux AF_ALG."
-  (let ((sock (syscall-direct ngit-pack--sys-socket ngit-pack--af-alg
-                              ngit-pack--sock-seqpacket 0 0 0 0)))
+  (let ((sock (if (ngit-windows-p) -1
+                (syscall-direct ngit-pack--sys-socket ngit-pack--af-alg
+                                ngit-pack--sock-seqpacket 0 0 0 0))))
     (if (< sock 0)
         ;; Seccomp profiles sometimes deny AF_ALG; libcrypto is also native.
         (ngit-native-sha1 (ngit-native-read-bytes path 0 len))
@@ -366,7 +369,7 @@ CACHE is [OWNER ADDR START LENGTH FILE-SIZE]."
     (unwind-protect
         (progn (ngit-write-file tmp data)
                (ngit-native-deflate-file tmp (length data) level))
-      (when (file-exists-p tmp) (delete-file tmp)))))
+      (when (file-exists-p tmp) (ngit-delete-file tmp)))))
 
 (defun ngit-pack--compress-entry (fd payload level header)
   "Write HEADER and compressed PAYLOAD to FD; return (CRC . BYTE-COUNT).
@@ -407,7 +410,7 @@ a large Lisp-string-to-native copy for blobs."
                 (setq crc (ngit-pack--crc-pointer crc da zlen))
                 (ngit-pack--write-pointer fd da zlen)
                 (cons crc (+ (length header) zlen))))))
-      (when (and own-temp tmp (file-exists-p tmp)) (delete-file tmp)))))
+      (when (and own-temp tmp (file-exists-p tmp)) (ngit-delete-file tmp)))))
 
 (defun ngit-pack--compression-level (repo)
   (ngit-config-compression-level repo "pack.compression"
@@ -747,7 +750,7 @@ TRUSTED skips textual OID validation for a caller-provided graph closure."
          (ngit-pack--payload-temp 'deferred)
          (ngit-pack--delta-work-left ngit-pack--delta-work-budget)
          (out-offset (make-hash-table :test 'equal)))
-    (make-directory (file-name-directory base-name) t)
+    (ngit-create-directory (file-name-directory base-name) t)
     (setq fd (ngit-pack--open-output tmp))
     (unwind-protect
         (progn
@@ -918,21 +921,21 @@ TRUSTED skips textual OID validation for a caller-provided graph closure."
                    (pack-path (concat base-name "-" hex ".pack"))
                    (idx-path (concat base-name "-" hex ".idx")))
               (ngit-pack--write-bytes fd sum)
-              (syscall-direct ngit-pack--sys-close fd 0 0 0 0 0) (setq fd nil)
-              (set-file-modes tmp #o444)
-              (unless (file-exists-p pack-path) (rename-file tmp pack-path))
-              (when (file-exists-p tmp) (delete-file tmp))
+              (ngit-native-fd-close fd) (setq fd nil)
+              (unless (ngit-windows-p) (set-file-modes tmp #o444))
+              (unless (file-exists-p pack-path) (ngit-rename-file tmp pack-path))
+              (when (file-exists-p tmp) (ngit-delete-file tmp))
               (let ((idx-tmp (concat idx-path ".tmp-" (number-to-string (emacs-pid)))))
                 (ngit-write-file idx-tmp (ngit-pack--idx-bytes records sum))
-                (rename-file idx-tmp idx-path t))
+                (ngit-rename-file idx-tmp idx-path t))
               hex)))
       (ngit-pack--sha1-stream-close ngit-pack--hash-stream)
       (when (stringp ngit-pack--payload-temp)
         (ngit-native-close ngit-pack--payload-temp)
         (when (file-exists-p ngit-pack--payload-temp)
-          (delete-file ngit-pack--payload-temp)))
-      (when fd (syscall-direct ngit-pack--sys-close fd 0 0 0 0 0))
-      (when (file-exists-p tmp) (delete-file tmp)))))
+          (ngit-delete-file ngit-pack--payload-temp)))
+      (when fd (ngit-native-fd-close fd))
+      (when (file-exists-p tmp) (ngit-delete-file tmp)))))
 
 ;;;; Pack scanning and commands
 
@@ -1006,14 +1009,14 @@ DEPTH BASE-OID CRC]."
     (let ((tmp (concat idx-path ".tmp-" (number-to-string (emacs-pid))))
           (bytes (ngit-pack--idx-bytes index sum)))
       (ngit-write-file tmp bytes)
-      (rename-file tmp idx-path t))
+      (ngit-rename-file tmp idx-path t))
     (cons (ngit-hex sum) records)))
 
 (defun ngit-pack--slurp-stdin ()
   (let* ((owner (ngit-native--buffer 0 65536))
          (addr (nl-ffi-memory-address owner)) parts done)
     (while (not done)
-      (let ((n (syscall-direct ngit-pack--sys-read 0 addr 65536 0 0 0)))
+      (let ((n (ngit-native-fd-read 0 addr 65536)))
         (cond ((< n 0) (error "ngit: stdin read failed (errno %d)" (- n)))
               ((= n 0) (setq done t))
               (t (push (ptr-read-bytes addr n) parts)))))
@@ -1025,7 +1028,7 @@ DEPTH BASE-OID CRC]."
          (addr (nl-ffi-memory-address owner))
          (done nil))
     (while (not done)
-      (let ((n (syscall-direct ngit-pack--sys-read 0 addr 65536 0 0 0)))
+      (let ((n (ngit-native-fd-read 0 addr 65536)))
         (cond ((< n 0) (error "ngit: stdin read failed (errno %d)" (- n)))
               ((= n 0) (setq done t))
               (t (ngit-pack--write-pointer fd addr n)))))))
@@ -1067,15 +1070,15 @@ DEPTH BASE-OID CRC]."
            ;; not selected.
            (oids (if (or revs all) (ngit-pack--revision-set repo lines all) lines))
            (prefix (or base (make-temp-file "ngit-pack-stdout-")))
-           (_ (when (and stdout (file-exists-p prefix)) (delete-file prefix)))
+           (_ (when (and stdout (file-exists-p prefix)) (ngit-delete-file prefix)))
            (hex (ngit-pack-write repo oids prefix window depth))
            (path (concat prefix "-" hex ".pack")))
       (if stdout
           (unwind-protect
               (ngit-pack--copy-range path 1 0 (ngit-native-file-size path))
-            (delete-file path)
+            (ngit-delete-file path)
             (let ((idx (concat prefix "-" hex ".idx")))
-              (when (file-exists-p idx) (delete-file idx))))
+              (when (file-exists-p idx) (ngit-delete-file idx))))
         (ngit--emit hex "\n"))
       0)))
 
@@ -1089,26 +1092,26 @@ DEPTH BASE-OID CRC]."
             (t (setq path (expand-file-name a)))))
     (if stdin
         (let* ((dir (expand-file-name "objects/pack/" (ngit-repo-commondir repo)))
-               (_ (make-directory dir t))
+               (_ (ngit-create-directory dir t))
                (tmp (expand-file-name (concat "pack-tmp-" (number-to-string (emacs-pid))) dir))
                (tmp-idx (concat tmp ".idx"))
                (fd (ngit-pack--open-output tmp)))
           (unwind-protect
               (progn
                 (ngit-pack--copy-stdin-raw fd)
-                (syscall-direct ngit-pack--sys-close fd 0 0 0 0 0) (setq fd nil)
+                (ngit-native-fd-close fd) (setq fd nil)
                 ;; Validate and build the index entirely under temporary
                 ;; names before publishing either file.
                 (let* ((result (ngit-pack--index-pack tmp tmp-idx))
                        (hex (car result))
                        (pack (expand-file-name (concat "pack-" hex ".pack") dir))
                        (idx (expand-file-name (concat "pack-" hex ".idx") dir)))
-                  (if (file-exists-p pack) (delete-file tmp) (rename-file tmp pack))
-                  (rename-file tmp-idx idx t)
+                  (if (file-exists-p pack) (ngit-delete-file tmp) (ngit-rename-file tmp pack))
+                  (ngit-rename-file tmp-idx idx t)
                   (ngit--emit "pack\t" hex "\n")))
-            (when fd (syscall-direct ngit-pack--sys-close fd 0 0 0 0 0))
-            (when (file-exists-p tmp) (delete-file tmp))
-            (when (file-exists-p tmp-idx) (delete-file tmp-idx))))
+            (when fd (ngit-native-fd-close fd))
+            (when (file-exists-p tmp) (ngit-delete-file tmp))
+            (when (file-exists-p tmp-idx) (ngit-delete-file tmp-idx))))
       (unless path (ngit--die "fatal: index-pack requires a pack file"))
       (let* ((idx (concat (substring path 0 -5) ".idx"))
              (result (ngit-pack--index-pack path idx)))

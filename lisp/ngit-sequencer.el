@@ -26,7 +26,7 @@
     (let ((path (ngit--merge-file repo name)))
     (when (file-exists-p path)
       (if (file-directory-p path) (ngit--switch-delete-directory-tree path)
-        (delete-file path))))))
+        (ngit-delete-file path))))))
 
 (defun ngit-seq-clear (repo)
   (ngit-commit-clear-merge-state repo))

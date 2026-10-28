@@ -1,0 +1,134 @@
+{
+  "status": "PASS",
+  "scope": "Actual failing prechange controls and passing corrected controls; the complete integrated corpus is recorded separately.",
+  "runtime_sha256": "1ae4ffea0eb9a9b86928d0df8a800fd3c1b1addefa5f2a76649054a763d4638b",
+  "before_relevant_source_sha256": {
+    "lisp/ngit-windows.el": "0dd4b077ca7ddfd6f257f410a5b70a6d6bc3434e800389b7ff5edbbdb8bc9713",
+    "lisp/ngit-windows-process.el": "4df267453d445d90229e6cfc1291b80755ac967518e6ca8a398cd6f8cdeaadf4",
+    "lisp/ngit-worktree.el": "91f09a849c77e4e417ddfcf4fcc470b38da82a42d98cd3c6b0b139da8728a3e3",
+    "lisp/ngit-checkout.el": "2b2ad27e6ef80449a83bfe53dd97a27bc0a8c1c0f7b640fc40549879cc4ea144",
+    "lisp/ngit-patch.el": "d0b5cd624023a035c8ea7c13092269f1ec6b9f3086a42711c938836bde7e1a4b"
+  },
+  "reviewed_integrated_source_sha256": {
+    "lisp/ngit-windows.el": "e82fad975dec7787451c538a739ec870a1a5b7205f0145249806bb0a471ec4bc",
+    "lisp/ngit-windows-process.el": "df8d61191c8857fb80d9854b87b58c74ab3fabefceab3f3f74bbb83e32e4964c",
+    "lisp/ngit-worktree.el": "71177cb1b54614ee7c738f6cd57c1ab5ba60c7c6fe343345d3e58daf5074403e",
+    "lisp/ngit-checkout.el": "e66c612610ee9d6c8c653d1684522d963c27012d1b75b7cb68337245825e3441",
+    "lisp/ngit-patch.el": "551f831e57522b6937e797f7eebe5bdf29befbbe4ee7aed1787d9512ff195e93"
+  },
+  "checkout": {
+    "before": {
+      "name": "x\\..\\.git\\config",
+      "status": 0,
+      "changed": [
+        ".git/config",
+        ".git/index",
+        "plain.txt"
+      ]
+    },
+    "after": [
+      {
+        "name": "x\\..\\.git\\config",
+        "status": 128,
+        "changed": []
+      },
+      {
+        "name": ".GIT/config",
+        "status": 128,
+        "changed": []
+      },
+      {
+        "name": "git~1/config",
+        "status": 128,
+        "changed": []
+      },
+      {
+        "name": "NUL.txt",
+        "status": 128,
+        "changed": []
+      },
+      {
+        "name": "trailing.",
+        "status": 128,
+        "changed": []
+      },
+      {
+        "name": "a:stream",
+        "status": 128,
+        "changed": []
+      }
+    ]
+  },
+  "apply_collision": [
+    {
+      "version": "red",
+      "options": [],
+      "status": 0,
+      "rejected": false,
+      "unchanged": false,
+      "changed": [
+        "ApplyName"
+      ]
+    },
+    {
+      "version": "red",
+      "options": [
+        "--cached"
+      ],
+      "status": 0,
+      "rejected": false,
+      "unchanged": false,
+      "changed": [
+        ".git/index",
+        ".git/objects/3e",
+        ".git/objects/3e/757656cf36eca53338e520d134963a44f793f8"
+      ]
+    },
+    {
+      "version": "green",
+      "options": [],
+      "status": 128,
+      "rejected": true,
+      "unchanged": true,
+      "changed": []
+    },
+    {
+      "version": "green",
+      "options": [
+        "--cached"
+      ],
+      "status": 128,
+      "rejected": true,
+      "unchanged": true,
+      "changed": []
+    }
+  ],
+  "stdout_saturation": {
+    "before_status": "FAIL",
+    "before_failure": "continuous stdout exceeded 45s bound; child ready=True",
+    "after": [
+      {
+        "limit": null,
+        "outcome": 1,
+        "elapsed_ms": 3590,
+        "max_reads_per_drain": 4,
+        "peak_queue_bytes": 6815744,
+        "handles_closed": 1,
+        "allocations_balanced": 1,
+        "pending_writes": 0,
+        "wall_seconds": 24.859856833994854
+      },
+      {
+        "limit": 131072,
+        "outcome": 2,
+        "elapsed_ms": 59,
+        "max_reads_per_drain": 2,
+        "peak_queue_bytes": 131072,
+        "handles_closed": 1,
+        "allocations_balanced": 1,
+        "pending_writes": 0,
+        "wall_seconds": 21.114364639972337
+      }
+    ]
+  }
+}

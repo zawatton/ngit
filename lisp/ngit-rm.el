@@ -86,7 +86,7 @@
         (while (>= slash 0)
           (condition-case nil
               (progn
-                (delete-directory
+                (ngit-delete-directory
                  (expand-file-name (ngit-rm--decode (substring path 0 slash)) top))
                 (setq slash
                       (let ((i (1- slash)))
@@ -514,7 +514,7 @@
                     (when verbose (ngit-mv--emit-top plan "Renaming "))
                     (condition-case err
                         (progn
-                          (rename-file
+                          (ngit-rename-file
                            (expand-file-name (ngit-rm--decode source) top)
                            (expand-file-name (ngit-rm--decode dest) top) force)
                           (push plan done))

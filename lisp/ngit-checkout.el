@@ -166,14 +166,16 @@ Hard reset binds this to `index-first'; path checkout uses worktree first.")
 
 (defun ngit--checkout-delete-path (repo path st)
   "Delete PATH itself without following it.  Directories must be empty."
+  (when (ngit-windows-p) (ngit-win-validate-worktree-path path))
   (let ((abs (expand-file-name (decode-coding-string path 'utf-8)
                                (ngit-repo-toplevel repo))))
     (if (= (logand (aref st 0) ngit-s-ifmt) ngit-s-ifdir)
-        (delete-directory abs)
-      (delete-file abs))))
+        (ngit-delete-directory abs)
+      (ngit-delete-file abs))))
 
 (defun ngit--checkout-leading-dirs (repo path)
   "Create PATH's leading directories, replacing file and symlink blockers."
+  (when (ngit-windows-p) (ngit-win-validate-worktree-path path))
   (let ((start 0) (slash nil) (top (ngit-repo-toplevel repo)))
     (while (setq slash (ngit--byte-pos path ?/ start))
       (let* ((prefix (substring path 0 slash))
@@ -193,7 +195,9 @@ Hard reset binds this to `index-first'; path checkout uses worktree first.")
 
 (defun ngit--checkout-write-file (path data mode)
   "Create work-tree PATH exclusively with DATA and creation MODE."
-  (let ((fd (syscall-direct ngit-native--sys-open (ngit-wt--set-path path)
+  (if (ngit-windows-p)
+      (ngit-win-write-file (ngit-wt-absolute path) data t nil)
+   (let ((fd (syscall-direct ngit-native--sys-open (ngit-wt--set-path path)
                             ngit--checkout-o-wronly-creat-excl-cloexec
                             (ngit-native-creation-mode mode) 0 0 0)))
     (when (< fd 0)
@@ -209,11 +213,14 @@ Hard reset binds this to `index-first'; path checkout uses worktree first.")
               (when (<= n 0)
                 (error "ngit: cannot write %s (errno %d)" path (if (< n 0) (- n) 0)))
               (setq done (+ done n)))))
-      (syscall-direct ngit-native--sys-close fd 0 0 0 0 0))))
+      (syscall-direct ngit-native--sys-close fd 0 0 0 0 0)))))
 
 (defun ngit-checkout-entry (repo entry)
   "Force ENTRY into REPO's work tree and return a refreshed new entry."
+  (when (ngit-windows-p) (ngit-win-validate-worktree-path (aref entry 0)))
   (when ngit--checkout-leading-cache (clrhash ngit--checkout-leading-cache))
+  (when (and (ngit-windows-p) (= (aref entry 2) ngit-mode-symlink))
+    (error "ngit: Windows symbolic link checkout is unsupported"))
   (let* ((path (aref entry 0)) (mode (aref entry 2))
          (fmt (logand mode #o170000))
          (top (ngit-repo-toplevel repo))
@@ -321,7 +328,7 @@ On success, leave `ngit-wt--stat' holding ENTRY's lstat result."
           (let ((dir (substring path 0 slash)))
             (condition-case nil
                 (progn
-                  (delete-directory
+                  (ngit-delete-directory
                    (expand-file-name (decode-coding-string dir 'utf-8) top))
                   (setq slash
                         (let ((i (1- slash)))
@@ -577,6 +584,10 @@ On success, leave `ngit-wt--stat' holding ENTRY's lstat result."
              (root (ngit-ct-root index))
              (checked (make-hash-table :test 'eql))
              (updates nil) (count (if drop (hash-table-count drop) 0))
+             (_ (progn (ngit-win-validate-worktree-records old)
+                       (ngit-win-validate-worktree-records removed)
+                       (ngit-win-validate-worktree-records targets)
+                       (ngit-win-validate-worktree-records entries)))
              (lock (ngit-lock (ngit-index-file repo)))
              (ngit--checkout-attr-cache (make-hash-table :test 'equal)))
         (unwind-protect

@@ -91,7 +91,10 @@ An entry `KEY=value' sets KEY and a bare `KEY' removes it."
                      (file-name-absolute-p effective-gitdir))))
          (args (or args nil))
          (argv (cons path args))
-         (fallback (append (list "/bin/sh" path) args)))
+         (fallback (if (and (fboundp 'ngit-windows-p) (ngit-windows-p))
+                       (let ((shell (getenv "NGIT_WINDOWS_SHELL")))
+                         (and shell (append (list shell path) args)))
+                     (append (list "/bin/sh" path) args))))
     (if (null path) 0
       (ngit-transport-run-command argv environment (ngit--hook-cwd repo)
                                   input fallback (equal name "pre-push")))))

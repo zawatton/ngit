@@ -56,7 +56,8 @@ repository.  Return its repository vector and do not print anything."
       (ngit-make-directory (expand-file-name dir gitdir) t))
     (let ((repo (ngit--make-repo gitdir (and (not bare) root))))
       (ngit-config-set repo "core.repositoryformatversion" "0")
-      (ngit-config-set repo "core.filemode" "true")
+      (ngit-config-set repo "core.filemode" (if (ngit-windows-p) "false" "true"))
+      (when (ngit-windows-p) (ngit-config-set repo "core.symlinks" "false"))
       (ngit-config-set repo "core.bare" (if bare "true" "false"))
       (if bare
           (ngit-config-set repo "core.logallrefupdates" nil)
@@ -132,7 +133,7 @@ repository.  Return its repository vector and do not print anything."
         (ngit-config-get-all repo (concat "remote." name ".url")) vals)))
 
 (defun ngit-remote--delete-tree (path)
-  (when (file-directory-p path) (delete-directory path t)))
+  (when (file-directory-p path) (ngit-delete-directory path t)))
 
 (defun ngit-remote--rewrite-symrefs (dir old new)
   "Rewrite symbolic refs below DIR after remote OLD was renamed to NEW."
@@ -214,9 +215,9 @@ repository.  Return its repository vector and do not print anything."
               (let* ((ref (car pair))
                      (file (ngit--ref-file repo ref))
                      (log (expand-file-name (concat "logs/" ref) common)))
-                (when (file-exists-p file) (delete-file file))
+                (when (file-exists-p file) (ngit-delete-file file))
                 (when (file-exists-p log)
-                  (delete-file log)
+                  (ngit-delete-file log)
                   (ngit--remove-empty-dirs (file-name-directory log)
                                            (expand-file-name "logs/refs" common)))
                 (ngit-unlock (cdr pair))

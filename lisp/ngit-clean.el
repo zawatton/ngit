@@ -218,7 +218,7 @@ remove_dirs does."
                  (child (concat rel "/" bytes)))
             (cond
              ((file-symlink-p path)
-              (unless dry-run (delete-file path))
+              (unless dry-run (ngit-delete-file path))
               (push child deleted))
              ((file-directory-p path)
               (if (and (< force 2)
@@ -235,14 +235,14 @@ remove_dirs does."
                     (push child deleted)
                   (setq gone nil))))
              (t
-              (unless dry-run (delete-file path))
+              (unless dry-run (ngit-delete-file path))
               (push child deleted)))))))
     (when (and gone cwd-p)
       (ngit--emit (if dry-run "Would refuse to remove current working directory\n"
                     "Refusing to remove current working directory\n"))
       (setq gone nil))
     (if gone
-        (progn (unless dry-run (delete-directory directory)) t)
+        (progn (unless dry-run (ngit-delete-directory directory)) t)
       (unless quiet
         (dolist (path (nreverse deleted))
           (ngit--emit (if dry-run "Would remove " "Removing ")
@@ -335,7 +335,7 @@ remove_dirs does."
                           (ngit-clean--display path) "\n"))
             (unless dry-run
               (when (or (file-exists-p abs) (file-symlink-p abs))
-                (delete-file abs))))))
+                (ngit-delete-file abs))))))
       0)))
 
 (provide 'ngit-clean)

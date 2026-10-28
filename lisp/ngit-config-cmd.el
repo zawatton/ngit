@@ -53,14 +53,14 @@
     (ngit-native--write-bytes address bytes)
     (ptr-write-u8 address (length bytes) 0)
     ;; O_WRONLY | O_CREAT | O_EXCL, retaining the native close-on-exec flag.
-    (let ((descriptor (syscall-direct ngit-native--sys-open address
+    (let ((descriptor (ngit-native-fd-open lock
                                      (logior ngit-native--o-rdonly-cloexec #o301)
-                                     #o666 0 0 0)))
+                                     #o666)))
       (when (< descriptor 0)
         (ngit--die-with 255 "error: could not lock config file %s: %s"
                         file (if (= descriptor -17) "File exists"
                                (ngit--config-access-message (- descriptor)))))
-      (syscall-direct ngit-native--sys-close descriptor 0 0 0 0 0))
+      (ngit-native-fd-close descriptor))
     lock))
 
 (defun ngit-config-cmd--write-file (file text)

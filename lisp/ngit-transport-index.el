@@ -50,9 +50,10 @@
               (concat "/proc/" (number-to-string (emacs-pid)) "/task")
               nil "\\`[0-9]")) 1))
 
-(ffi:defun ngit-transport-index--memcpy "memcpy"
+(unless (ngit-windows-p)
+ (ffi:defun ngit-transport-index--memcpy "memcpy"
            [:pointer :pointer :pointer :uint64]
-           "memcpy(destination, source, count).")
+           "memcpy(destination, source, count)."))
 
 (defun ngit-transport-index--data-size (data)
   (if (stringp data) (length data) (aref data 2)))
@@ -66,7 +67,9 @@
          (destination (nl-ffi-memory-address owner)) success)
     (unwind-protect
         (progn
-          (ngit-native--zlib-call "memcpy" #'ngit-transport-index--memcpy destination address size)
+          (if (ngit-windows-p)
+              (ngit-win-call "ucrtbase.dll" "memcpy" destination address size)
+            (ngit-native--zlib-call "memcpy" #'ngit-transport-index--memcpy destination address size))
           (setq success t)
           (vector owner destination size))
       (unless success (nl-ffi-memory-release owner)))))
@@ -353,7 +356,7 @@ non-delta object, hash the native output in place and set
               (let* ((file (make-temp-file (concat path ".worker-")))
                      (pid (syscall-direct 57 0 0 0 0 0 0)))
                 (when (< pid 0)
-                  (delete-file file)
+                  (ngit-delete-file file)
                   (error "fatal: cannot fork pack indexer"))
                 (when (= pid 0)
                   (let ((exit-code 1))
@@ -404,8 +407,30 @@ non-delta object, hash the native output in place and set
           (let ((waited -4))
             (while (= waited -4)
               (setq waited (syscall-direct 61 (aref child 0) status-address 0 0 0 0)))))
-        (when (file-exists-p (aref child 1)) (delete-file (aref child 1))))
+        (when (file-exists-p (aref child 1)) (ngit-delete-file (aref child 1))))
       (nl-ffi-memory-release status))))
+
+(defun ngit-transport-index--map-file (fd size)
+  "Map SIZE bytes from FD read-only, with platform-specific ownership."
+  (if (not (ngit-windows-p))
+      (syscall-direct ngit-transport-index--sys-mmap 0 size
+                      ngit-transport-index--prot-read
+                      ngit-transport-index--map-private fd 0)
+    (let* ((handle (ngit-win-call "ucrtbase.dll" "_get_osfhandle" fd))
+           (mapping (ngit-win-call "kernel32.dll" "CreateFileMappingW"
+                                   handle 0 2 0 0 0)))
+      (when (= mapping 0) (error "fatal: cannot create pack mapping"))
+      (unwind-protect
+          (let ((view (ngit-win-call "kernel32.dll" "MapViewOfFile" mapping 4 0 0 size)))
+            (when (= view 0) (error "fatal: cannot map pack"))
+            view)
+        (ngit-win-call "kernel32.dll" "CloseHandle" mapping)))))
+
+(defun ngit-transport-index--unmap-file (address size)
+  (if (ngit-windows-p)
+      (unless (/= 0 (ngit-win-call "kernel32.dll" "UnmapViewOfFile" address))
+        (error "fatal: cannot unmap pack"))
+    (syscall-direct ngit-transport-index--sys-munmap address size 0 0 0 0)))
 
 (defun ngit-transport-index--scan (path)
   "Validate PATH and return compact resolved metadata records."
@@ -424,12 +449,14 @@ non-delta object, hash the native output in place and set
                  (= (ngit--be32 head 4) 2))
       (error "fatal: pack is not a version 2 pack file"))
     (let* ((count (ngit--be32 head 8)) (position 12) records
-           (prepared (when (and (>= count ngit-transport-index--parallel-threshold)
+           (prepared (when (and (not (ngit-windows-p))
+                                (>= count ngit-transport-index--parallel-threshold)
                                 (fboundp 'ngit-transport-kernel-prepare))
                        (unless (ngit-transport-kernel-prepare)
                          (error "fatal: cannot prepare delta kernel: %s"
                                 ngit-transport-kernel--error))))
-           (parallel (and (>= count ngit-transport-index--parallel-threshold)
+           (parallel (and (not (ngit-windows-p))
+                          (>= count ngit-transport-index--parallel-threshold)
                           (> ngit-transport-index--workers 1)
                           (ngit-transport-index--single-thread-p)))
            (ref-deltas nil)
@@ -445,9 +472,7 @@ non-delta object, hash the native output in place and set
            (fd (ngit-native--open path))
            (ngit-transport-index--map-size file-size)
            (ngit-transport-index--map-address
-            (syscall-direct ngit-transport-index--sys-mmap 0 file-size
-                            ngit-transport-index--prot-read
-                            ngit-transport-index--map-private fd 0)))
+            (ngit-transport-index--map-file fd file-size)))
       (when (< ngit-transport-index--map-address 0)
         (error "fatal: cannot map pack (errno %d)"
                (- ngit-transport-index--map-address)))
@@ -536,8 +561,8 @@ non-delta object, hash the native output in place and set
             records)
         (dolist (offset ngit-transport-index--cache-order)
           (ngit-transport-index--release (gethash offset ngit-transport-index--cache)))
-        (syscall-direct ngit-transport-index--sys-munmap
-                        ngit-transport-index--map-address file-size 0 0 0 0)))))
+        (ngit-transport-index--unmap-file
+         ngit-transport-index--map-address file-size)))))
 
 (defun ngit-transport-index-pack (path idx-path)
   "Index received pack PATH at IDX-PATH and return (HEX-SHA . nil)."
@@ -551,8 +576,8 @@ non-delta object, hash the native output in place and set
       (unwind-protect
           (progn
             (ngit-write-file tmp (ngit-pack--idx-bytes index sum))
-            (rename-file tmp idx-path t))
-        (when (file-exists-p tmp) (delete-file tmp))))
+            (ngit-rename-file tmp idx-path t))
+        (when (file-exists-p tmp) (ngit-delete-file tmp))))
     (cons (ngit-hex sum) nil)))
 
 (provide 'ngit-transport-index)

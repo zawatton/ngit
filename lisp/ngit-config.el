@@ -288,10 +288,9 @@ Retain escaped newlines so value parsing diagnoses the exact physical line."
          (address (nl-ffi-memory-address (ngit-native--buffer 3 (1+ (length bytes))))))
     (ngit-native--write-bytes address bytes)
     (ptr-write-u8 address (length bytes) 0)
-    (let ((descriptor (syscall-direct ngit-native--sys-open address
-                                      ngit-native--o-rdonly-cloexec 0 0 0 0)))
+    (let ((descriptor (ngit-native-fd-open file ngit-native--o-rdonly-cloexec)))
       (if (< descriptor 0) (- descriptor)
-        (syscall-direct ngit-native--sys-close descriptor 0 0 0 0 0)
+        (ngit-native-fd-close descriptor)
         0))))
 
 (defun ngit--config-access-message (number)
@@ -498,8 +497,11 @@ Git's repository setup reads the local primary config without following includes
 
 (defun ngit--config-pager-tty-p (fd)
   "Test FD with Linux TCGETS, without relying on Emacs terminal objects."
-  (ngit-native--with-memory (memory 64)
-    (= 0 (syscall-direct 16 fd #x5401 (nl-ffi-memory-address memory) 0 0 0))))
+  ;; The pager writer uses Linux process and signal semantics.  Windows
+  ;; currently emits directly, including when called from editor pipes.
+  (and (not (ngit-windows-p))
+       (ngit-native--with-memory (memory 64)
+         (= 0 (syscall-direct 16 fd #x5401 (nl-ffi-memory-address memory) 0 0 0)))))
 
 (defvar ngit--config-pager-command-child nil
   "Non-nil only while dispatching in the disposable pager writer process.")

@@ -43,7 +43,7 @@ Tests may bind this to 1 to force the parallel path.")
 (defun ngit-transport-checkout--mkdir (path &optional parents)
   "Create PATH safely when another checkout worker creates it first."
   (condition-case err
-      (make-directory path parents)
+      (ngit-create-directory path parents)
     (file-already-exists
      (unless (file-directory-p path) (signal (car err) (cdr err))))))
 
@@ -83,7 +83,7 @@ Tests may bind this to 1 to force the parallel path.")
                      (pid (syscall-direct ngit-transport-checkout--sys-fork
                                           0 0 0 0 0 0)))
                 (when (< pid 0)
-                  (delete-file file)
+                  (ngit-delete-file file)
                   (error "fatal: cannot fork checkout worker"))
                 (when (= pid 0)
                   (ngit-transport-checkout--child repo entries begin end file))
@@ -135,7 +135,7 @@ Tests may bind this to 1 to force the parallel path.")
                     (syscall-direct ngit-transport-checkout--sys-wait4
                                     (aref child 0) status-address 0 0 0 0))))))
       (dolist (child children)
-        (when (file-exists-p (aref child 1)) (delete-file (aref child 1))))
+        (when (file-exists-p (aref child 1)) (ngit-delete-file (aref child 1))))
       (nl-ffi-memory-release status-owner)
       (unless success (ngit-unlock lock)))))
 
@@ -149,7 +149,7 @@ enough and the runtime is safe to fork."
          (old (aref index 0))
          (changes (ngit-diff-tree-index repo tree))
          (count (length changes)))
-    (if (or (< count ngit-transport-checkout-threshold)
+    (if (or (ngit-windows-p) (< count ngit-transport-checkout-threshold)
             (not (ngit-transport-checkout--single-thread-p))
             (> (length old) 0)
             (not (ngit-transport-checkout--empty-worktree-p repo)))

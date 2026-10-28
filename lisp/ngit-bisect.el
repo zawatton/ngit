@@ -64,7 +64,7 @@
     (ngit-bisect--delete-ref repo ref))
   (dolist (name ngit-bisect--state-files)
     (let ((path (ngit-bisect--path repo name)))
-      (when (file-exists-p path) (delete-file path))))
+      (when (file-exists-p path) (ngit-delete-file path))))
   0)
 
 (defun ngit-bisect--resolve-commit (repo rev)
@@ -398,7 +398,7 @@ count, matching bisect.c's cheap path for ordinary history."
         (when (and expected (not (equal expected hex)))
           (ngit-bisect--delete-ref repo "BISECT_EXPECTED_REV")
           (let ((path (ngit-bisect--path repo "BISECT_ANCESTORS_OK")))
-            (when (file-exists-p path) (delete-file path))))))
+            (when (file-exists-p path) (ngit-delete-file path))))))
     (catch 'ngit-bisect-next (ngit-bisect--next repo terms))))
 
 (defun ngit-bisect--reset (repo args)
@@ -423,8 +423,8 @@ count, matching bisect.c's cheap path for ordinary history."
     (let ((out (ngit--read-file stdout)) (err (ngit--read-file stderr)))
       (when (> (length out) 0) (princ out))
       (when (> (length err) 0) (ngit-native-write-stderr err)))
-    (delete-file stdout)
-    (delete-file stderr)
+    (ngit-delete-file stdout)
+    (ngit-delete-file stderr)
     status))
 
 (defun ngit-bisect--capture-state (repo state)

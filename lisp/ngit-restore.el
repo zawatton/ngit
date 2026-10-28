@@ -142,7 +142,7 @@
       (let ((st (ngit-wt-lstat path)))
         (when (and st (/= fmt ngit-mode-gitlink)
                    (= (logand (aref st 0) ngit-s-ifmt) ngit-s-ifdir))
-          (delete-directory
+          (ngit-delete-directory
            (expand-file-name (decode-coding-string path 'utf-8)
                              (ngit-repo-toplevel repo))
            t)

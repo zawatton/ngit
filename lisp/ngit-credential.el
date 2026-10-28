@@ -19,14 +19,54 @@
   value)
 
 (defun ngit-credential--clock (memory)
+  (if (and (fboundp 'ngit-windows-p) (ngit-windows-p))
+      (ngit-win-call "kernel32.dll" "GetTickCount64")
   (let ((p (nl-ffi-memory-address memory)))
     (unless (= 0 (syscall-direct 228 1 p 0 0 0 0))
       (ngit-credential--fail))
-    (+ (* 1000 (ptr-read-u64 p 0)) (/ (ptr-read-u64 p 8) 1000000))))
+    (+ (* 1000 (ptr-read-u64 p 0)) (/ (ptr-read-u64 p 8) 1000000)))))
+
+(defun ngit-credential--windows-exchange (command input deadline)
+  "Exchange bounded secret bytes with an owned native Windows process job."
+  (let ((conn nil) (complete nil) (environment nil)
+        (controls '("GIT_TERMINAL_PROMPT" "GIT_ASKPASS" "SSH_ASKPASS" "GCM_INTERACTIVE"))
+        (bytes (encode-coding-string input 'utf-8)))
+    (unwind-protect
+        (progn
+          (when (> (length bytes) 262144) (ngit-credential--fail))
+          (let ((now (ngit-win-call "kernel32.dll" "GetTickCount64")))
+            (when (>= now deadline) (ngit-credential--fail))
+            (setq deadline (min deadline (+ now 10000))))
+          (dolist (entry process-environment)
+            (unless (member (upcase (car (split-string entry "="))) controls)
+              (push entry environment)))
+          (setq environment (append '("GIT_TERMINAL_PROMPT=0" "GIT_ASKPASS="
+                                      "SSH_ASKPASS=" "GCM_INTERACTIVE=never") environment)
+                conn (vconcat (ngit-win-process-spawn
+                               (ngit-win-process-shell command) environment nil nil nil nil t t)
+                              (vector 262144)))
+          (ngit-win-process-write conn bytes deadline)
+          (ngit-win-process-finish-write conn)
+          (while (not complete)
+            (when (>= (ngit-win-call "kernel32.dll" "GetTickCount64") deadline)
+              (ngit-credential--fail))
+            (ngit-win-process--drain conn)
+            (let ((wait (ngit-win-call "kernel32.dll" "WaitForSingleObject" (aref conn 1) 0)))
+              (cond ((= wait 0)
+                     (ngit-win-process--drain conn)
+                     (setq complete t))
+                    ((/= wait 258) (ngit-credential--fail))))
+            (unless complete (ngit-win-call "kernel32.dll" "Sleep" 10)))
+          (or (aref conn 11) ""))
+      (when conn (ngit-win-process-close conn (not complete))))))
 
 (defun ngit-credential--exchange (command input deadline)
   "Exchange bounded INPUT with COMMAND and return stdout, irrespective of status.
 Kill only this invocation's owned process group, including pipe descendants."
+  (if (and (fboundp 'ngit-windows-p) (ngit-windows-p))
+      (condition-case nil
+          (ngit-credential--windows-exchange command input deadline)
+        (error (ngit-credential--fail)))
   (let* ((in (ngit-transport--pipe)) (out (ngit-transport--pipe))
          (av (ngit-transport--cstring-vector (list "/bin/sh" "-c" command)))
          (environment nil)
@@ -108,7 +148,7 @@ Kill only this invocation's owned process group, including pipe descendants."
       (dolist (fd (list (car in) (cdr in) (car out) (cdr out)))
         (when (>= fd 0) (syscall-direct 3 fd 0 0 0 0 0)))
       (dolist (owner (list (car av) (car ev) (car dv) clock pause status buffer data))
-        (when owner (nl-ffi-memory-release owner))))))
+        (when owner (nl-ffi-memory-release owner)))))))
 
 (defun ngit-credential--decode (value)
   (let ((pos 0))

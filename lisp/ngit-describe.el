@@ -188,8 +188,10 @@ list-objects instead requires a matching tree name or a literal prefix."
 
 (defun ngit-inspect--stdin-tty-p ()
   "Test stdin with Linux TCGETS, without consuming any input."
-  (ngit-native--with-memory (memory 64)
-    (= (syscall-direct 16 0 #x5401 (nl-ffi-memory-address memory) 0 0 0) 0)))
+  (if (ngit-windows-p)
+      (/= 0 (ngit-win-call "ucrtbase.dll" "_isatty" 0))
+    (ngit-native--with-memory (memory 64)
+      (= (syscall-direct 16 0 #x5401 (nl-ffi-memory-address memory) 0 0 0) 0))))
 
 (defun ngit-cmd-shortlog (repo args)
   (let ((summary nil) (number nil) (email nil) (wrap nil) (revs nil)

@@ -1,0 +1,49 @@
+#+TITLE: ngit Windows native support verified with Wine
+#+NOTE: Twelve criteria defined before implementation. Windows execution must use a PE NeLisp runtime under Wine, never the Linux runtime or WSL. Existing Linux behavior and local user settings must remain intact.
+
+* S1 Native Windows platform foundation
+
+** S1.1 Windows runtime and required native APIs execute under the Wine memory and job limits
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-native-20261028.json runtime
+
+** S1.2 Binary I/O, hashing, compression, paths and metadata preserve their contracts on Windows
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-native-20261028.json foundation boundaries
+
+** S1.3 End to end: native Windows ngit reads a Git repository and matches status, history and object bytes
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-native-20261028.json reads
+
+* S2 Native Windows daily writes
+
+** S2.1 Exclusive locks, atomic replacement and file writes preserve repository state and failure behavior
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-native-20261028.json writes
+
+** S2.2 Windows paths, Unicode names, CRLF and missing or unsupported features are handled explicitly
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-native-20261028.json writes paths controls
+
+** S2.3 End to end: init, add, commit, branch, checkout and restore operate through native Windows ngit
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-native-20261028.json writes
+
+* S3 Native Windows processes and repeated status
+
+** S3.1 Binary child input and output, exit codes and process ownership are correct on Windows
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-native-20261028.json process process_saturation
+
+** S3.2 Status sessions remain coherent on Windows with native monitoring or explicit uncached operation
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-native-20261028.json status
+
+** S3.3 End to end: native Windows local clone, fetch and push share valid objects and refs with Git
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-native-20261028.json transport http
+
+* S4 Installation and integration
+
+** S4.1 Windows launcher, dependencies and opt-in routing are installable without Linux shell tools
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-native-20261028.json launcher
+
+** S4.2 Linux regression and negative controls reject broken Windows execution or misleading fallback
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-linux-regression-20261028.json dispatcher reset-hard pack-write write-objects syntax
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-native-20261028.json controls
+cmd: python3 tools/windows-results.py --self-test
+evidence: tools/ai/evidence/ngit-windows-audit-controls-20261028.json sha256=305e7c8da68ca1bc13f5ed30797c85af98ff9261c4b14787df6e9c0961f93af9
+
+** S4.3 End to end: Windows command entry and Magit-compatible invocation pass the documented Wine workflow
+cmd: python3 tools/windows-results.py tools/ai/evidence/ngit-windows-native-20261028.json launcher

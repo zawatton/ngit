@@ -349,9 +349,9 @@ repositories are still reported as \"dir/\"."
                                       expand))
                ((and ngit--untracked-pathspecs
                      (not (ngit-pathspec-untracked-class ngit--untracked-pathspecs path))))
-               ((and expand (not (ngit-wt-lstat (concat path "/.git"))))
+               ((and expand (not (ngit-wt-gitdir-lstat path)))
                 (ngit--walk-untracked repo top tracked (concat path "/") stack emit nil t))
-               ((or (ngit-wt-lstat (concat path "/.git"))
+               ((or (ngit-wt-gitdir-lstat path)
                     (catch 'found
                       (ngit--walk-untracked repo top tracked (concat path "/") stack nil t)
                       nil))

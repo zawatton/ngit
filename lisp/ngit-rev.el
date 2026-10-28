@@ -151,7 +151,7 @@ when no executable reference-transaction hook exists."
           (setq packed-lock (ngit-lock (expand-file-name "packed-refs" (ngit-repo-commondir repo))))
           (setq input (ngit-ref-prepare repo (list (list nil nil name)) t
                                         (list lock packed-lock)))
-          (when (file-exists-p file) (delete-file file))
+          (when (file-exists-p file) (ngit-delete-file file))
           (ngit-unlock lock)
           (ngit-unlock packed-lock)
           (ngit-ref-finish repo input))

@@ -1,0 +1,180 @@
+#+TITLE: Native Windows ngit
+#+OPTIONS: toc:2
+
+* Status
+
+ngit has an x86-64 Windows backend. Git algorithms remain Lisp code running
+in the Windows PE NeLisp process. This path does not use WSL or the Linux
+NeLisp executable. Python only frames arguments and chooses a backend for
+the optional Git dispatcher.
+
+The acceptance corpus runs under Wine 10 with native Windows NeLisp,
+Python and Git executables. It covers binary and Unicode paths, objects,
+status/diff, repository writes, index locks, local and smart HTTP transport,
+and repeated status requests after external edits. This is Wine validation;
+a physical Windows installation and the Windows Emacs GUI are not validated
+by that corpus. Do not infer Windows performance from the Linux benchmarks.
+
+* Runtime and dependencies
+
+- A compatible x86-64 =nelisp.exe= and its matching cold image, when used.
+  Keep the matching NeLisp source providers where that build expects them.
+- Native Windows Python 3, for the launchers and optional dispatcher.
+- Git for Windows, including its upload-pack and receive-pack services.
+- UCRT-compatible =zlib1.dll= and =libcrypto-3-x64.dll=.
+- =libcurl-4.dll= and its dependencies for HTTP. The tested MinGit UCRT
+  directory supplies these DLLs together. Keep that directory on =PATH=.
+
+The clean runtime used for the initial Wine corpus is a cached Windows CI
+build. Its source revision has not been independently established; the
+artifact fingerprints identify the actual tested pair:
+
+- PE SHA-256: =1ae4ffea0eb9a9b86928d0df8a800fd3c1b1addefa5f2a76649054a763d4638b=.
+- Cold image SHA-256: =1534a8143929e83ad3af8be2c2664bc50f665ca9ed15c10f7ef6b615e258add6=.
+The executable and its cold image are build artifacts, not files bundled
+in this repository. Build a matching Windows runtime using NeLisp's own
+Windows build workflow, or use your existing compatible Windows build.
+Run the capability and foundation checks below before selecting it.
+
+A newer source cross-build was also investigated: adding the raw Win32
+FFI selectors allowed a PE build and all eleven native API probes passed,
+but three existing prelude compiler-metadata validations still failed.
+That build is not the clean runtime used for ngit's acceptance results.
+Replacing only an executable while retaining another build's cold image
+is not a supported installation method.
+
+* PowerShell setup
+
+Keep ngit and the compatible NeLisp checkout together. Adapt these paths
+to your installation; they are examples, not required locations.
+
+#+begin_src powershell
+git clone https://github.com/zawatton/ngit.git
+Set-Location ngit
+$env:NGIT_NELISP = (Resolve-Path ..\nelisp\target\nelisp.exe).Path
+$env:NGIT_NELISP_ROOT = (Resolve-Path ..\nelisp).Path
+$env:NGIT_PYTHON = (Get-Command python.exe).Source
+$env:NGIT_REAL_GIT = (Get-Command git.exe).Source
+$env:GIT_EXEC_PATH = (& $env:NGIT_REAL_GIT --exec-path)
+# Select the directory containing the matching Windows DLL set.
+$env:NGIT_WINDOWS_DLL_DIR = (Resolve-Path ..\MinGit\ucrt64\bin).Path
+$env:PATH = "$env:NGIT_WINDOWS_DLL_DIR;$env:GIT_EXEC_PATH;$env:PATH"
+
+& $env:NGIT_PYTHON .\tools\ngit-windows.py -C ..\your-project status
+#+end_src
+
+The direct Python entry preserves the argument vector and invokes the PE
+runtime directly. =bin/ngit.cmd= is the Command Prompt convenience entry.
+Normal Windows shell quoting still applies when using a batch entry.
+The native launcher selects source files rather than a Linux-generated
+byte-code cache.
+
+These commands assume the selected PE can bootstrap with its matching
+source-provider layout. =NGIT_NELISP_ROOT= selects ngit's FFI sources; it
+does not rewrite paths already baked into the runtime's bootstrap image.
+
+For opt-in replacement of ordinary Git commands, use =bin/ngit-git.cmd=.
+It applies the same conservative certificate as the Linux dispatcher:
+supported cases select ngit before execution; other operations select the
+original Git. A failed ngit operation is never replayed through Git.
+Set =NGIT_GIT_BACKEND=git= to route all operations to the original Git.
+Keep =NGIT_REAL_GIT= pointing at the actual =git.exe=.
+
+Git for Windows normally installs system attributes. The dispatcher keeps
+Git selected while that policy is active. If you deliberately disable
+system attributes for this shell with =$env:GIT_ATTR_NOSYSTEM = "1"=,
+the certificate can select ngit for otherwise supported cases. This also
+disables Git's system document-diff rules; it is an explicit policy choice.
+Global and repository attributes still select Git.
+
+For Magit, the dispatcher must be the subprocess entry. Wine tests exercise
+the native Python dispatcher with =INSIDE_EMACS=...,magit= and confirm the
+chosen backend. An actual Windows Emacs/Magit session requires separate
+validation before changing your editor configuration permanently.
+
+* Differences from Linux
+
+- New Windows repositories use =core.filemode=false= and
+  =core.symlinks=false=. POSIX permission bits are not reproduced.
+- Native symbolic links and reparse-point operations are rejected explicitly.
+  The native readers check the final handle, and checkout checks existing
+  parent directories. This is not a universal no-follow guarantee for every
+  intermediate directory. The Wine fixture could not create a genuine
+  reparse point, so that rejection boundary has source review but no Wine
+  end-to-end proof. Worktrees that depend on links remain unsupported.
+- Worktree paths reject ambiguous or Windows-invalid components, protected
+  metadata aliases, alternate data streams and traversal. Checkout validates
+  the complete path set before publishing changes, including collisions
+  found by the native Windows invariant case mapper. This does not claim
+  exact equivalence with every NTFS volume's case table.
+- Resident =status-server= recomputes each request. It reports
+  =cache_enabled=0= and does not claim inotify-style cache certificates.
+- Linux AF_ALG, fork, process_vm_readv and memfd accelerators are bypassed.
+  Windows uses native crypto, mapped pack files and serialized checkout.
+- Terminal output is emitted directly; the Linux pager process path is not
+  used on Windows.
+- Native executable hooks/editors can run directly. POSIX shell scripts,
+  shell aliases with arguments, and shelled editors require an explicitly
+  selected working =NGIT_WINDOWS_SHELL=. The tested MSYS shell failed under
+  Wine, so its availability is not inferred from Git being installed.
+- HTTP uses explicit UCRT callbacks and binary spools. Windows request gzip
+  is disabled to avoid passing descriptors across CRT implementations.
+  Public HTTPS authentication, SSH agents and credential-manager integration
+  require their own environment-specific validation.
+- There is no bundled Windows installer in this change.
+
+Duplex child output uses at most four 64 KiB reads per drain quantum, so
+write deadlines are checked between quanta. More than 16 MiB of queued
+output while writing
+fails explicitly; credential helpers have a tighter output limit. This
+queue limit does not truncate pack data or limit the total streamed pack.
+
+* Reproducing the Wine corpus
+
+Use an owned Wine prefix. Never point the test at an unrelated user's prefix.
+The test requires native Windows reference programs and rejects a non-PE
+NeLisp executable. All runtime errors are checked even when the runtime
+returns exit status zero.
+
+#+begin_src sh
+ulimit -v 8388608
+../../bin/heavy-run.sh python3 test/windows-native.py \
+  --runtime "$WINDOWS_NELISP" --nelisp-root "$NELISP_ROOT" \
+  --dll-dir "$WINDOWS_DLL_DIR" --git "$WINDOWS_GIT" \
+  --python "$WINDOWS_PYTHON" --wine /usr/lib/wine/wine64 \
+  --wine-prefix "$OWNED_WINE_PREFIX" --case all
+#+end_src
+
+The workspace heavy-job wrapper is optional outside the Notes workspace;
+invoke Python directly there while retaining the memory limit. On Windows,
+omit =--wine= and =--wine-prefix=. Individual =--case= values keep a failed
+boundary narrow. JSON reports retain source/runtime hashes and exact
+command results, including partial output on timeout.
+
+Recorded acceptance results live in =tools/ai/evidence/=. To check a result
+against the current application sources without rerunning the corpus:
+
+#+begin_src sh
+python3 tools/windows-results.py \
+  tools/ai/evidence/ngit-windows-native-20261028.json \
+  runtime foundation reads writes boundaries paths process process_saturation \
+  status transport http launcher controls
+#+end_src
+
+The checker requires each requested case and exact application fingerprints;
+a partial report marked =PASS= does not imply the full corpus completed.
+
+Wine overrides an inherited Unix =PATH=. The harness supplies =WINEPATH=
+as well as the Windows =PATH=; merely exporting the latter is insufficient.
+The Wine fixture uses an official SQLite DLL as =winsqlite3.dll= beside
+the tested runtime. This is a Wine dependency workaround, not a replacement
+for the Windows system DLL in a real Windows installation.
+
+The specific cached CI pair also expects source providers beneath
+=D:/a/nelisp/nelisp/=. The owned test prefix maps =dosdevices/d:= to its
+own =drive_d=, with =drive_d/a/nelisp/nelisp= linked to =$NELISP_ROOT=.
+An automatically created CD-ROM =dosdevices/d::= mapping conflicted with
+that drive alias and was removed only from this owned prefix. Reproduce
+this layout when using that exact artifact, or select a clean compatible
+build with its own valid provider layout. This is an artifact-specific
+bootstrap dependency, separate from ngit's Windows backend.
