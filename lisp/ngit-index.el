@@ -73,9 +73,19 @@ root) to (ENTRY-COUNT . BIN-OR-NIL)."
         (setq p (ngit--parse-cache-tree s p end table path))))
     p))
 
+(defvar ngit-index-read-observer nil
+  "Optional function called with each newly allocated index vector.")
+
+(defun ngit-index-release-native (index)
+  "Release INDEX's native owner once, preserving all existing index slots."
+  (when (and (> (length index) 10) (aref index 10))
+    (nl-ffi-memory-release (aref index 10))
+    (aset index 10 nil)
+    (aset index 6 nil)))
+
 (defun ngit-read-index (repo)
   "Return REPO's index as [ENTRIES RAW VERSION CACHE-TREE MTIME-S MTIME-NS
-NATIVE-ADDRESS TREE-RANGE RESOLVE-UNDO UNMERGED], or an empty index when
+NATIVE-ADDRESS TREE-RANGE RESOLVE-UNDO UNMERGED NATIVE-OWNER], or an empty index when
 the file does not exist.  Cached in the repo.  TREE-RANGE is (POS . LEN)
 of the TREE extension data in RAW, or nil.  RESOLVE-UNDO holds raw REUC
 data; UNMERGED lists the original stage 1-3 entries in index order."
@@ -83,15 +93,17 @@ data; UNMERGED lists the original stage 1-3 entries in index order."
       (aset repo 6
             (let ((file (ngit-index-file repo)))
               (if (not (file-exists-p file))
-                  (vector [] "" 2 nil 0 0 nil nil nil nil)
+                  (vector [] "" 2 nil 0 0 nil nil nil nil nil)
                 (let* ((size (file-attribute-size (file-attributes file)))
                        ;; The index stays in native memory too: its NUL-padded
                        ;; names serve directly as C paths for fstatat(2).
                        (native (nl-ffi-memory-allocate (max size 1)))
-                       (raw (prog1 (progn (ngit-native--pread file native 0 size)
-                                          (ptr-read-bytes (nl-ffi-memory-address native) size))
-                              (ngit-native-close file)))
-                       (mtime (ngit--file-mtime file)))
+                       (raw nil) (mtime nil) (result nil))
+                  (unwind-protect
+                   (progn
+                    (setq raw (progn (ngit-native--pread file native 0 size)
+                                     (ptr-read-bytes (nl-ffi-memory-address native) size))
+                          mtime (ngit--file-mtime file))
                   (unless (string= (substring raw 0 4) "DIRC")
                     (error "fatal: index file corrupt"))
                   (let* ((version (ngit--be32 raw 4))
@@ -136,9 +148,14 @@ data; UNMERGED lists the original stage 1-3 entries in index order."
                         (when (string= sig "REUC")
                           (setq undo (substring raw (+ pos 8) (+ pos 8 len))))
                         (setq pos (+ pos 8 len))))
-                    (vector entries raw version tree (car mtime) (cdr mtime)
-                            (nl-ffi-memory-address native) tree undo
-                            (nreverse unmerged)))))))))
+                    (let ((index (vector entries raw version tree (car mtime) (cdr mtime)
+                                         (nl-ffi-memory-address native) tree undo
+                                         (nreverse unmerged) native)))
+                      (when ngit-index-read-observer
+                        (funcall ngit-index-read-observer index))
+                      (setq result index))))
+                   (ngit-native-close file)
+                   (unless result (nl-ffi-memory-release native)))))))))
 
 (defun ngit-index-entries (repo) (aref (ngit-read-index repo) 0))
 

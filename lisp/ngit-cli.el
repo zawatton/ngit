@@ -116,12 +116,16 @@ each pack and past the loose names sharing its first two bytes."
     v)
   "Precomputed \\NNN escapes; `format' is slow in NeLisp.")
 
+(defvar ngit--quote-high-bytes t
+  "Non-nil to octal-escape path bytes above DEL; dynamically scoped by status.")
+
 (defun ngit--needs-quote-p (path)
   ;; An aref scan; a regexp match costs milliseconds per call in NeLisp.
   (let ((n (length path)) (i 0) (found nil))
     (while (and (< i n) (not found))
       (let ((c (aref path i)))
-        (setq found (or (< c 32) (>= c 127) (= c ?\") (= c ?\\))
+        (setq found (or (< c 32) (= c 127) (and ngit--quote-high-bytes (> c 127))
+                        (= c ?\") (= c ?\\))
               i (1+ i))))
     found))
 
@@ -137,8 +141,9 @@ each pack and past the loose names sharing its first two bytes."
                       ((= c 7) "\\a") ((= c 8) "\\b") ((= c 9) "\\t")
                       ((= c 10) "\\n") ((= c 11) "\\v") ((= c 12) "\\f")
                       ((= c 13) "\\r")
-                      ((or (< c 32) (>= c 127)) (aref ngit--octal-escapes c))
-                      (t (string c)))
+                      ((or (< c 32) (= c 127) (and ngit--quote-high-bytes (> c 127)))
+                       (aref ngit--octal-escapes c))
+                      (t (unibyte-string c)))
                 parts)))
       (push "\"" parts)
       (apply #'concat (nreverse parts)))))
@@ -412,7 +417,8 @@ Each object is also verified against its SHA-1 before it is printed."
     ("ls-files" . ngit-cli-list-files)
     ("config" . ngit-cmd-config-write)
     ("check-attr" . ngit-cmd-check-attr)
-    ("status" . ngit-cmd-status)
+    ("status" . ngit-cli-status)
+    ("status-server" . ngit-cmd-status-server)
     ("diff" . ngit-cmd-diff)
     ("merge-file" . ngit-cmd-merge-file)
     ("merge" . ngit-cmd-merge)
@@ -449,35 +455,210 @@ Each object is also verified against its SHA-1 before it is printed."
   (require 'ngit-ls-files)
   (ngit-cmd-list-files repo args))
 
-(defun ngit-main (args)
-  "Run the git-style command line ARGS; return the exit status."
+(defun ngit-cli-status (repo args)
+  "Render status using the repository's byte-quoting policy."
+  (let ((ngit--quote-high-bytes (ngit-config-bool repo "core.quotepath" t)))
+    (ngit-cmd-status repo args)))
+
+(defun ngit-cli--split-alias (name value)
+  "Split VALUE using Git's split_cmdline rules for alias NAME."
+  (let ((i 0) (n (length value)) quote word words)
+    (while (< i n)
+      (let ((c (aref value i)))
+        (cond
+         ((and (null quote) (memq c '(32 9 10 13)))
+          (push (apply #'string (nreverse word)) words)
+          (setq word nil)
+          (while (and (< (1+ i) n) (memq (aref value (1+ i)) '(32 9 10 13)))
+            (setq i (1+ i))))
+         ((and (null quote) (memq c '(?\' ?\"))) (setq quote c))
+         ((eq c quote) (setq quote nil))
+         (t
+          (when (and (= c ?\\) (not (eq quote ?\')))
+            (setq i (1+ i))
+            (when (= i n)
+              (ngit--die "fatal: bad alias.%s string: cmdline ends with \\" name))
+            (setq c (aref value i)))
+          (push c word))))
+      (setq i (1+ i)))
+    (when quote (ngit--die "fatal: bad alias.%s string: unclosed quote" name))
+    (nreverse (cons (apply #'string (nreverse word)) words))))
+
+(defvar ngit-cli--alias-paginate nil "Pager choice accumulated during alias expansion.")
+(defvar ngit--config-pager-command-child)
+
+(defun ngit-cli--alias-options (name args)
+  "Consume safe global options in alias NAME's ARGS."
+  (while (and args (string-prefix-p "-" (car args)))
+    (let ((option (pop args)))
+      (cond
+       ((member option '("-p" "--paginate")) (setq ngit-cli--alias-paginate t))
+       ((or (member option '("-c" "--config-env"))
+            (string-prefix-p "--config-env=" option))
+        (require 'ngit-config-parameters)
+        (let ((value (if (string-prefix-p "--config-env=" option)
+                         (substring option 13) (pop args))))
+          (unless value
+            (ngit-config-parameters--usage
+             (if (equal option "-c") "-c expects a configuration string"
+               "no config key given for --config-env")))
+          (if (equal option "-c") (ngit-config-parameters--push value)
+            (ngit-config-parameters--push-env value))
+          (setq ngit--config-cache nil)))
+       ((or (member option '("-C" "--bare" "--git-dir" "--work-tree"
+                             "-P" "--no-pager"))
+            (string-prefix-p "--git-dir=" option)
+            (string-prefix-p "--work-tree=" option))
+        (ngit--die "fatal: alias '%s' changes environment variables.\nYou can use '!git' in the alias to do this" name))
+       (t
+        (require 'ngit-config-parameters)
+        (ngit-config-parameters--usage (concat "unknown option: " option))))))
+  (unless args (ngit--die "fatal: empty alias for %s" name))
+  args)
+
+(defun ngit-cli--shell-alias (repo value args)
+  "Run shell alias VALUE with appended ARGS in REPO's worktree."
+  (require 'ngit-hook)
+  (let* ((shell (substring value 1))
+         (environment (ngit-hook--env-apply
+                       process-environment
+                       (if repo (ngit-hook--repository-env repo) '("GIT_PREFIX="))))
+         (cwd (if repo (ngit--hook-cwd repo) default-directory))
+         (av (ngit-transport--cstring-vector
+              (append (list "/bin/sh" "-c"
+                            (if args (concat shell " \"$@\"") shell) shell) args)))
+         (ev (ngit-transport--cstring-vector environment))
+         (cv (ngit-transport--cstring-vector (list cwd)))
+         (pid (if (and (boundp 'ngit--config-pager-command-child)
+                       ngit--config-pager-command-child)
+                  0
+                (syscall-direct ngit-transport--sys-fork 0 0 0 0 0 0))))
+    ;; Shell aliases inherit all three standard descriptors, including stdin.
+    ;; The hook runner intentionally replaces stdin, so use its byte-safe
+    ;; argv/environment and wait substrate without its descriptor redirection.
+    ;; A disposable pager writer becomes the shell itself: its supervisor can
+    ;; then cancel and reap that exact PID, matching Git's clean_on_exit policy.
+    (when (= pid 0)
+      (when (< (syscall-direct ngit-transport--sys-chdir
+                              (ptr-read-u64 (cdr cv) 0) 0 0 0 0 0) 0)
+        (syscall-direct ngit-transport--sys-exit 128 0 0 0 0 0))
+      (syscall-direct ngit-transport--sys-execve
+                      (ptr-read-u64 (cdr av) 0) (cdr av) (cdr ev) 0 0 0)
+      (syscall-direct ngit-transport--sys-exit 127 0 0 0 0 0))
+    (nl-ffi-memory-release (car av))
+    (nl-ffi-memory-release (car ev))
+    (nl-ffi-memory-release (car cv))
+    (when (< pid 0) (ngit--die "fatal: fork failed (errno %d)" (- pid)))
+    (ngit-transport-close (vector ngit-transport--tag pid -1 -1 nil nil))))
+
+(defun ngit-cli--expand-alias (args)
+  "Return expanded ARGS, or a numeric shell-alias exit status."
+  (let ((original (car args)) seen alias repo result)
+    (while (and (listp args) (not (assoc (car args) ngit--commands))
+                (progn
+                  (setq repo (condition-case nil (ngit-discover) (error nil))
+                        alias (ngit-config-get repo (concat "alias." (car args))))
+                  alias))
+      (let ((name (car args)))
+        (when (member name seen)
+          (ngit--die "fatal: alias loop detected: expansion of '%s' does not terminate:%s"
+                     original
+                     (mapconcat (lambda (item)
+                                  (concat "\n  " item
+                                          (cond ((equal item name) " <==")
+                                                ((equal item (car seen)) " ==>")
+                                                (t ""))))
+                                (nreverse seen) "")))
+        (push name seen)
+        (unless (stringp alias) (setq alias ""))
+        (if (string-prefix-p "!" alias)
+            (setq result
+                  (if (and ngit-cli--alias-paginate
+                           (fboundp 'ngit--config-with-pager)
+                           (ngit--config-pager-tty-p 1))
+                      (ngit--config-with-pager
+                       (lambda (arguments) (ngit-cli--shell-alias repo alias arguments))
+                       (cdr args))
+                    (ngit-cli--shell-alias repo alias (cdr args)))
+                  args nil)
+          (let ((expanded (ngit-cli--alias-options name (ngit-cli--split-alias name alias))))
+            (when (equal name (car expanded)) (ngit--die "fatal: recursive alias: %s" name))
+            (setq args (append expanded (cdr args)))))))
+    (cond
+     (result result)
+     ((and seen (not (assoc (car args) ngit--commands)))
+      (ngit-native-write-stderr
+       (format "expansion of alias '%s' failed; '%s' is not a git command\n" original (car args)))
+      1)
+     (t
+      (when (and seen (boundp 'ngit-main--lazy-modules))
+        (dolist (module (cdr (assoc (car args) ngit-main--lazy-modules)))
+          (require (intern module))))
+      args))))
+
+(defun ngit-cli--main (args)
+  "Dispatch command line ARGS after global configuration processing."
   (let ((default-directory default-directory)
         (ngit--invocation-directory nil)
+        (ngit-cli--alias-paginate nil)
         (ngit--out nil))
     (while (and args (string= (car args) "-C"))
       (setq default-directory (file-name-as-directory
                                (expand-file-name (cadr args)))
             args (cddr args)))
     (setq ngit--invocation-directory default-directory)
-    (let ((cmd (assoc (car args) ngit--commands)))
-      (if (null cmd)
-          (progn (ngit-native-write-stderr (format "ngit: unsupported command: %s\n" (car args))) 1)
-        (condition-case err
-            (prog1 (funcall (cdr cmd)
-                            (if (member (car cmd) '("init" "clone" "ls-remote" "merge-file" "index-pack" "verify-pack" "config"))
-                                (condition-case nil (ngit-discover) (error nil))
-                              (ngit-discover))
-                            (cdr args))
-              (ngit--flush))
-          (error
-           (ngit--flush)
-           (unless (and (eq (car err) 'ngit-fatal) (equal (cadr err) ""))
-             (ngit-native-write-stderr
-              (concat (if (eq (car err) 'ngit-fatal)
-                          (cadr err)
-                        (error-message-string err))
-                      "\n")))
-           (or (and (eq (car err) 'ngit-fatal) (nth 2 err)) 128)))))))
+    (condition-case err
+        (progn
+          (unless (assoc (car args) ngit--commands)
+            (setq args (ngit-cli--expand-alias args))
+            ;; Re-enter the command boundary after expansion so config and
+            ;; pager handling sees the actual command.  -c values have already
+            ;; been exported by the config parser and survive this boundary.
+            (when (and (listp args) (assoc (car args) ngit--commands))
+              (setq args (ngit-main (if ngit-cli--alias-paginate
+                                        (cons "-p" args) args)))))
+          (if (numberp args) args
+            (let ((cmd (assoc (car args) ngit--commands)))
+              (if (null cmd)
+                  (progn
+                    (ngit-native-write-stderr
+                     (format "ngit: unsupported command: %s\n" (car args)))
+                    1)
+                (prog1
+                    (funcall (cdr cmd)
+                             (if (member (car cmd) '("init" "clone" "ls-remote" "merge-file" "index-pack" "verify-pack" "config"))
+                                 (condition-case nil (ngit-discover) (error nil))
+                               (ngit-discover))
+                             (cdr args))
+                  (ngit--flush))))))
+      (error
+       (ngit--flush)
+       (unless (and (eq (car err) 'ngit-fatal) (equal (cadr err) ""))
+         (ngit-native-write-stderr
+          (concat (if (eq (car err) 'ngit-fatal)
+                      (cadr err)
+                    (error-message-string err))
+                  "\n")))
+       (or (and (eq (car err) 'ngit-fatal) (nth 2 err)) 128)))))
+
+(defun ngit-main (args)
+  "Run the git-style command line ARGS; return the exit status."
+  ;; Config may load before or after the CLI.  Resolve the boundary on each
+  ;; call, keeping standalone CLI loading usable without generic advice.
+  (let ((scan args) (kept nil) (server nil))
+    ;; A pipe protocol owns stdout even when an invocation asks for a pager.
+    ;; Inspect only global options, preserving option values and command args.
+    (while (and scan (string-prefix-p "-" (car scan)))
+      (let ((option (pop scan)))
+        (unless (member option '("-p" "--paginate" "-P" "--no-pager"))
+          (push option kept)
+          (when (member option '("-C" "-c" "--config-env" "--git-dir" "--work-tree"))
+            (when scan (push (pop scan) kept))))))
+    (setq server (equal (car scan) "status-server"))
+    (when server (setq args (append (nreverse kept) scan)))
+    (if (fboundp 'ngit--config-main)
+        (ngit--config-main #'ngit-cli--main args)
+      (ngit-cli--main args))))
 
 (provide 'ngit-cli)
 

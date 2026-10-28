@@ -1,0 +1,71 @@
+#+TITLE: Retained configuration for selected status updates
+#+STATUS: IMPLEMENTED; acceptance is measured by tools/ai/ngit-status-config-progress.org
+
+* Objective
+
+Make immediate ordinary tracked-file edits cheaper than Git CLI in the fixed
+1,201-file fixture, while retaining exact porcelain output and existing
+invalidation/error behavior. The previous edit comparison measured resident
+ngit at 19.474 ms and Git at 3.092 ms. Instrumented inclusive timings identify
+configuration rebuilding as the dominant cost; these timings are diagnostic,
+not additive performance predictions.
+
+* Configuration snapshot
+
+Retain parsed configuration, origins, startup entries/repository identity,
+validation identity, raw text, command parameters and any required read context
+inside the single session. Existing session slots remain stable. Bind retained
+values only while entering the public API; never replace unrelated caller
+globals. Capture a successful state only when its repository and watcher
+certificate are still current. A full refresh, policy/metadata invalidation,
+close, failed computation or failed initialization discards the entire snapshot.
+Clear bootstrap state again before the certified post-watch computation.
+All abnormal exits, including quit and nonlocal throw, invalidate published
+state. Incomplete opens close the active owner before propagating the exit.
+
+Cached output and retained policy values require the existing healthy coverage
+certificate. Unsupported/uncached repositories must read fresh on every status
+request. Environment changes still require close/reopen; command parameters
+and repository selection remain fixed. Do not loosen watcher eligibility,
+rename/flag restrictions, transport framing or existing ownership rules.
+
+Prefer the existing configuration reader/cache contract. The retained-only
+candidate measured 4.753 ms versus Git's 3.122 ms, so stable filemode/quotePath
+booleans are also resolved once per certified configuration identity. A final
+optional policy vector on =ngit-wt-changes= preserves all omitted-argument
+callers. Render uses the same certified vector. Invalidate both with the
+snapshot. Do not modify the shared NeLisp runtime or assume that its
+native build compiles every application function. Any further optimization
+must follow a new measured bottleneck and preserve exact behavior.
+
+The original pipe reader performed seven input syscalls for =status\n=.
+Bounded chunk input may remove that per-byte loop while preserving pipelined
+verbs, split input, the 4096-byte line limit, partial EOF and terminal write
+errors. The protocol tests cover those boundaries; no environment validation
+or filesystem certificate checks are removed for this optimization.
+
+Native workspace reuse is private to the session. Retain the path/stat owners
+together with their matching root/directory metadata; reset, bootstrap, failed
+open, abnormal exit and close release aliased or partially allocated owners
+exactly once. Unrelated caller buffers remain outside this ownership scope.
+The server may separately reuse a fixed 64 KiB output buffer. Larger frames
+and writes outside that server keep temporary allocation, and every server
+exit releases its private output owner.
+
+* Acceptance and measurement
+
+The new ledger defines nine criteria before implementation. Keep the existing
+eleven-criterion resident-status ledger unchanged. New tests count actual
+configuration loads across selected updates, verify refresh/error/private
+context lifecycles and calibrate the verifier against the frozen pre-change
+implementation. Existing output/invalidation/recovery/boundary and ordinary
+CLI tests remain required.
+
+Measure at least 24 alternating resident/Git samples for both different-size
+and index-size-preserving edits to one tracked file. The latter must exercise
+content checking. Use the same temporary repository and startup environment,
+verified/primed Git untracked cache, no fsmonitor and optional locks disabled.
+Verify every output, selected-entry counts and absence of unexpected full
+refresh. Report stable dirty-tree latency and cold startup separately. The
+performance criterion passes only if both edit medians beat Git CLI; preserve
+a failing result as a failing command if the target remains unachieved.

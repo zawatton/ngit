@@ -496,10 +496,185 @@ Git's repository setup reads the local primary config without following includes
       (signal (car failure) (cdr failure)))
     parameters))
 
+(defun ngit--config-pager-tty-p (fd)
+  "Test FD with Linux TCGETS, without relying on Emacs terminal objects."
+  (ngit-native--with-memory (memory 64)
+    (= 0 (syscall-direct 16 fd #x5401 (nl-ffi-memory-address memory) 0 0 0))))
+
+(defvar ngit--config-pager-command-child nil
+  "Non-nil only while dispatching in the disposable pager writer process.")
+
+(defun ngit--config-with-pager (original args)
+  "Run ORIGINAL with ARGS through the explicitly requested terminal pager."
+  (let ((pager (getenv "GIT_PAGER")))
+    (unless pager
+      (let ((ngit--config-early t)
+            (repo (condition-case nil (ngit-discover) (ngit-fatal nil))))
+        (dolist (entry (ngit--config-load repo t))
+          (when (string= (car entry) "core.pager")
+            (unless (stringp (cdr entry))
+              (ngit--die "fatal: missing value for 'core.pager'"))
+            (setq pager (cdr entry)))))
+      (setq pager (or pager (getenv "PAGER") "less")))
+    (if (member pager '("" "cat")) (funcall original args)
+      (require 'ngit-transport-process)
+      (let ((environment nil)
+            (saved-environment process-environment)
+            (saved-in-use (getenv "GIT_PAGER_IN_USE"))
+            connection command-pid command-status command-reaped pager-reaped
+            signal-memory signal-address signal-fd mask-blocked saved-signals requested-signal
+            (position 0) shell-command executable
+            (columns (getenv "COLUMNS")))
+        ;; Match run-command.c: only shell metacharacters select /bin/sh.
+        ;; A missing simple executable is a startup error, not a shell exit.
+        (while (and (< position (length pager)) (not shell-command))
+          (when (string-search (substring pager position (1+ position))
+                               "|&;<>()$`\\\"' \t\n*?[#~=%")
+            (setq shell-command t))
+          (setq position (1+ position)))
+        (unless shell-command
+          (if (string-search "/" pager) (setq executable pager)
+            ;; Git's PATH lookup skips non-executable candidates. The runtime's
+            ;; executable-find currently returns the first existing file.
+            (let ((directories (split-string (or (getenv "PATH") "") ":" nil)))
+              (while (and directories (not executable))
+                (let ((candidate (expand-file-name pager (pop directories))))
+                  (when (and (file-executable-p candidate) (not (file-directory-p candidate)))
+                    (setq executable candidate))))))
+          (unless executable
+            (ngit-native-write-stderr
+             (format "error: cannot run %s: No such file or directory\n" pager))
+            (ngit--die "fatal: unable to execute pager '%s'" pager)))
+        ;; Preserve Git's terminal width before replacing stdout with a pipe.
+        (unless columns
+          (ngit-native--with-memory (memory 8)
+            (let ((address (nl-ffi-memory-address memory)))
+              (when (= 0 (syscall-direct 16 1 #x5413 address 0 0 0))
+                (let ((width (ash (ptr-read-u32 address 0) -16)))
+                  (when (> width 0) (setq columns (number-to-string width))))))))
+        ;; Git supplies these defaults only to the pager and removes its
+        ;; own marker from that child's environment (pager.c).
+        (dolist (entry process-environment)
+          (unless (or (equal entry "GIT_PAGER_IN_USE")
+                      (string-prefix-p "GIT_PAGER_IN_USE=" entry))
+            (push entry environment)))
+        (unless (getenv "LESS") (push "LESS=FRX" environment))
+        (unless (getenv "LV") (push "LV=-c" environment))
+        (when (and columns (not (getenv "COLUMNS")))
+          (push (concat "COLUMNS=" columns) environment))
+        (unwind-protect
+            (progn
+              (setq connection (ngit-transport--spawn
+                                (if shell-command (list "/bin/sh" "-c" pager)
+                                  (list executable))
+                                environment default-directory 'inherit nil
+                                (unless shell-command (list "/bin/sh" executable)) t))
+              (let ((exec-error (ngit-transport--exec-error connection)))
+                (when exec-error
+                  (ngit-native-write-stderr
+                   (if (= exec-error 2)
+                       (format "error: cannot run %s: %s\n" pager
+                               (ngit-transport--errno-string exec-error))
+                     (format "fatal: cannot exec '%s': %s\n" pager
+                             (ngit-transport--errno-string exec-error))))
+                  (ngit--die "fatal: unable to execute pager '%s'" pager)))
+              ;; Keep a supervisor alive even when the writer gets SIGPIPE.
+              ;; It owns the pager and reaps both children before propagating
+              ;; the command's status; no Elisp runs in a signal handler.
+              ;; Block Git's common signals and SIGCHLD after pager startup.
+              ;; A private signalfd makes parent-directed cancellation part of
+              ;; the synchronous wait, including cancellation of a live writer.
+              (setq signal-memory (nl-ffi-memory-allocate 160)
+                    signal-address (nl-ffi-memory-address signal-memory))
+              (ptr-write-u64 signal-address 0 #x15007)
+              (when (< (syscall-direct 14 0 signal-address (+ signal-address 8) 8 0 0) 0)
+                (ngit--die "fatal: unable to block pager signals"))
+              (setq mask-blocked t)
+              (dolist (signal '(1 2 3 13 15))
+                (push (cons signal (ptr-call (nl-ffi--resolve-via-dlsym "signal")
+                                            signal 0 0 0 0 0)) saved-signals))
+              (setq signal-fd (syscall-direct 289 -1 signal-address 8 #x80800 0 0))
+              (when (< signal-fd 0) (ngit--die "fatal: unable to open pager signal descriptor"))
+              (ptr-write-u32 signal-address 144 signal-fd)
+              (ptr-write-u32 signal-address 148 1)
+              (setq command-pid (syscall-direct 57 0 0 0 0 0 0))
+              (when (< command-pid 0) (ngit--die "fatal: unable to fork paginated command"))
+              (when (= command-pid 0)
+                (let ((status
+                       (condition-case err
+                           (progn
+                             (syscall-direct 3 signal-fd 0 0 0 0 0)
+                             (syscall-direct 14 2 (+ signal-address 8) 0 8 0 0)
+                             (when (ngit--config-pager-tty-p 2)
+                               (when (< (syscall-direct 33 (aref connection 2) 2 0 0 0 0) 0)
+                                 (ngit--die "fatal: unable to redirect pager errors")))
+                             (when (< (syscall-direct 33 (aref connection 2) 1 0 0 0 0) 0)
+                               (ngit--die "fatal: unable to redirect pager output"))
+                             (syscall-direct 3 (aref connection 2) 0 0 0 0 0)
+                             (ngit-hook-setenv "GIT_PAGER_IN_USE" "true")
+                             (when (and columns (not (getenv "COLUMNS")))
+                               (ngit-hook-setenv "COLUMNS" columns))
+                             (let ((ngit--config-pager-command-child t))
+                               (funcall original args)))
+                         (error
+                          (ngit-native-write-stderr
+                           (concat (if (eq (car err) 'ngit-fatal) (cadr err)
+                                     (error-message-string err)) "\n"))
+                          (or (and (eq (car err) 'ngit-fatal) (nth 2 err)) 128)))))
+                  ;; Original dispatch flushes its command bytes before return.
+                  ;; Do not unwind the copied supervisor frame in this child.
+                  (syscall-direct 60 status 0 0 0 0 0)))
+              (ngit-transport-finish-write connection)
+              (while (not (and command-reaped pager-reaped))
+                (let ((received 128))
+                  (while (= received 128)
+                    (setq received (syscall-direct 0 signal-fd (+ signal-address 16) 128 0 0 0))
+                    (when (= received 128)
+                      (let ((signal (ptr-read-u32 signal-address 16)))
+                        (when (and (memq signal '(1 2 3 13 15)) (not requested-signal))
+                          (setq requested-signal signal)
+                          (unless command-reaped
+                            (syscall-direct 62 command-pid signal 0 0 0 0))))))
+                  (unless (memq received '(-4 -11))
+                    (ngit--die "fatal: unable to read pager signals")))
+                (unless command-reaped
+                  (let ((pid (syscall-direct 61 command-pid (+ signal-address 16) 1 0 0 0)))
+                    (cond ((= pid command-pid)
+                           (setq command-status (ptr-read-u32 signal-address 16) command-reaped t))
+                          ((not (memq pid '(0 -4))) (ngit--die "fatal: unable to wait for paginated command")))))
+                (unless pager-reaped
+                  (let ((pid (syscall-direct 61 (aref connection 1) (+ signal-address 16) 1 0 0 0)))
+                    (cond ((= pid (aref connection 1))
+                           (setq pager-reaped t)
+                           (aset connection 4 (ngit-transport--status (ptr-read-u32 signal-address 16))))
+                          ((not (memq pid '(0 -4))) (ngit--die "fatal: unable to wait for pager")))))
+                (unless (and command-reaped pager-reaped)
+                  (syscall-direct 7 (+ signal-address 144) 1 100 0 0 0))))
+          (when (and command-pid (> command-pid 0) (not command-reaped))
+            (syscall-direct 62 command-pid 9 0 0 0 0)
+            (ngit-transport--wait (vector 'ngit-transport command-pid -1 -1 nil nil) 0))
+          (when connection (ngit-transport-close connection))
+          (when (and signal-fd (>= signal-fd 0))
+            (syscall-direct 3 signal-fd 0 0 0 0 0))
+          (dolist (entry saved-signals)
+            (ptr-call (nl-ffi--resolve-via-dlsym "signal") (car entry) (cdr entry) 0 0 0 0))
+          (when mask-blocked
+            (syscall-direct 14 2 (+ signal-address 8) 0 8 0 0))
+          (when signal-memory (nl-ffi-memory-release signal-memory))
+          (ngit-hook-setenv "GIT_PAGER_IN_USE" saved-in-use)
+          (setq process-environment saved-environment))
+        (let ((signal (or requested-signal (logand command-status #x7f))))
+          (if (= signal 0) (logand (ash command-status -8) #xff)
+            ;; Reproduce the signal only after the pager has been waited for.
+            (ptr-call (nl-ffi--resolve-via-dlsym "signal") signal 0 0 0 0 0)
+            (syscall-direct 62 (syscall-direct 39 0 0 0 0 0 0) signal 0 0 0 0)
+            (+ 128 signal)))))))
+
 (defun ngit--config-main (original args)
   "Handle global options backed by ngit's existing command paths."
   (condition-case err
    (let ((ngit--config-cli-parameters nil)
+         (paginate nil)
          (default-directory default-directory)
          (ngit--config-text-cache (make-hash-table :test 'equal)))
     (while (and args (string-prefix-p "-" (car args)))
@@ -511,8 +686,8 @@ Git's repository setup reads the local primary config without following includes
               (cdr (assoc name '(("--git-dir" . "GIT_DIR")
                                  ("--work-tree" . "GIT_WORK_TREE"))))))
         (cond
-         ;; ngit never starts a pager, so both pager choices are no-ops.
-         ((member option '("-p" "--paginate" "-P" "--no-pager")) nil)
+         ((member option '("-p" "--paginate")) (setq paginate t))
+         ((member option '("-P" "--no-pager")) (setq paginate nil))
          ((or environment (member option '("-c" "-C" "--config-env"))
               (string= name "--config-env"))
           (unless equal (setq value (pop args)))
@@ -562,14 +737,12 @@ Git's repository setup reads the local primary config without following includes
                                 (funcall handler repo arguments))))
                       ngit--commands)
               ngit--commands)))
-      (funcall original args)))
+      (if (and paginate (ngit--config-pager-tty-p 1))
+          (ngit--config-with-pager original args)
+        (funcall original args))))
    (ngit-fatal
     (ngit-native-write-stderr (concat (cadr err) "\n"))
     (or (nth 2 err) 128))))
-
-;; Config is loaded after the CLI; keep global config arguments at this
-;; boundary so all command implementations see the same parameter scope.
-(advice-add 'ngit-main :around #'ngit--config-main)
 
 (defvar ngit--config-cache nil "(REPO . ENTRIES) of the last config read.")
 (defvar ngit--config-entry-origins nil "Origins of entries in the config cache.")

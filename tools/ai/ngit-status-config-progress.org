@@ -1,0 +1,45 @@
+#+TITLE: ngit configuration reuse and immediate-edit speed
+#+NOTE: Nine criteria defined before implementation on 2026-10-28. Existing resident-status criteria remain unchanged. C3.2 gained four split/chunk protocol regressions with the measured reader optimization; the denominator remains nine. Scope: docs/status-config-cache.org.
+
+* C1 Retained configuration and exact status output
+
+** C1.1 Selected updates reuse certified configuration without new configuration loads
+#+TIMEOUT: 600
+cmd: python3 test/status-session-config.py reuse
+
+** C1.2 Policy, metadata and external configuration changes discard retained state
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py invalidation
+
+** C1.3 End to end: clean, dirty and selected edit requests retain exact Git output
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py basic && python3 test/status-session.py incremental
+
+* C2 Ownership and conservative invalidation
+
+** C2.1 Refresh, close, failure and caller context boundaries release configuration snapshots safely
+#+TIMEOUT: 600
+cmd: python3 test/status-session-config.py ownership
+
+** C2.2 Unproven coverage and watch recovery cannot reuse retained policy state
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py recovery && python3 test/status-session.py boundaries
+
+** C2.3 End to end: edits, external Git and configuration transitions remain coherent
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py e2e
+
+* C3 Calibration, regression and immediate-edit speed
+
+** C3.1 The original configuration reload behavior and corrupt output are rejected by the verifier
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_STATUS_CONFIG_BASELINE
+cmd: python3 test/status-session-config.py controls
+
+** C3.2 Ordinary index, status, configuration, aliases and framed resource behavior retain regression coverage
+#+TIMEOUT: 600
+cmd: sh test/compare.sh index && sh test/compare.sh status && sh test/compare.sh status-long && sh test/audit-config.sh e2e && python3 test/h-alias.py e2e && python3 test/status-session.py protocol && python3 test/status-session.py resources && python3 test/status-session-config.py protocol
+
+** C3.3 End to end: byte-verified different-size and same-size immediate edit medians both beat Git CLI
+#+TIMEOUT: 600
+cmd: python3 test/status-session-config.py benchmark

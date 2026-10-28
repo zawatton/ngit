@@ -281,8 +281,11 @@ when the variable is unset.
 
 ** NeLisp performance notes
 
-The interpreter costs tens of microseconds per primitive call, and several
-primitives scale with the whole string length.  Measured on 2026-10-17:
+Primitive costs depend on the runtime build, value representation and
+execution path. The following measurements describe the 2026-10-17 runtime
+and should be remeasured before choosing an optimization for a newer build.
+That interpreter cost tens of microseconds per primitive call, and several
+primitives scaled with the whole string length:
 =string-search= with a START argument ~3–25 ms, =format= ~0.7 ms, a
 regexp match ~1–17 ms, an =aref= a few µs.  Hot paths therefore use =aref=
 loops and lookup tables instead of =string-search=, =format= and regexps.
@@ -290,7 +293,7 @@ loops and lookup tables instead of =string-search=, =format= and regexps.
 ~13 µs), so per-entry sets are keyed by index positions.  =maphash= costs
 tens of milliseconds even on a small table, so tables keep side lists.
 
-The faster NeLisp build (=~/.local/bin/nelisp= from the anvil build) makes
+The faster NeLisp build used in that comparison (=~/.local/bin/nelisp= from the anvil build) makes
 =string-search= native (proportional to the string length per call), which
 ngit uses for tree lookups; the older =target/nelisp= runs ngit about four
 times slower.  Objects are found through the loose listing of their
@@ -314,6 +317,58 @@ from source.  =tools/compile.el= works around three NeLisp limits found on
 neither =#@= lazy docstrings nor =#N==/=#N#= labels.  =NGIT_PROFILE_FNS=
 (with =NGIT_PROFILE=1=) adds space-separated function names to the
 profiled phases.
+
+** Command startup
+
+The CLI calls its configuration boundary directly. Loading a generic advice
+implementation for this one application-owned wrapper dominated startup.
+On 2026-10-28, paired fresh-process measurements on the same fixture reduced
+default CLI wall time from 1.841 to 0.450 seconds for status, 1.826 to 0.470
+for ten log entries, and 1.883 to 0.514 for diff --stat. All outputs and exit
+statuses matched Git. These medians include startup and GC; they do not
+measure primitive throughput or large-repository/network performance.
+Runtime/source identities and samples are recorded in
+=tools/ai/evidence/ngit-startup-after-20261028.json=.
+
+The loader selects source or bytecode modules; it does not explicitly install
+native versions of all ngit functions. Runtime value-layout improvements
+benefit ordinary Lisp code without changing Git data layouts or foreign
+structure sizes in ngit. Further native compilation needs its own admission,
+compatibility and performance checks on the selected runtime.
+
+** Resident status sessions
+
+The experimental =status-server= command keeps one repository open for repeated
+editor queries. It returns =status --porcelain=v1= bytes using a framed pipe
+protocol. Start =bin/ngit -C REPOSITORY status-server=, then send ASCII lines
+=status=, =refresh=, =stats= or =quit=. Responses begin with =OK BYTE_COUNT\n=
+or =ERR EXIT_CODE BYTE_COUNT\n=, followed by exactly that many payload bytes.
+Repository, environment and global options are fixed at startup. A process
+supports one session; the Lisp API is described in =docs/status-session.org=.
+
+On supported local Linux filesystems, inotify permits unchanged output reuse
+and selected-entry checks for ordinary tracked-file edits. Metadata, policy,
+structural changes and watch loss force a full refresh. Unproven dependencies
+disable reuse or return an explicit unsupported error; inspect =cache_enabled=
+and =cache_reason= in =stats=. Includes, symlinked policy files, linked worktrees,
+external repository paths, submodules, clean filters and unsupported index
+flags are outside the initial cached boundary. Existing standard system
+attributes files are refused unless =GIT_ATTR_NOSYSTEM= disables them. Use
+=refresh= after writes that
+inotify cannot observe, including mmap or remote writes and mount replacement.
+
+The intended speed benefit is repeated warm requests. Startup and full refresh
+still perform repository discovery and status computation. The reproducible
+comparison is =python3 test/status-session.py benchmark=; it checks output
+against Git and reports startup, warm round trips and tracked-edit refreshes
+separately.
+
+Certified selected updates also retain private configuration and resolved
+filemode/quoting policy. Configuration changes and abnormal exits discard the
+snapshot. =python3 test/status-session-config.py benchmark= compares immediate
+different-size and same-size tracked edits with Git, including clean/dirty
+transitions; its samples and correctness assertions are separate from warm
+cache-hit measurements. See =docs/status-config-cache.org=.
 
 * Tests
 
@@ -374,7 +429,7 @@ template copying, =--force-if-includes= pushes,
 push.default=matching/nothing, multi-head pulls, submodules (beyond
 gitlink entries), strategy-specific
 rename thresholds, octopus merges, custom merge
-drivers, interactive rebase (and its hooks) and
+drivers, rebase --exec, interactive rebase (and its hooks) and
 merge-preserving rebase (pull refuses rebase=merges on diverged histories and
 rebase=interactive unless HEAD is up to date or fast-forwards, before
 installing fetched objects or updating any ref), rerere, =--fix-thin=, git's delta search depth
@@ -406,3 +461,8 @@ fails to read the name back and keeps the change), and apply --index over
 an intent-to-add entry marked valid by an fsmonitor enabled only through
 GIT_TEST_FSMONITOR; =sh test/apply-gen.sh deferred= carries them as failing
 cases d5-disc-1 and d5-deferred-1.
+
+Relative local clone URLs containing =..= can produce different path spellings
+in =remote.origin.url= and clone reflogs: Git preserves the lexical path,
+while ngit records the normalized absolute path. These pre-existing differences
+remain executable in =python3 test/h-transport.py deferred=.

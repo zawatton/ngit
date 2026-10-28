@@ -1,0 +1,246 @@
+{
+  "runtime": "/home/madblack-21/Cowork/Notes/dev/nelisp/target/anvil/a14b1a2e4/nelisp",
+  "runtime_sha256": "865f5e0a86b0cb2128960fa3f4545c303e1c9c0e4d0ac6fc611a0ce9fceb354c",
+  "profile": "profile/ngit-read-index: 0.004453\nprofile/ngit-diff-tree-index: 0.020309\nprofile/ngit-untracked: 0.014912\nprofile/ngit-main: 0.221229\n",
+  "load_trace": [
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp/packages/nl-ffi/src/nl-ffi-memory.el",
+      "seconds": 0.010232
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp/packages/nl-ffi/src/nl-ffi-loader.el",
+      "seconds": 0.027294
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp/packages/nl-ffi/src/nl-ffi.el",
+      "seconds": 0.036142
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp/packages/nl-ffi/src/nl-ffi-memory.el",
+      "seconds": 0.023584
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-native.el",
+      "seconds": 0.135301
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-store.elc",
+      "seconds": 0.013726
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-rev.elc",
+      "seconds": 0.005499
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-pathspec.elc",
+      "seconds": 0.004652
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-paths.elc",
+      "seconds": 0.003724
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-cli.elc",
+      "seconds": 0.01119
+    },
+    {
+      "file": "gv",
+      "seconds": 0.281134
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp/target/agent-worktrees/integ-wh-20261022-m12/target/integ/src-a6e710746/packages/nelisp-emacs-foundation/src/emacs-eval.el",
+      "seconds": 0.035723
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp/target/agent-worktrees/integ-wh-20261022-m12/target/integ/src-a6e710746/packages/nelisp-emacs-foundation/src/emacs-subr-extras.el",
+      "seconds": 0.061549
+    },
+    {
+      "file": "emacs-char-table",
+      "seconds": 0.147199
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp/target/agent-worktrees/integ-wh-20261022-m12/target/integ/src-a6e710746/packages/nelisp-emacs-foundation/src/emacs-string.el",
+      "seconds": 0.221168
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp/target/agent-worktrees/integ-wh-20261022-m12/target/integ/src-a6e710746/packages/nelisp-emacs-foundation/src/emacs-hash.el",
+      "seconds": 0.012883
+    },
+    {
+      "file": "subr-x",
+      "seconds": 0.505861
+    },
+    {
+      "file": "oclosure",
+      "seconds": 0.736449
+    },
+    {
+      "file": "nadvice",
+      "seconds": 0.233919
+    },
+    {
+      "file": "nelisp-nadvice-substrate",
+      "seconds": 1.400607
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-config.elc",
+      "seconds": 1.472035
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-match.elc",
+      "seconds": 0.037673
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-index.elc",
+      "seconds": 0.005193
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-worktree.elc",
+      "seconds": 0.006698
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-changes.elc",
+      "seconds": 0.006163
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-status.elc",
+      "seconds": 0.008662
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-xdiff.elc",
+      "seconds": 0.007581
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-diff.elc",
+      "seconds": 0.009391
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-write.elc",
+      "seconds": 0.024412
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-add.elc",
+      "seconds": 0.004871
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-commit.elc",
+      "seconds": 0.009951
+    },
+    {
+      "file": "/home/madblack-21/Cowork/Notes/dev/nelisp-git/lisp/ngit-rename.elc",
+      "seconds": 0.005701
+    }
+  ],
+  "startup_probe": [
+    {
+      "tier": null,
+      "label": "probe",
+      "elapsed": 0.017964776954613626,
+      "returncode": 0,
+      "stdout": "(:compile t :compile-defun nil :native-load nil :native-compile nil :cache-backend nil)(:compile t :compile-defun nil :native-load nil :native-compile nil :cache-backend nil)\n",
+      "stderr": ""
+    },
+    {
+      "tier": null,
+      "label": "status",
+      "elapsed": 1.8809059400227852,
+      "returncode": 0,
+      "stdout": " M README.org\n M lisp/ngit-cli.el\n M lisp/ngit-config.el\n M lisp/ngit-transport-process.el\n M tools/ai/git-apply-deferred-progress.org\n?? .serena/\n?? test/gitdir.py\n?? test/gitdir.sh\n?? test/h-alias.py\n?? test/h-pager.py\n?? test/h-transport.py\n?? tools/ai/evidence/gitdir-baseline-d3d48ea.json\n",
+      "stderr": ""
+    },
+    {
+      "tier": "template",
+      "label": "probe",
+      "elapsed": 0.018136855971533805,
+      "returncode": 0,
+      "stdout": "(:compile t :compile-defun nil :native-load nil :native-compile nil :cache-backend nil)(:compile t :compile-defun nil :native-load nil :native-compile nil :cache-backend nil)\n",
+      "stderr": ""
+    },
+    {
+      "tier": "template",
+      "label": "status",
+      "elapsed": 1.9024732880061492,
+      "returncode": 0,
+      "stdout": " M README.org\n M lisp/ngit-cli.el\n M lisp/ngit-config.el\n M lisp/ngit-transport-process.el\n M tools/ai/git-apply-deferred-progress.org\n?? .serena/\n?? test/gitdir.py\n?? test/gitdir.sh\n?? test/h-alias.py\n?? test/h-pager.py\n?? test/h-transport.py\n?? tools/ai/evidence/gitdir-baseline-d3d48ea.json\n",
+      "stderr": ""
+    }
+  ],
+  "before_read_benchmark": {
+    "time_utc": "2026-10-28T03:08:54.727453+00:00",
+    "repo": "/home/madblack-21/Cowork/Notes/dev/nelisp-git",
+    "git_version": "git version 2.47.3",
+    "nelisp": "/home/madblack-21/.local/bin/nelisp",
+    "scope": "Warm-cache CLI wall time on this repository; one warmup per implementation, three measured samples, alternating order; not an isolated-core benchmark or a large-repository/network comparison.",
+    "results": [
+      {
+        "command": "status --porcelain",
+        "seconds": {
+          "git": [
+            0.002718141011428088,
+            0.0023030609590932727,
+            0.002786511031445116
+          ],
+          "ngit": [
+            1.9019904879969545,
+            1.8773640989675187,
+            1.8695419859723188
+          ]
+        },
+        "median_seconds": {
+          "git": 0.002718141011428088,
+          "ngit": 1.8773640989675187
+        },
+        "ngit_over_git": 690.6794353473102,
+        "stdout_stderr_equal": true,
+        "stdout_sha256": "320f3f6d5ba7643969777ee008066c543c50f69308cb8399d924cabb3b253d85"
+      },
+      {
+        "command": "log -10 --format=%H",
+        "seconds": {
+          "git": [
+            0.0019189909799024463,
+            0.0015264200046658516,
+            0.0018190409755334258
+          ],
+          "ngit": [
+            1.8478636390063912,
+            1.8891049130470492,
+            1.8511409100028686
+          ]
+        },
+        "median_seconds": {
+          "git": 0.0018190409755334258,
+          "ngit": 1.8511409100028686
+        },
+        "ngit_over_git": 1017.64662528288,
+        "stdout_stderr_equal": true,
+        "stdout_sha256": "03bb6d754bf0f99dc24bb03fa716f4a8ad2476f5b05418e79a5c0fd61f8c99d2"
+      },
+      {
+        "command": "diff --stat",
+        "seconds": {
+          "git": [
+            0.0042986610205844045,
+            0.004085541993845254,
+            0.004378422047011554
+          ],
+          "ngit": [
+            2.0450879170093685,
+            2.047299016965553,
+            2.012487586005591
+          ]
+        },
+        "median_seconds": {
+          "git": 0.0042986610205844045,
+          "ngit": 2.0450879170093685
+        },
+        "ngit_over_git": 475.7499852201275,
+        "stdout_stderr_equal": true,
+        "stdout_sha256": "9ded25899efc320f0dff28c16eb230e33a7b7a3f9f45ca843c186ce049f76ead"
+      }
+    ]
+  },
+  "source_patch_sha256": "2f9a154747b8693283111f45d7ec43239a1b0f6741a9417059071d7102e0d0a1",
+  "finding": "ngit-config calls advice-add once for its command boundary; this loads nelisp-nadvice-substrate and its dependencies, accounting for about 1.4 seconds of the roughly 1.9-second status invocation. No runtime startup or template-tier speedup was observed."
+}

@@ -1,0 +1,53 @@
+#+TITLE: ngit resident and incremental status
+#+NOTE: Eleven criteria defined before implementation on 2026-10-28. Scope and protocol are in docs/status-session.org. Existing defect and startup ledgers remain separate; no known-red criterion is removed.
+
+* S1 Resident API and framed pipe protocol
+
+** S1.1 Valid, malformed and bounded requests preserve framing and never evaluate input
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py protocol
+
+** S1.2 Session ownership, close, EOF and repeated lifecycles release processes and descriptors
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py resources
+
+** S1.3 End to end: a resident request stream equals Git and one-shot ngit
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py basic
+
+* S2 Filesystem invalidation and selected-entry updates
+
+** S2.1 Unchanged queries reuse output and tracked edits compare only selected entries
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py incremental
+
+** S2.2 External metadata, configuration and ignore/attribute changes invalidate snapshots
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py invalidation
+
+** S2.3 Overflow, watch loss, replacement and unstable scans cannot publish stale cached output
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py recovery
+
+** S2.4 Unproven repository or policy cases use documented safe fallback or explicit refusal
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py boundaries
+
+** S2.5 End to end: edits and external Git operations stay correct throughout one resident session
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py e2e
+
+* S3 Calibration, regression and measured interactive speed
+
+** S3.1 Original unsupported behavior and a deliberately stale cache are rejected by the verifier
+#+TIMEOUT: 600
+#+REQUIRES: NGIT_STATUS_BASELINE
+cmd: python3 test/status-session.py controls
+
+** S3.2 Ordinary index, status and configuration behavior retain their existing regression coverage
+#+TIMEOUT: 600
+cmd: sh test/compare.sh index && sh test/compare.sh status && sh test/compare.sh status-long && sh test/audit-config.sh e2e && python3 test/h-alias.py e2e
+
+** S3.3 End to end: verified warm resident requests outperform Git CLI in the documented fixture, with startup and edit refresh reported separately
+#+TIMEOUT: 600
+cmd: python3 test/status-session.py benchmark

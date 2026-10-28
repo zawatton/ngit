@@ -1,0 +1,27 @@
+#+TITLE: ngit startup alignment with the current NeLisp runtime
+#+NOTE: Six criteria defined before implementation on 2026-10-28. This objective is separate from the closed defect stages. Preserve the existing H fixes and all known D/G failures. Runtime internals and native admission rules are outside this change.+
+* S1 Remove unnecessary startup work while preserving command behavior
+
+** S1.1 Actual runtime identity and the pre-change startup bottleneck are recorded
+evidence: tools/ai/evidence/ngit-startup-before-20261028.json sha256=111bb2c616638ccb1cca1de28e780ddb9f7cfa51b2ba1efc4f38c332f9a9253c
+
+** S1.2 Argument-bearing aliases and command-boundary re-entry still equal Git
+#+TIMEOUT: 600
+cmd: python3 test/h-alias.py all
+
+** S1.3 TTY pagination and owned-child signal handling still equal Git
+#+TIMEOUT: 600
+cmd: python3 test/h-pager.py all
+#+TIMEOUT: 600
+cmd: python3 test/h-pager.py reaping
+
+** S1.4 Config precedence and command-scope options retain their regression coverage
+#+TIMEOUT: 600
+cmd: sh test/audit-config.sh core && sh test/audit-config.sh e2e && sh test/config-includes.sh e2e
+
+** S1.5 Paired fresh-process measurements demonstrate a repeatable default CLI speedup with identical outputs
+evidence: tools/ai/evidence/ngit-startup-after-20261028.json sha256=085ff3b01e5811b49e07c0a9dbadd670f45ce1326814dfe48e69b010996c6257
+
+** S1.6 End-to-end alias, TTY pager and local transport sessions equal Git
+#+TIMEOUT: 600
+cmd: python3 test/h-alias.py e2e && python3 test/h-pager.py e2e && python3 test/h-transport.py e2e

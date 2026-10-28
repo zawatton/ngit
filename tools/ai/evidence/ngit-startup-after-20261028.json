@@ -1,0 +1,104 @@
+{
+  "scope": "CLI wall time including startup and GC, fresh process per observation; one warmup and three measured samples, alternating order; no primitive-throughput claim",
+  "runtime": "/home/madblack-21/Cowork/Notes/dev/nelisp/target/anvil/a14b1a2e4/nelisp",
+  "runtime_sha256": "865f5e0a86b0cb2128960fa3f4545c303e1c9c0e4d0ac6fc611a0ce9fceb354c",
+  "source_roots": {
+    "before": "/home/madblack-21/Cowork/Notes/dev/nelisp-git",
+    "after": "/home/madblack-21/Cowork/Notes/dev/nelisp-git-lane-perf-boundary"
+  },
+  "source_sha256": {
+    "before": {
+      "lisp/ngit-cli.el": "bf978fab725f3b23dceec185fe139ba1bd128bb741c16e4649bed4a2560e921b",
+      "lisp/ngit-config.el": "28b321bd388051bd4861391f4fa1e72eedf623250a43df36f4558cf8a0d3f0e1"
+    },
+    "after": {
+      "lisp/ngit-cli.el": "d524f6ba3fe7652f4aaa676472136ab4fdf156bfd0dc5548ebe687fa825291d4",
+      "lisp/ngit-config.el": "010f8e627481600934fa312b60c2ea85029d54d769fc264f5a2adc06396029e7"
+    }
+  },
+  "load_average": [
+    4.37109375,
+    4.16015625,
+    4.505859375
+  ],
+  "negative_controls": {
+    "output_mismatch_rejected": true,
+    "equal_timings_rejected": true
+  },
+  "observations_checked": 24,
+  "results": [
+    {
+      "command": [
+        "status",
+        "--porcelain"
+      ],
+      "samples_seconds": {
+        "before": [
+          1.856296651007142,
+          1.8409787770360708,
+          1.8235814809449948
+        ],
+        "after": [
+          0.44524089398328215,
+          0.44996686500962824,
+          0.45081823598593473
+        ]
+      },
+      "median_seconds": {
+        "before": 1.8409787770360708,
+        "after": 0.44996686500962824
+      },
+      "outputs_equal_git": true,
+      "stdout_sha256": "941e1bb7e6adbb2dd7e510218fc1023ade874ffa3d560678fd970e9bb7d2df4f"
+    },
+    {
+      "command": [
+        "log",
+        "-10",
+        "--format=%H"
+      ],
+      "samples_seconds": {
+        "before": [
+          1.821824730024673,
+          1.825728960975539,
+          1.8664257050259039
+        ],
+        "after": [
+          0.49326931103132665,
+          0.4699251219863072,
+          0.4673669019830413
+        ]
+      },
+      "median_seconds": {
+        "before": 1.825728960975539,
+        "after": 0.4699251219863072
+      },
+      "outputs_equal_git": true,
+      "stdout_sha256": "24bc48af2015dc39cbefb46cb4b2cf03415b4b7e8c5b7e284e8d392b7b99d56e"
+    },
+    {
+      "command": [
+        "diff",
+        "--stat"
+      ],
+      "samples_seconds": {
+        "before": [
+          1.8689797759870999,
+          1.913166061975062,
+          1.8828194999950938
+        ],
+        "after": [
+          0.5202834000228904,
+          0.5141993070137687,
+          0.509577686956618
+        ]
+      },
+      "median_seconds": {
+        "before": 1.8828194999950938,
+        "after": 0.5141993070137687
+      },
+      "outputs_equal_git": true,
+      "stdout_sha256": "653220277945490aaaf2c0f81ec2df79921141dd99e7ac50387b8fcbec86398c"
+    }
+  ]
+}

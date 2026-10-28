@@ -195,17 +195,20 @@ second keeps the first three)."
           (when (memq 'modified dirty) (push 'modified flags)))
         (cons (or head-bin index-bin) flags)))))
 
-(defun ngit-wt-changes (repo &optional want-data size-shortcut selected)
+(defun ngit-wt-changes (repo &optional want-data size-shortcut selected filemode-policy)
   "Return the changes from REPO's index to its work tree.
 With WANT-DATA, changed regular files and symlinks carry their content.
 With SIZE-SHORTCUT (git's refresh logic, read-cache.c ie_modified), a
 size that differs from a nonzero cached size counts as modified without
 reading the file, even when end-of-line conversion would make the
 contents equal; diff compares contents instead.  SELECTED, when non-nil,
-is a vector of entries still requiring comparison after a refresh."
+is a vector of entries still requiring comparison after a refresh.
+FILEMODE-POLICY, when non-nil, is a private policy vector whose first
+element is the certified core.filemode boolean; nil reads current config."
   (let* ((index (ngit-read-index repo))
          (entries (or selected (aref index 0)))
-         (filemode (ngit-config-bool repo "core.filemode" t))
+         (filemode (if filemode-policy (aref filemode-policy 0)
+                     (ngit-config-bool repo "core.filemode" t)))
          (raw (aref index 1))
          ;; Version 2/3 names are NUL-terminated in place (see ngit-index).
          (native (and (/= (aref index 2) 4) (aref index 6)))
@@ -274,8 +277,13 @@ is a vector of entries still requiring comparison after a refresh."
 
 ;;;; Untracked files
 
+(defvar ngit--directory-read-observer nil
+  "Optional function called before reading a directory's names.")
+
 (defun ngit--dir-names (abs)
   "Return the entry names of directory ABS as unibyte strings."
+  (when ngit--directory-read-observer
+    (funcall ngit--directory-read-observer abs))
   (let ((names nil))
     (dolist (n (directory-files abs nil nil t))
       (unless (member n '("." ".." ".git"))

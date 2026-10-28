@@ -57,6 +57,24 @@ exit code, stdout, stderr and repository state (refs, index, work tree).
 `NGIT_UX_ONLY` (comma-separated case-name prefixes) selects cases; a
 selection with no comparisons exits 1.
 
+On 2026-10-28, audit17 found a daily-use regression in stage G: an absolute
+work-tree override made worktree add overwrite main-tree changes and made
+worktree remove delete a dirty linked tree. The exit rule fired. The seven
+stage-G Lisp files were restored to e9d9fdb; the old README caveat and the
+full failing gitdir suite are retained. No further G fix round is authorized.
+Stage H adds eight criteria (40 -> 48) before implementation. It addresses
+argument-bearing aliases, forced pagination on a TTY, and relative local
+transport URLs under explicit repository environment overrides. Rebase
+--exec is an unsupported feature and is documented as such. The two closed
+stage-D cases stay failing; H does not reopen either closed stage.
+The first independent H audit executed two new-path gaps: alias-local -p
+did not start a pager, and SIGPIPE could orphan a pager that closed stdin
+but stayed alive. H.9 and H.10 were added before the repair (48 -> 50).
+They remain executable failures until their focused regressions pass.
+The focused repair review also covered non-executable PATH pager diagnostics
+under H.3 and direct supervisor termination/live-command cancellation under
+H.10; these refine the existing contracts without changing the denominator.
+
 * D0 Calibration
 
 ** D0.1 Before implementation the deferred mode fails on 9637206 by compared cases (9 of 12; report recorded)
@@ -224,3 +242,51 @@ cmd: env NGIT_UX_ONLY=g-reg3- sh test/gitdir.sh all
 ** G.5 README no longer lists the remaining divergences
 #+TIMEOUT: 60
 cmd: sh -c '! grep -qE "status and rev-parse under them can differ|apply and am still differ|d2-deferred" README.org'
+
+* H Existing CLI and local transport defects
+
+** H.1 Git-versus-Git calibration and red-before controls for all three fixes
+#+TIMEOUT: 600
+cmd: python3 test/h-alias.py controls
+#+TIMEOUT: 600
+cmd: python3 test/h-pager.py controls
+#+TIMEOUT: 600
+cmd: python3 test/h-transport.py controls
+
+** H.2 Aliases with arguments, quoting and command-line arguments equal Git
+#+TIMEOUT: 600
+cmd: python3 test/h-alias.py all
+
+** H.3 Forced pagination on a TTY starts the configured pager as Git does
+#+TIMEOUT: 600
+cmd: python3 test/h-pager.py all
+
+** H.4 Relative fetch and push URLs from subdirectories with explicit repository overrides equal Git
+#+TIMEOUT: 600
+cmd: python3 test/h-transport.py all
+
+** H.5 README records rebase --exec as unsupported
+cmd: rg -q 'rebase --exec' README.org
+
+** H.6 Existing command, hook and history regressions stay green
+#+TIMEOUT: 600
+cmd: mkdir -p target/verification && python3 -u tools/ux-verify.py regression compare > target/verification/ux-regression-compare.log 2>&1
+
+** H.7 The absolute work-tree worktree-add/remove data-loss cases do not regress
+#+TIMEOUT: 600
+cmd: env NGIT_UX_ONLY=g-closeout-worktree- sh test/gitdir.sh all
+
+** H.9 Alias-local -p and --paginate start the real TTY pager as Git does
+#+TIMEOUT: 600
+cmd: python3 test/h-alias.py pager
+#+TIMEOUT: 600
+cmd: python3 test/h-alias.py shell-cancel
+
+** H.10 A pager that closes stdin but stays alive is waited for and reaped before signal exit as Git does
+#+NOTE: Includes SIGPIPE, direct supervisor SIGTERM/SIGHUP, cancellation of a live FIFO-blocked command, and shell-alias cancellation; owned child PIDs must be absent at exit.
+#+TIMEOUT: 600
+cmd: python3 test/h-pager.py reaping
+
+** H.8 End to end: alias-driven sessions, real TTY pager execution and relative fetch/push working sessions equal Git
+#+TIMEOUT: 600
+cmd: python3 test/h-alias.py e2e && python3 test/h-pager.py e2e && python3 test/h-transport.py e2e

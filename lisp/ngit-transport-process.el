@@ -368,8 +368,21 @@ INHERIT-STDOUT is non-nil it retains fd 1, as Git's pre-push runner does."
                   (version (ngit-transport-protocol-version repo service))
                   (argv (if ssh
                             (ngit-transport--ssh-command repo (cdr parsed) service version)
-                          (list (ngit-transport--executable service)
-                                (expand-file-name (car (cdr parsed)))))))
+                          (let* ((environment (getenv "GIT_WORK_TREE"))
+                                 (worktree
+                                  (and repo
+                                       (or (and environment (not (string= environment ""))
+                                                (expand-file-name environment))
+                                           (ngit--hook-worktree repo))))
+                                 (root (and worktree
+                                            (file-name-as-directory (file-truename worktree))))
+                                 (cwd (file-name-as-directory (file-truename default-directory))))
+                            ;; setup.c changes to the worktree only from inside it.
+                            ;; Keep that URL base local to this transport connection.
+                            (list (ngit-transport--executable service)
+                                  (expand-file-name (car (cdr parsed))
+                                                    (if (and root (string-prefix-p root cwd))
+                                                        root default-directory)))))))
              (setcar argv (ngit-transport--executable (car argv)))
              (ngit-transport--spawn argv (ngit-transport--env version))))))
     ;; Slots 6 and 7 belong to HTTP / subprocess status; 8 holds v2 caps.

@@ -8,7 +8,8 @@
 ;;; Code:
 
 (defconst ngit-main--lazy-modules
-  '(("init" "ngit-rename" "ngit-log" "ngit-branch" "ngit-remote")
+  '(("status-server" "ngit-status-watch" "ngit-status-session")
+    ("init" "ngit-rename" "ngit-log" "ngit-branch" "ngit-remote")
     ("remote" "ngit-rename" "ngit-log" "ngit-branch" "ngit-remote")
     ("clone" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-objects" "ngit-pack" "ngit-transport-kernel" "ngit-transport-delta" "ngit-transport-index" "ngit-transport-checkout" "ngit-remote" "ngit-transport-process" "ngit-negotiate" "ngit-transport")
     ("fetch" "ngit-rename" "ngit-log" "ngit-branch" "ngit-checkout" "ngit-reset" "ngit-switch" "ngit-objects" "ngit-pack" "ngit-transport-kernel" "ngit-transport-delta" "ngit-transport-index" "ngit-transport-checkout" "ngit-remote" "ngit-transport-process" "ngit-negotiate" "ngit-transport")

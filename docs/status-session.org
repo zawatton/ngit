@@ -1,0 +1,145 @@
+#+TITLE: Resident status sessions with filesystem-driven incremental updates
+#+STATUS: IMPLEMENTED; acceptance is measured by tools/ai/ngit-status-session-progress.org
+
+* Objective and boundary
+
+Provide an opt-in resident status API and a pipe server for repeated editor
+queries. Ordinary ngit commands retain their existing behavior. The first
+version returns the same bytes as =status --porcelain=v1=, including normal
+untracked-directory collapsing and existing configuration handling. It does
+not claim cold CLI superiority or fix the closed D/G compatibility gaps.
+
+The existing installed NeLisp runtime is used unchanged. Application code
+uses existing raw OS primitives; do not add runtime natives or bypass native
+compiler admission. Keep one active session per process initially, because
+ngit's native worktree buffers and configuration caches are process-global.
+
+* Public interface
+
+- =ngit-status-session-open DIRECTORY=: open a repository-bound session.
+- =ngit-status-session-status SESSION=: return porcelain-v1 output bytes.
+- =ngit-status-session-stats SESSION=: return counters and cache eligibility.
+- =ngit-status-session-refresh SESSION=: invalidate and perform a full read.
+- =ngit-status-session-close SESSION=: idempotently release owned resources.
+- =bin/ngit [-C DIR] [-c KEY=VALUE] status-server=: serialize requests on
+  stdin/stdout using the same API. Repository and command-scope environment
+  are fixed at server startup; requests do not evaluate Lisp or change cwd.
+
+Requests are ASCII lines: =status=, =refresh=, =stats=, =quit=. Successful
+responses are =OK BYTE_COUNT\n= followed by exactly BYTE_COUNT payload bytes.
+Errors are =ERR EXIT_CODE BYTE_COUNT\n= plus payload bytes. Status/refresh
+payloads equal Git porcelain v1. Stats use newline-separated =key=value=
+fields, including requests, cache_hits, full_refreshes, incremental_updates,
+tracked_entries_checked, watch_rebuilds, overflows, and cache_enabled.
+Quit acknowledges an empty payload then exits. EOF closes cleanly; oversized
+or malformed requests fail predictably without evaluating input. Bound line
+length at 4096 bytes and bound retry/queue processing work per request.
+
+* Cache and invalidation contract
+
+Certified sessions retain their private parsed/startup configuration and
+resolved status policy between selected updates. Full refresh, policy changes
+and every abnormal exit discard that state. Uncached reads do not retain it.
+See =status-config-cache.org= for the measured follow-up and acceptance ledger.
+
+Full refresh means fresh repository discovery and invalidation of parsed and
+byte-level config caches, startup/validation caches, refs/pack/attribute state,
+and native cached descriptors. Reuse the existing config invalidator. Keep
+native file and worktree directory descriptor tables private to the session
+and close them before rediscovery, including replacement at the same path.
+The index reader currently drops its native allocation owner. Add explicit
+ownership/release support before retaining or repeatedly refreshing indexes;
+include failed reads and temporary sub-repository reads in ownership handling.
+Preserve existing index slots and add a trailing owner slot plus a narrow
+optional read observer/release helper if needed; ordinary callers retain their
+native fast path. An optional directory-read observer in =ngit--dir-names=
+may collect visited directories while the existing untracked walker runs with
+EXPAND enabled. This reuses ignore semantics and covers empty directories.
+Add tracked ancestor directories and collapsed nested-repository roots too.
+
+Use Linux nonblocking CLOEXEC inotify through existing syscall primitives.
+Monitor relevant worktree directories, Git metadata, and effective external
+config/ignore/attribute dependencies, including missing-file creation and
+atomic replacement. Do not follow directory symlinks blindly. Omit ignored
+subtrees only when their tracked paths and policy dependencies remain covered.
+If dependency coverage or watcher health cannot be established, return freshly
+computed output and disable reuse; never return an uncertified old snapshot.
+Submodules, external clean filters, unsupported filesystem/watch conditions,
+and other unproven dependencies require conservative full refresh or explicit
+unsupported diagnostics. Document the chosen supported boundary.
+Standard system attributes files are not consumed by the existing attribute
+reader. Refuse an existing source unless =GIT_ATTR_NOSYSTEM= disables it, and
+watch missing standard source paths so later creation cannot preserve a cache.
+
+Before reuse, drain queued events. Metadata/policy changes, creates, deletes,
+renames, unknown watch identities, overflow, unmount, watch removal, and root
+replacement invalidate the full snapshot and rebuild coverage as needed.
+Register coverage before publishing a snapshot; drain events after computing
+it and retry boundedly or leave it uncached if changes occurred. Explicit
+refresh always bypasses reuse. Filesystem-monitor limitations such as remote
+or mmap-only writes must be documented; do not promise stronger consistency
+than the monitor can establish. Do not silently enable this for ordinary CLI.
+
+* Incremental tracked edits
+
+The initial incremental certificate excludes include/conditional-include
+policies, symlinked dependency components, linked worktrees/external indexes,
+submodules, clean filters, unsupported mounts and other unproven dependencies.
+Prefer documented uncached full output over attempting an incomplete dependency
+tracer. Cover tracked ancestors even inside ignored trees. Existing and absent
+default/global config and ignore/attribute sources still need coverage.
+Inode watches for tracked regular files can cover writes through hardlink
+aliases; directory watches alone cannot. Explicit refresh is required for
+unobservable mmap/remote/mount-over changes. Do not describe covered-path
+monitoring as arbitrary local-filesystem-write coherence.
+
+Retain the repository/index object and collected status data. For events on
+known ordinary stage-zero regular tracked files, compute only the affected
+entries using the existing =ngit-wt-changes= SELECTED vector. Replace those
+paths in the cached unstaged collection and render through the existing
+porcelain formatter; do not parse/reconstruct status text. Preserve cached
+staged, untracked and branch data only while their dependencies are unchanged.
+Fallback to a full read for unmerged/intent-to-add/type/rename-sensitive or
+otherwise unproven cases. Policy files are never treated as ordinary edits.
+Only modification-only unstaged sets are eligible initially; do not update
+an already rename-reduced collection while other rename candidates exist.
+Exclude unsupported index flags, including assume-valid decoded from the raw
+index flags if necessary. Remove an old dirty change when it becomes clean,
+preserve staged columns, and discard unneeded content payloads after rendering.
+Counters must distinguish selected-entry updates from full rescans so a full
+rescan cannot masquerade as incremental work. No ordinary status algorithm
+or output format changes are required for this first version.
+
+* Watch provider interface
+
+=ngit-status-watch-open PATHS= accepts absolute path strings for existing files
+and directories and returns an opaque owned watcher. Missing dependencies are
+covered by their existing ancestors supplied by the session. Paths use ngit's
+UTF-8 byte representation; do not recode raw inotify names through Latin-1.
+=ngit-status-watch-drain WATCHER= returns a plist with =:paths=, =:structural=,
+=:overflow=, =:lost=, =:events= and =:generation=. File-watch events map back to
+the watched file, directory events to their child pathname. Aliases sharing a
+watch descriptor must retain every mapped pathname. Unknown descriptors or
+unhandled errors invalidate rather than certify reuse. =ngit-status-watch-close=
+is idempotent. Bound watches at 65536 and drained events at 4096; reaching a
+bound disables reuse until coverage is rebuilt. Never subscribe to access,
+open or read-only-close events generated by ngit's own scans. The provider
+does not interpret Git policy and does not invoke subprocesses.
+
+* Verification and performance claims
+
+Keep existing tests intact. Compare session output with Git and one-shot ngit
+on supported fixtures after edits, reverts, external add/commit/reset/checkout,
+new/deleted directories, ignore/attribute/config changes and atomic replacement.
+Exercise malformed frames, EOF/quit, resource release, overflow/watch-loss
+recovery, and conservative fallback. Demonstrate that a broken stale-cache
+implementation fails the verifier before accepting its green result.
+
+Report initial startup/first status separately from warm request latency.
+Use the same fixture, output and environment for Git and the resident API;
+include protocol round trips in warm timings. Warm Git's available caches
+and record their settings. Record changed-file refresh timings separately
+from unchanged cache hits. A warm resident win is an interactive workflow
+result, not a cold CLI or universal performance claim. Every test and service
+probe uses the workspace 8 GiB cap and heavy-run admission; close all owned
+processes and sessions at completion.
