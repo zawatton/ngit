@@ -4,12 +4,12 @@
 * S1 Installation and transition guide
 
 ** S1.1 Requirements, installation, compatibility and navigation match the current implementation
-evidence: README.org sha256=5e3386a625893063d32dd5f337441ccde7959bbe5d907603dd9a2ed97fa21e1c
+evidence: README.org sha256=bf1e3a1fd40084879ce3ea251abdd3f1c974679b50bc8a1973f182f7563c032e
 evidence: docs/command-reference.org sha256=203bd4e914d05a841fe64dd93adb5b3e442adea1188d999c4a57e4f9108c2ada
 evidence: docs/development.org sha256=09cfe211a5ca615e69c8c14849f5b8bc313d648e624a8e1a484131f966587fd1
 
 ** S1.2 README shell examples and local documentation links are checked
-evidence: tools/ai/evidence/ngit-readme-static-20261028.json sha256=48520a342a90980d2899bec6ebe3121a033507314137338b0760769a2b31d99d
+evidence: tools/ai/evidence/ngit-readme-static-20261028.json sha256=1db262eeee65ec9a809bb60b524303ea4aee00358ab7da2637f48d1eb96eb9d2
 
 ** S1.3 End to end: the documented workflow shares a repository with Git and returns to Git
 evidence: tools/ai/evidence/ngit-readme-workflow-20261028.json sha256=dcc7c24c7f0a54df0a6dc4bdb6d53e5ac35e08704686e8729a012341b8fececf

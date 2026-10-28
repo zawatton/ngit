@@ -16,10 +16,10 @@ The current native implementation targets *Linux x86_64*.
 - [[#create-your-first-repository][Create your first repository]]
 - [[#switch-from-git][Switch from Git]]
 - [[#daily-commands][Daily commands]]
-- [[#remotes][Remotes and authentication]]
-- [[#performance][Performance and editor integration]]
+- [[#remotes-and-authentication][Remotes and authentication]]
+- [[#performance-and-editor-integration][Performance and editor integration]]
 - [[#troubleshooting][Troubleshooting]]
-- [[#limitations][Compatibility limits]]
+- [[#compatibility-limits][Compatibility limits]]
 - [[file:docs/command-reference.org][Command reference]]
 - [[file:docs/development.org][Architecture, compilation and tests]]
 
@@ -147,7 +147,7 @@ git status --short
 git remote -v
 #+end_src
 
-Check [[#limitations][the compatibility limits]], particularly Git LFS and other
+Check [[#compatibility-limits][the compatibility limits]], particularly Git LFS and other
 clean filters, submodules, sparse checkouts, interactive staging/rebase and
 signed commits. Existing system, global and repository configuration is read;
 there is no separate ngit identity or remote database. Only implemented
@@ -224,7 +224,7 @@ See the [[file:docs/command-reference.org][command reference]] for supported opt
 
 * Remotes and authentication
 :PROPERTIES:
-:CUSTOM_ID: remotes
+:CUSTOM_ID: remotes-and-authentication
 :END:
 
 Existing remotes are shared with Git. For a new repository, add your own URL:
@@ -254,7 +254,7 @@ hard allocation ceiling. See the [[file:docs/command-reference.org][transport re
 
 * Performance and editor integration
 :PROPERTIES:
-:CUSTOM_ID: performance
+:CUSTOM_ID: performance-and-editor-integration
 :END:
 
 Rerun =sh tools/build-elc.sh= after updating ngit to reduce startup overhead.
@@ -305,7 +305,7 @@ exit status and a small reproducer. Remove credentials and private data.
 
 * Compatibility limits
 :PROPERTIES:
-:CUSTOM_ID: limitations
+:CUSTOM_ID: compatibility-limits
 :END:
 
 Dumb HTTP, interactive credential prompts, OAuth and git:// transports,
